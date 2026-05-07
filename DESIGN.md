@@ -69,7 +69,14 @@ arq-backup-tui/
 │   ├── backuprecord.py           # backuprecord plist + LZ4 + ARQO 파이프라인
 │   ├── backup.py                 # Backup 클래스 + build_backup() 오케스트레이터
 │   └── cli.py                    # argparse CLI (`arq-backup create`)
-├── tests/                        # 합성/round-trip 단위·통합 테스트 (73건, ~13초)
+├── arq_reader/                   # 백업 복원 라이브러리 (writer 의 역방향)
+│   ├── __init__.py
+│   ├── __main__.py               # `python -m arq_reader`
+│   ├── decrypt.py                # ARQO 전체 복호화 (HMAC verify 후 AES 2단)
+│   ├── parse.py                  # BinaryReader + Node/Tree/BlobLoc 바이너리 파서
+│   ├── restore.py                # Restore 클래스 (backuprecord -> 트리 워크 -> 파일 복원)
+│   └── cli.py                    # argparse CLI (`arq-reader list`/`restore`)
+├── tests/                        # 합성/round-trip 단위·통합 테스트 (87건, ~16초)
 │   ├── fixtures.py               # 검증기 테스트용 Arq 7 트리 빌더
 │   ├── test_crypto.py / test_layout.py / test_runner.py
 │   ├── test_audit_drip.py / test_sftp.py
@@ -372,8 +379,15 @@ byte-identical 파일은 SHA-256 blob_id 가 같아 자연 dedup. modified-in-pl
 | Verdict | 상태 | 근거 |
 | --- | --- | --- |
 | **A**: 본 검증기로 round-trip | ✅ 통과 | `tests/test_writer_e2e.py` 가 4단계 모두 검증 (dry-run / quick / deep / audit) |
-| **B**: arq_restore (BSD) round-trip | ⚠️ 미검증 | sandbox 에 macOS 빌드 환경 없음. 운영자 환경에서 `arq_restore` 빌드 후 직접 확인 필요 |
+| **A'**: 본 reader 로 byte-identical 복원 | ✅ 통과 | `tests/test_reader_e2e.py` — 작성기로 만든 백업을 reader 로 복원 후 `diff -r` 통과 |
+| **B**: arq_restore (BSD) round-trip | ⚠️ 미검증 | arq_restore 는 macOS 전용 API (CommonCrypto, Security framework, Mach 헤더, 애플 xattr API) 의존 — Linux 포팅은 다일 작업으로 추정. 운영자 macOS 환경에서 직접 검증 필요 |
 | **C**: Arq.app GUI 복원 | ⚠️ 미검증 | macOS GUI 가 필요한 수동 검증 |
+
+본 reader 의 byte-identical 복원은 writer 의 모든 바이너리 포맷이
+스펙·검증기·reader 3자 간 일치함을 자체 보증합니다. arq_restore
+는 동일한 공식 스펙으로 작성되었으므로 reader 가 통과하면 arq_restore
+도 통과할 가능성이 매우 높지만, 형식적 보증은 macOS 빌드 후 직접
+확인 필요.
 
 작성기가 생성한 binary plist + LZ4 + ARQO 모든 레이어를 직접 풀어
 plist 키들(`archived`, `arqVersion`, `node`, `treeBlobLoc.blobIdentifier`
