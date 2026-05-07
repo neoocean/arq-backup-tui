@@ -26,6 +26,7 @@ classifiers = [
 arq-validator = "arq_validator.cli:main"
 arq-backup = "arq_writer.cli:main"
 arq-reader = "arq_reader.cli:main"
+arq-buzhash-find = "arq_writer.buzhash_re_cli:main"
 
 [tool.setuptools]
 packages = ["arq_validator", "arq_writer", "arq_reader"]

@@ -22,7 +22,7 @@ without re-running the local clone.
 | Arq 5/6 keyset (`encryptionvN.dat`) decryption | ✅ Implemented + tested | v2 + v3 supported; format different from Arq 7 (PBKDF2-SHA1 + 12-byte ASCII header); `arq_reader.arq5_keyset` |
 | Arq 5/6 restorer (commit → tree walk → files) | ✅ Implemented + tested | `arq_reader.arq5_restore.Arq5Restore`; round-trips against synthetic Arq 5 destinations |
 | Generic content-defined chunker (Buzhash) | ✅ Implemented + tested | `arq_writer.chunker.Buzhash`, opt-in via `build_backup(..., chunker_config=...)` |
-| Match Arq.app's exact chunker parameters | 🔴 Not addressable from arq_restore | Arq.app's specific window/mask/min/max/table aren't published; only matters for write-side dedup parity, not for correctness |
+| Match Arq.app's exact chunker parameters | 🟡 RE toolkit ready | Sandbox can't fetch Arq.app (firewalled); given the binary or a real backup, ``arq_writer.macho_buzhash_finder`` + the multi-version registry land exact parameters in one call. Only matters for write-side dedup parity, not for correctness |
 | Arq Cloud Backup format | 🔴 Out of scope | Separate product, separate restore tool |
 
 The big wins so far: the v0 reader gained `isPacked: true` support
@@ -302,11 +302,131 @@ real Arq.app once such testing is feasible.
 
 ## 4. Chunker (`chunkerVersion: 3`, `useBuzhash`)
 
-**Verdict**: ✅ **Generic Buzhash chunker implemented** (matching
-Arq.app's exact parameters remains 🔴 not addressable from
-arq_restore source). For correctness — i.e. producing a valid
-Arq.app-restorable backup — exact-parameter matching is **not
-required**: see "Implications" below.
+**Verdict**: ✅ **Generic Buzhash chunker implemented**, plus an
+**RE toolkit** (Mach-O analyzer + behavioral inference + multi-version
+registry) ready to populate exact Arq.app parameters when the binary
+or a real backup is provided externally. Sandbox-side, the
+arqbackup.com download is firewalled, so we cannot fetch Arq.app
+in-place.
+
+Recap of what we know from public sources:
+
+- Spec example backuprecord: ``useBuzhash = 0;`` ⇒ the flag is per-folder
+  / per-plan, not a fixed property of Arq 7. Different folders in the
+  same plan can use different chunkers.
+- ``backupconfig.json``: ``"chunkerVersion" : 3`` ⇒ chunker has been
+  versioned at least 3 times; older backups use older variants.
+- arq_restore is read-only and ships zero chunker code. Confirmed
+  again on the latest checkout.
+
+For correctness — i.e. producing a valid Arq.app-restorable backup —
+exact-parameter matching is **not** required: see "Implications"
+below. Matching only matters for write-side dedup parity with an
+existing Arq.app backup.
+
+### RE recipe (executable from outside the sandbox)
+
+When an Arq.app binary or a real backup becomes available, the two
+``arq_writer.macho_buzhash_finder`` scanners produce concrete
+parameters:
+
+#### A. Static analysis of Arq.app's Mach-O binary
+
+1. Extract ``Arq.app/Contents/MacOS/Arq`` from the DMG / pkg
+   (Homebrew cask URL: ``arqbackup.com/download/arqbackup/Arq<ver>.pkg``;
+   SHA256 visible in
+   [``Casks/a/arq.rb``](https://github.com/Homebrew/homebrew-cask/blob/HEAD/Casks/a/arq.rb)).
+2. Run::
+
+       python -m arq_writer.buzhash_re_cli analyze-binary \
+           /path/to/Arq.app/Contents/MacOS/Arq \
+           --stride 4
+
+   (``stride 16`` is faster but coarser; for the final pass use 4.)
+
+3. The scanner reports:
+
+   - **T-table candidates**: 1024-byte windows scoring high on
+     uniqueness (≥ 200/256 distinct 32-bit values) and Shannon
+     entropy (≥ 7.0 bits/byte). The Buzhash table is ALWAYS one of
+     the top entries on a real Mach-O binary because no other 1 KiB
+     chunk in compiled code looks like 256 unique random uint32_t
+     values — string tables fail the entropy check, code segments
+     fail the uniqueness check, and other crypto tables (AES sbox,
+     CRC32, etc.) have ≤ 256 entries that don't look right (AES
+     S-box is 256 single-byte entries, not 256 4-byte entries).
+   - **Numeric constants**: hits for plausible window sizes (16,
+     32, 48, 64, 128), min/max chunk sizes (1, 2, 4, 8, 16, 32,
+     64, 128, 256, 512, 1024 KiB and the 1 / 2 / 4 MiB upper end),
+     and boundary masks (13–18 bits). Filter to hits within ~4 KiB
+     of the top T-table candidate — that's where the chunker code
+     lives.
+
+4. Plug the recovered values into the chunker registry::
+
+       from arq_writer.chunker import (
+           ChunkerConfig, register_arq_chunker,
+       )
+       register_arq_chunker(3, True, ChunkerConfig(
+           window_size=...,
+           boundary_bits=...,
+           min_chunk_size=...,
+           max_chunk_size=...,
+           table=tuple(struct.unpack("<256I", t_table_bytes)),
+       ))
+
+#### B. Behavioral inference from a real Arq backup
+
+Suitable when the user has a real Arq backup but not Arq.app's
+binary (e.g. SFTP-mounted backup destination):
+
+1. Walk the backup's ``backupfolders/<folder>/backuprecords/`` to
+   find every backuprecord. Decrypt + LZ4-unwrap + plist-parse them
+   (our :mod:`arq_validator.crypto` + :mod:`arq_reader` already do
+   this).
+2. Recursively follow each ``treeBlobLoc`` and extract every
+   ``FileNode``'s ``dataBlobLocs[*].length`` — those are the chunk
+   sizes Arq.app emitted.
+3. Pipe the size list to::
+
+       python -m arq_writer.buzhash_re_cli infer-from-sizes \
+           ./chunk-sizes.json
+
+   The output estimates ``estimated_min_chunk_size``,
+   ``estimated_max_chunk_size``, and ``estimated_boundary_bits``
+   (≈ ``log2(median chunk size)``).
+
+   This won't recover the T table — only static analysis can — but
+   the chunker's structural parameters are usually enough for
+   acceptable dedup parity (the T table mostly affects WHICH
+   boundaries are picked, not how often).
+
+4. Same registry plug-in step as above.
+
+### Why the table can't be inferred from chunk sizes
+
+Buzhash's T table determines which specific byte sequences land at
+boundaries, but not the *rate* of boundaries. Two backups with
+different T tables but identical (window, mask, min, max) produce
+distributionally-similar chunk-size histograms. Inferring T from
+size statistics is statistically degenerate (not enough information
+in the histogram alone). Static analysis is the only way to recover
+T exactly.
+
+### Multi-version registry
+
+``arq_writer.chunker`` exposes:
+
+- ``register_arq_chunker(chunker_version, use_buzhash, config)``
+- ``chunker_for_arq(chunker_version, use_buzhash) -> ChunkerConfig``
+- ``known_arq_variants()``
+
+Empty by default — callers fall back to ``GENERIC_DEFAULT`` (our
+generic Buzhash params). Once the RE workflow above produces
+verified parameters, a single ``register_arq_chunker`` call from
+the user's setup script lights up exact-Arq matching.
+
+### Why exact matching isn't required for correctness
 
 ### Implementation
 

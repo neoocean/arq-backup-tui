@@ -219,3 +219,79 @@ def chunk_bytes(
 ) -> Iterable[bytes]:
     """Convenience wrapper. Equivalent to ``Buzhash(config).chunk(data)``."""
     return Buzhash(config).chunk(data)
+
+
+# ---------------------------------------------------------------------------
+# Multi-version registry for Arq compatibility
+# ---------------------------------------------------------------------------
+#
+# Arq's ``backupconfig.json`` carries a ``chunkerVersion`` (1, 2, 3,
+# ...) and a per-folder ``useBuzhash`` boolean. Different combinations
+# (e.g. ``chunkerVersion=3`` + ``useBuzhash=true``) use different
+# parameters; the spec doesn't publish them.
+#
+# This registry maps known ``(chunkerVersion, useBuzhash)`` tuples
+# to the best ``ChunkerConfig`` we have for that variant. Empty
+# entries fall back to ``DEFAULT`` (our generic Buzhash params),
+# documented in the research doc as "non-matching but correct".
+#
+# When the parameters are reverse-engineered (via Mach-O scan or
+# behavioral inference — see ``macho_buzhash_finder.py``) they're
+# inserted here. The writer's high-level ``chunker_for_arq`` helper
+# always returns a ChunkerConfig — never raises — so callers can
+# write backups even when we don't yet know the exact match.
+
+
+# Generic fallback (= our default ChunkerConfig).
+GENERIC_DEFAULT = ChunkerConfig()
+
+# Known variants live in this dict. Empty for now: see
+# docs/RESEARCH-format-extensions.md §4 for the RE recipe.
+_ARQ_PARAM_REGISTRY: Dict[Tuple[int, bool], ChunkerConfig] = {}
+
+
+def register_arq_chunker(
+    chunker_version: int, use_buzhash: bool, config: ChunkerConfig,
+) -> None:
+    """Plug in a (chunkerVersion, useBuzhash) → ChunkerConfig binding.
+
+    Use this from a setup script after RE has produced concrete
+    parameters, e.g.::
+
+        from arq_writer.chunker import (
+            ChunkerConfig, register_arq_chunker,
+        )
+        register_arq_chunker(3, True, ChunkerConfig(
+            window_size=64,
+            boundary_bits=15,
+            min_chunk_size=4096,
+            max_chunk_size=1048576,
+            table=... ,    # 256-tuple from the Mach-O T table
+        ))
+    """
+    _ARQ_PARAM_REGISTRY[(chunker_version, use_buzhash)] = config
+
+
+def chunker_for_arq(
+    chunker_version: int = 3, use_buzhash: bool = True,
+) -> ChunkerConfig:
+    """Return the registered ChunkerConfig for an Arq variant, or
+    the generic default if unregistered.
+
+    The fallback is documented in the research doc: any deterministic
+    chunker produces a valid Arq.app-restorable backup; matching
+    Arq's exact boundaries only matters for cross-backup dedup.
+    """
+    return _ARQ_PARAM_REGISTRY.get(
+        (chunker_version, use_buzhash), GENERIC_DEFAULT,
+    )
+
+
+def known_arq_variants() -> List[Tuple[int, bool]]:
+    """List currently-registered (chunker_version, use_buzhash) pairs."""
+    return sorted(_ARQ_PARAM_REGISTRY.keys())
+
+
+# Type-only import so the type hints above don't need it earlier.
+from typing import Dict, List, Tuple  # noqa: E402
+
