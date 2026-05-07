@@ -43,6 +43,15 @@ class EventKind(Enum):
     AUDIT_FILE_SKIPPED = "audit_file_skipped"
     AUDIT_PROGRESS = "audit_progress"
 
+    # Audit-drip lifecycle
+    AUDIT_DRIP_FIRE_STARTED = "audit_drip_fire_started"
+    AUDIT_DRIP_FIRE_FINISHED = "audit_drip_fire_finished"
+    AUDIT_DRIP_SWEEP_STARTED = "audit_drip_sweep_started"
+    AUDIT_DRIP_SWEEP_COMPLETED = "audit_drip_sweep_completed"
+    AUDIT_DRIP_PROGRESS = "audit_drip_progress"
+    AUDIT_DRIP_ABORTED = "audit_drip_aborted"
+    AUDIT_DRIP_PAUSED = "audit_drip_paused"
+
     # Diagnostics / informational
     LOG = "log"
 
