@@ -67,6 +67,7 @@ from .json_configs import (
     build_backupplan,
     build_folder_plan,
 )
+from .chunker import Buzhash, ChunkerConfig
 from .lz4_block import lz4_wrap
 from .pack_builder import DEFAULT_MAX_PACK_BYTES, PackBuilder
 from .serialize import write_tree
@@ -166,6 +167,7 @@ class Backup:
         openssl_path: str = "openssl",
         use_packs: bool = False,
         max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
+        chunker_config: Optional[ChunkerConfig] = None,
         callback: Optional[ProgressCb] = None,
     ) -> None:
         self.dest_root = Path(dest_root).resolve()
@@ -189,6 +191,10 @@ class Backup:
         self.openssl_path = openssl_path
         self.use_packs = use_packs
         self.max_pack_bytes = max_pack_bytes
+        self.chunker_config = chunker_config
+        self._chunker: Optional[Buzhash] = (
+            Buzhash(chunker_config) if chunker_config is not None else None
+        )
         self.callback = callback
 
         # Per-run accumulators.
@@ -379,10 +385,19 @@ class Backup:
             _emit(self.callback, "file_read_error",
                   path=str(src), error=str(exc))
             data = b""
-        loc = self._write_blob(data)
+        # When the Buzhash chunker is enabled, files larger than the
+        # min-chunk threshold get split into multiple dataBlobLocs;
+        # restore concatenates them back in order. Empty / tiny files
+        # still produce a single blob (chunk yields the full input).
+        if self._chunker is not None and data:
+            locs = [
+                self._write_blob(piece) for piece in self._chunker.chunk(data)
+            ]
+        else:
+            locs = [self._write_blob(data)]
         st = src.stat()
         node = FileNode(
-            dataBlobLocs=[loc],
+            dataBlobLocs=locs,
             itemSize=len(data),
             containedFilesCount=1,
             mtime_sec=int(st.st_mtime),
@@ -398,7 +413,8 @@ class Backup:
         self.files_written += 1
         _emit(self.callback, "file_written",
               path=str(src), size=len(data),
-              blob_id=loc.blobIdentifier)
+              chunks=len(locs),
+              blob_id=locs[0].blobIdentifier if locs else "")
         return node, len(data), 1
 
     def _walk_dir(self, src: Path) -> Tuple[TreeNode, int, int]:
@@ -558,12 +574,19 @@ def build_backup(
     folder_uuid: Optional[str] = None,
     use_packs: bool = False,
     max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
+    chunker_config: Optional[ChunkerConfig] = None,
 ) -> BackupResult:
     """One-shot convenience wrapper: full plan init + single folder.
 
     ``use_packs=True`` switches blob storage from
     ``standardobjects/`` to the Arq 7 ``treepacks/`` + ``blobpacks/``
     container layout. The reader handles both transparently.
+
+    ``chunker_config`` enables Buzhash content-defined chunking; when
+    present, file content is split into variable-length chunks
+    according to the rolling hash, each becoming its own ``BlobLoc``.
+    Restore concatenates them in order. See
+    :mod:`arq_writer.chunker` for the trade-offs.
     """
     started = time.time()
     bk = Backup(
@@ -576,6 +599,7 @@ def build_backup(
         plan_uuid=plan_uuid,
         use_packs=use_packs,
         max_pack_bytes=max_pack_bytes,
+        chunker_config=chunker_config,
     )
     bk.init_plan()
     rec_path = bk.add_folder(

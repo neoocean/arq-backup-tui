@@ -19,7 +19,10 @@ without re-running the local clone.
 | Arq 5/6 `.pack` / `.index` parsers + builders | ✅ Implemented + tested | Spec is fully documented |
 | Arq 7 pack file emission (write-side) | ✅ Implemented + tested | Confirmed format: plain ARQO concatenation; PackBuilder ships in `arq_writer.pack_builder` |
 | Arq 5/6 `Tree` / `Commit` / `Node` binary parser | ✅ Implemented + tested | All documented versions (Tree v10–v22 ex. v13, Commit v3–v12); ~600 LOC across `arq_reader.arq5_binary` |
-| Chunker (`chunkerVersion: 3`, `useBuzhash`) | 🔴 No public source | Not feasible to RE; needed only for write-side dedup parity with Arq.app |
+| Arq 5/6 keyset (`encryptionvN.dat`) decryption | ✅ Implemented + tested | v2 + v3 supported; format different from Arq 7 (PBKDF2-SHA1 + 12-byte ASCII header); `arq_reader.arq5_keyset` |
+| Arq 5/6 restorer (commit → tree walk → files) | ✅ Implemented + tested | `arq_reader.arq5_restore.Arq5Restore`; round-trips against synthetic Arq 5 destinations |
+| Generic content-defined chunker (Buzhash) | ✅ Implemented + tested | `arq_writer.chunker.Buzhash`, opt-in via `build_backup(..., chunker_config=...)` |
+| Match Arq.app's exact chunker parameters | 🔴 Not addressable from arq_restore | Arq.app's specific window/mask/min/max/table aren't published; only matters for write-side dedup parity, not for correctness |
 | Arq Cloud Backup format | 🔴 Out of scope | Separate product, separate restore tool |
 
 The big wins so far: the v0 reader gained `isPacked: true` support
@@ -299,9 +302,41 @@ real Arq.app once such testing is feasible.
 
 ## 4. Chunker (`chunkerVersion: 3`, `useBuzhash`)
 
-**Verdict**: 🔴 **Not feasible to RE without leaked source or live
-Arq.app inspection**. Required only for write-side dedup parity
-with Arq.app — not for reading or for fresh-backup writing.
+**Verdict**: ✅ **Generic Buzhash chunker implemented** (matching
+Arq.app's exact parameters remains 🔴 not addressable from
+arq_restore source). For correctness — i.e. producing a valid
+Arq.app-restorable backup — exact-parameter matching is **not
+required**: see "Implications" below.
+
+### Implementation
+
+`arq_writer/chunker.py` ships a pure-Python Buzhash implementation:
+
+- 32-bit cyclic-polynomial rolling hash
+- Deterministic 256-entry lookup table (seeded RNG so chunk
+  boundaries are reproducible across machines + Python versions)
+- Configurable window size, boundary mask bits, min / max chunk size
+- Defaults: 48-byte window, 15-bit mask (~32 KiB avg), 4 KiB min,
+  1 MiB max
+- Verified rolling-hash invariant (slide one byte forward = recompute
+  on new window); tested for content-defined boundary stability
+  across differing prefixes and small in-place edits
+
+`Backup(..., chunker_config=...)` and
+`build_backup(..., chunker_config=...)` route file content through
+the chunker; each chunk becomes its own `BlobLoc`. The reader
+concatenates `dataBlobLocs` in writer-recorded order — unchanged.
+
+### What's still published / not addressable
+
+- Arq's specific `T` table, window size, boundary bits, and
+  min / max parameters are not published. arq_restore is read-only
+  and ships zero chunker code. The spec only mentions
+  `chunkerVersion: 3` and a `useBuzhash` boolean.
+- Without operator data or live Arq.app inspection, we can't match
+  Arq's exact chunk boundaries.
+
+### Implications
 
 ### What's published
 
@@ -343,15 +378,17 @@ Either path is feasible but neither is sandbox-runnable today.
 
 ## 5. Arq 5 / Arq 6 read path
 
-**Verdict**: ✅ **Binary parsers implemented + tested** —
-[`arq_reader/arq5_binary.py`](../arq_reader/arq5_binary.py),
-[`tests/test_arq5_binary.py`](../tests/test_arq5_binary.py).
+**Verdict**: ✅ **End-to-end restorer implemented + tested** —
+[`arq_reader/arq5_restore.py`](../arq_reader/arq5_restore.py)
+glues together the keyset decryptor, binary parsers, pack-index
+reader, and ARQO decryptor into an `Arq5Restore` walker analogous
+to v0's `Restore` for Arq 7.
 
-What's still deferred: a top-level "Arq 5 restorer" that uses these
-parsers + the existing `.pack`/`.index` reader to walk an actual
-Arq 5/6 backup destination (analogous to `arq_reader.restore.Restore`
-for Arq 7). Tractable now that all the pieces exist — defer until a
-real Arq 5/6 backup is on hand to test against.
+`tests/test_arq5_restore.py` (9 tests) builds a synthetic Arq 5
+destination from scratch (real Arq 5 backups aren't available in
+the sandbox), restores it, and confirms byte-identical match
+including for Unicode filenames, empty files, and packed files via
+SHA-1-keyed `.pack`/`.index` lookup.
 
 ### What's covered (now)
 
