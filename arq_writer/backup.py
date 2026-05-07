@@ -1,0 +1,523 @@
+"""High-level backup orchestrator.
+
+Walks a source directory tree, encrypts each file's contents into a
+single standalone ``EncryptedObject`` under
+``standardobjects/<2-hex-shard>/<62-hex-blobid>``, builds a ``Tree`` per
+directory (also encrypted into ``standardobjects/``), and writes a
+single ``backuprecord`` describing the run.
+
+Output structure (under ``dest_root``):
+
+    <computer-uuid>/
+        encryptedkeyset.dat
+        backupconfig.json
+        backupfolders.json
+        backupplan.json
+        backupfolders/<folder-uuid>/
+            backupfolder.json
+            backuprecords/00001/<creation-date>.backuprecord
+        standardobjects/
+            <2-hex-shard>/<62-hex-blobid>     # one per blob
+
+This is the v0 writer that intentionally bypasses two genuinely
+under-documented Arq 7 internals (the ``treepacks/`` / ``blobpacks/``
+container layout, and the chunker's ``chunkerVersion: 3 + useBuzhash``
+parameters). The trade-off is more files on disk and weaker dedup of
+modified-in-place files; byte-identical files still dedup via SHA-256
+blob ID. ``arq_restore`` (BSD reference reader) and Arq.app both parse
+this layout correctly because the spec explicitly permits standalone
+``standardobjects/`` storage with ``BlobLoc.isPacked = false``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
+
+from .backuprecord import (
+    build_backuprecord_arqo,
+    build_backuprecord_dict,
+)
+from .constants import (
+    BACKUPFOLDERS_DIR,
+    BACKUPRECORDS_DIR,
+    COMPRESSION_LZ4,
+    KEYSET_FILE,
+    KEYSET_PLAIN_FIELD_LEN,
+    STANDARDOBJECTS_DIR,
+    TREE_VERSION,
+)
+from .crypto_write import (
+    build_encrypted_keyset,
+    build_encrypted_object,
+    compute_blob_id,
+)
+from .json_configs import (
+    build_backupconfig,
+    build_backupfolder_json,
+    build_backupfolders_json,
+    build_backupplan,
+    build_folder_plan,
+)
+from .lz4_block import lz4_wrap
+from .serialize import write_tree
+from .types import BlobLoc, FileNode, Node, Tree, TreeChild, TreeNode
+
+
+ProgressCb = Callable[[str, dict], None]
+
+
+@dataclass
+class BackupResult:
+    """Outcome of a single ``build_backup`` run."""
+
+    dest_root: Path
+    computer_uuid: str
+    plan_uuid: str
+    folder_uuid: str
+    backuprecord_path: Path
+    files_written: int = 0
+    trees_written: int = 0
+    bytes_plaintext: int = 0
+    bytes_on_disk: int = 0
+    blob_ids: List[str] = field(default_factory=list)
+    started_at: float = 0.0
+    finished_at: float = 0.0
+
+    @property
+    def elapsed_sec(self) -> float:
+        return max(0.0, self.finished_at - self.started_at)
+
+
+def _emit(cb: Optional[ProgressCb], kind: str, **payload: object) -> None:
+    if cb is None:
+        return
+    try:
+        cb(kind, dict(payload))
+    except Exception:
+        pass
+
+
+def _shard_for(blob_id: str) -> Tuple[str, str]:
+    """Split a 64-char SHA-256 hex into (shard, name).
+
+    Arq 7 names standalone objects as ``<shard>/<rest>`` where
+    ``shard = blob_id[:2]`` and ``rest = blob_id[2:]`` (62 chars).
+    """
+    return blob_id[:2], blob_id[2:]
+
+
+def _path_for_blob(computer_uuid: str, blob_id: str) -> str:
+    """Absolute on-disk path under the computer's standardobjects/."""
+    shard, rest = _shard_for(blob_id)
+    return f"/{computer_uuid}/{STANDARDOBJECTS_DIR}/{shard}/{rest}"
+
+
+def _absolute(dest_root: Path, rel: str) -> Path:
+    """Resolve a relative-to-computer path under dest_root."""
+    return dest_root / rel.lstrip("/")
+
+
+def _build_file_blobloc(
+    computer_uuid: str, blob_id: str, length_on_disk: int,
+) -> BlobLoc:
+    return BlobLoc(
+        blobIdentifier=blob_id,
+        isPacked=False,
+        relativePath=_path_for_blob(computer_uuid, blob_id),
+        offset=0,
+        length=length_on_disk,
+        stretchEncryptionKey=True,
+        compressionType=COMPRESSION_LZ4,
+    )
+
+
+class Backup:
+    """Stateful backup writer.
+
+    The class is the building block; most callers use the
+    :func:`build_backup` convenience wrapper instead. Keep an instance
+    around if you need to perform a multi-folder backup (call
+    ``init_plan`` once, then ``add_folder`` per source).
+    """
+
+    def __init__(
+        self,
+        dest_root: Path,
+        encryption_password: str,
+        *,
+        backup_name: str = "TUI backup",
+        computer_name: Optional[str] = None,
+        plan_name: Optional[str] = None,
+        computer_uuid: Optional[str] = None,
+        plan_uuid: Optional[str] = None,
+        encryption_key: Optional[bytes] = None,
+        hmac_key: Optional[bytes] = None,
+        blob_id_salt: Optional[bytes] = None,
+        openssl_path: str = "openssl",
+        callback: Optional[ProgressCb] = None,
+    ) -> None:
+        self.dest_root = Path(dest_root).resolve()
+        self.password = encryption_password
+        self.backup_name = backup_name
+        self.computer_name = computer_name or os.uname().nodename
+        self.plan_name = plan_name or backup_name
+        self.computer_uuid = (
+            computer_uuid or str(uuid.uuid4()).upper()
+        )
+        self.plan_uuid = plan_uuid or str(uuid.uuid4()).upper()
+        self.encryption_key = (
+            encryption_key or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
+        )
+        self.hmac_key = (
+            hmac_key or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
+        )
+        self.blob_id_salt = (
+            blob_id_salt or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
+        )
+        self.openssl_path = openssl_path
+        self.callback = callback
+
+        # Per-run accumulators.
+        self.files_written = 0
+        self.trees_written = 0
+        self.bytes_plaintext = 0
+        self.bytes_on_disk = 0
+        self.blob_ids: List[str] = []
+        # Folder plans accumulated across add_folder() calls so the
+        # backuprecord embeds an up-to-date plan snapshot.
+        self._folder_plans: List[dict] = []
+
+        # On-disk dedup cache: avoid rewriting an existing standalone
+        # object when an identical-content blob has already been
+        # written in the same run.
+        self._written_blobs: Dict[str, int] = {}
+
+    # ------------------------------------------------------------------
+    # Plan-level setup
+    # ------------------------------------------------------------------
+
+    def computer_root(self) -> Path:
+        return self.dest_root / self.computer_uuid
+
+    def init_plan(self) -> None:
+        """Write the four root-level configs + ``encryptedkeyset.dat``.
+
+        Idempotent — calling twice rewrites the files with the same
+        content (modulo the random IV/salt in the keyset, which is
+        regenerated on each call).
+        """
+        cu_root = self.computer_root()
+        cu_root.mkdir(parents=True, exist_ok=True)
+        (cu_root / STANDARDOBJECTS_DIR).mkdir(exist_ok=True)
+        (cu_root / BACKUPFOLDERS_DIR).mkdir(exist_ok=True)
+
+        keyset_blob = build_encrypted_keyset(
+            self.password,
+            self.encryption_key, self.hmac_key, self.blob_id_salt,
+            openssl_path=self.openssl_path,
+        )
+        (cu_root / KEYSET_FILE).write_bytes(keyset_blob)
+        _emit(
+            self.callback, "keyset_written",
+            path=str(cu_root / KEYSET_FILE),
+            size=len(keyset_blob),
+        )
+
+        config = build_backupconfig(
+            backup_name=self.backup_name,
+            computer_name=self.computer_name,
+            is_encrypted=True,
+        )
+        (cu_root / "backupconfig.json").write_text(
+            json.dumps(config, indent=2)
+        )
+
+        folders_idx = build_backupfolders_json(self.computer_uuid)
+        (cu_root / "backupfolders.json").write_text(
+            json.dumps(folders_idx, indent=2)
+        )
+
+        # Plan written here is a placeholder; rewritten on each
+        # add_folder() call so it always reflects the current state.
+        self._write_plan_json()
+
+        _emit(self.callback, "plan_initialized",
+              computer_uuid=self.computer_uuid,
+              plan_uuid=self.plan_uuid)
+
+    def _write_plan_json(self) -> None:
+        plan = build_backupplan(
+            plan_uuid=self.plan_uuid,
+            plan_name=self.plan_name,
+            folder_plans=self._folder_plans,
+            is_encrypted=True,
+            creation_time=time.time(),
+            update_time=time.time(),
+        )
+        (self.computer_root() / "backupplan.json").write_text(
+            json.dumps(plan, indent=2)
+        )
+
+    # ------------------------------------------------------------------
+    # Blob writing
+    # ------------------------------------------------------------------
+
+    def _write_blob(self, plaintext: bytes) -> BlobLoc:
+        """Encrypt+LZ4-wrap+write ``plaintext`` as a standalone object.
+
+        Returns the ``BlobLoc`` that points to it. If a blob with the
+        same SHA-256 ID has already been written this run, the cached
+        on-disk size is reused without rewriting.
+        """
+        blob_id = compute_blob_id(self.blob_id_salt, plaintext)
+        if blob_id in self._written_blobs:
+            return _build_file_blobloc(
+                self.computer_uuid, blob_id, self._written_blobs[blob_id],
+            )
+        lz4_bytes = lz4_wrap(plaintext)
+        arqo = build_encrypted_object(
+            lz4_bytes, self.encryption_key, self.hmac_key,
+            openssl_path=self.openssl_path,
+        )
+        path = _absolute(self.dest_root, _path_for_blob(self.computer_uuid, blob_id))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(arqo)
+        self._written_blobs[blob_id] = len(arqo)
+        self.bytes_plaintext += len(plaintext)
+        self.bytes_on_disk += len(arqo)
+        self.blob_ids.append(blob_id)
+        return _build_file_blobloc(self.computer_uuid, blob_id, len(arqo))
+
+    # ------------------------------------------------------------------
+    # Folder walk
+    # ------------------------------------------------------------------
+
+    def _walk(self, source: Path) -> Tuple[Node, int, int]:
+        """Recursively encode ``source`` into a Node + write blobs.
+
+        Returns ``(node, item_size, contained_files_count)``.
+        Symlinks are NOT followed (each is treated as a regular file
+        whose content is the link target — pragmatic, matches Arq's
+        own conservatism).
+        """
+        if source.is_dir() and not source.is_symlink():
+            return self._walk_dir(source)
+        return self._walk_file(source)
+
+    def _walk_file(self, src: Path) -> Tuple[FileNode, int, int]:
+        try:
+            data = src.read_bytes()
+        except OSError as exc:
+            _emit(self.callback, "file_read_error",
+                  path=str(src), error=str(exc))
+            data = b""
+        loc = self._write_blob(data)
+        st = src.stat()
+        node = FileNode(
+            dataBlobLocs=[loc],
+            itemSize=len(data),
+            containedFilesCount=1,
+            mtime_sec=int(st.st_mtime),
+            mtime_nsec=int((st.st_mtime - int(st.st_mtime)) * 1_000_000_000),
+            ctime_sec=int(st.st_ctime),
+            ctime_nsec=int((st.st_ctime - int(st.st_ctime)) * 1_000_000_000),
+            mac_st_mode=st.st_mode,
+            mac_st_uid=st.st_uid if hasattr(st, "st_uid") else 0,
+            mac_st_gid=st.st_gid if hasattr(st, "st_gid") else 0,
+            mac_st_ino=st.st_ino,
+            mac_st_nlink=st.st_nlink,
+        )
+        self.files_written += 1
+        _emit(self.callback, "file_written",
+              path=str(src), size=len(data),
+              blob_id=loc.blobIdentifier)
+        return node, len(data), 1
+
+    def _walk_dir(self, src: Path) -> Tuple[TreeNode, int, int]:
+        children: List[TreeChild] = []
+        item_size = 0
+        contained = 0
+        try:
+            entries = sorted(src.iterdir(), key=lambda p: p.name)
+        except OSError as exc:
+            _emit(self.callback, "dir_read_error",
+                  path=str(src), error=str(exc))
+            entries = []
+        for entry in entries:
+            child_node, child_size, child_count = self._walk(entry)
+            children.append(TreeChild(name=entry.name, node=child_node))
+            item_size += child_size
+            contained += child_count
+
+        tree = Tree(children=children, version=TREE_VERSION)
+        tree_bytes = write_tree(tree, version=TREE_VERSION)
+        tree_loc = self._write_blob(tree_bytes)
+        self.trees_written += 1
+
+        st = src.stat()
+        node = TreeNode(
+            treeBlobLoc=tree_loc,
+            itemSize=item_size,
+            containedFilesCount=contained,
+            mtime_sec=int(st.st_mtime),
+            mtime_nsec=int((st.st_mtime - int(st.st_mtime)) * 1_000_000_000),
+            ctime_sec=int(st.st_ctime),
+            ctime_nsec=int((st.st_ctime - int(st.st_ctime)) * 1_000_000_000),
+            mac_st_mode=st.st_mode,
+            mac_st_uid=st.st_uid if hasattr(st, "st_uid") else 0,
+            mac_st_gid=st.st_gid if hasattr(st, "st_gid") else 0,
+            mac_st_ino=st.st_ino,
+        )
+        _emit(self.callback, "tree_written",
+              path=str(src), children=len(children),
+              blob_id=tree_loc.blobIdentifier)
+        return node, item_size, contained
+
+    # ------------------------------------------------------------------
+    # Folder-level operations
+    # ------------------------------------------------------------------
+
+    def add_folder(
+        self,
+        source: Path,
+        *,
+        folder_uuid: Optional[str] = None,
+        folder_name: Optional[str] = None,
+        local_mount_point: str = "/",
+    ) -> Path:
+        """Walk ``source`` and write the resulting backuprecord.
+
+        Returns the absolute path to the written backuprecord file.
+        Multiple calls accumulate into the same plan; ``backupplan.json``
+        is rewritten each time so it stays in sync.
+        """
+        source = Path(source).resolve()
+        folder_uuid = folder_uuid or str(uuid.uuid4()).upper()
+        folder_name = folder_name or source.name or "root"
+
+        # Materialize the folder dirs.
+        bf_root = (
+            self.computer_root() / BACKUPFOLDERS_DIR / folder_uuid
+        )
+        bf_root.mkdir(parents=True, exist_ok=True)
+        bf_json = build_backupfolder_json(
+            folder_uuid=folder_uuid, name=folder_name,
+            local_path=str(source),
+            local_mount_point=local_mount_point,
+        )
+        (bf_root / "backupfolder.json").write_text(
+            json.dumps(bf_json, indent=2)
+        )
+
+        # Update accumulated plan metadata before walking so the
+        # backuprecord we emit references the new folder plan too.
+        plan_entry = build_folder_plan(
+            folder_uuid=folder_uuid,
+            local_path=str(source),
+            name=folder_name,
+            local_mount_point=local_mount_point,
+        )
+        self._folder_plans.append(plan_entry)
+        self._write_plan_json()
+
+        # Walk + write blobs.
+        root_node, _size, _count = self._walk(source)
+
+        # Build the backup plan dict (snapshot embedded in the record).
+        plan_dict = build_backupplan(
+            plan_uuid=self.plan_uuid,
+            plan_name=self.plan_name,
+            folder_plans=self._folder_plans,
+            is_encrypted=True,
+            creation_time=time.time(),
+            update_time=time.time(),
+        )
+
+        # Backup record path: backuprecords/<5-digit-bucket>/<num>.backuprecord.
+        # Bucket = floor(creation_date / 100000) (zero-padded to 5
+        # digits). Filename = (creation_date % 100000).backuprecord.
+        creation_date = int(time.time())
+        bucket = f"{creation_date // 100000:05d}"
+        rec_num = creation_date % 100000
+        rec_dir = bf_root / BACKUPRECORDS_DIR / bucket
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        rec_path = rec_dir / f"{rec_num}.backuprecord"
+        rec_relative = (
+            f"/{self.computer_uuid}/{BACKUPFOLDERS_DIR}/{folder_uuid}/"
+            f"{BACKUPRECORDS_DIR}/{bucket}/{rec_num}.backuprecord"
+        )
+
+        record_dict = build_backuprecord_dict(
+            backup_folder_uuid=folder_uuid,
+            backup_plan_uuid=self.plan_uuid,
+            backup_plan_dict=plan_dict,
+            root_node=root_node,
+            local_path=str(source),
+            local_mount_point=local_mount_point,
+            relative_path=rec_relative,
+            creation_date=float(creation_date),
+        )
+        arqo = build_backuprecord_arqo(
+            record_dict,
+            encryption_key=self.encryption_key,
+            hmac_key=self.hmac_key,
+            openssl_path=self.openssl_path,
+        )
+        rec_path.write_bytes(arqo)
+        self.bytes_on_disk += len(arqo)
+        _emit(self.callback, "backuprecord_written",
+              path=str(rec_path), size=len(arqo),
+              folder_uuid=folder_uuid)
+        return rec_path
+
+
+def build_backup(
+    source: Path,
+    dest_root: Path,
+    encryption_password: str,
+    *,
+    backup_name: str = "TUI backup",
+    folder_name: Optional[str] = None,
+    callback: Optional[ProgressCb] = None,
+    openssl_path: str = "openssl",
+    computer_uuid: Optional[str] = None,
+    plan_uuid: Optional[str] = None,
+    folder_uuid: Optional[str] = None,
+) -> BackupResult:
+    """One-shot convenience wrapper: full plan init + single folder."""
+    started = time.time()
+    bk = Backup(
+        dest_root=dest_root,
+        encryption_password=encryption_password,
+        backup_name=backup_name,
+        callback=callback,
+        openssl_path=openssl_path,
+        computer_uuid=computer_uuid,
+        plan_uuid=plan_uuid,
+    )
+    bk.init_plan()
+    rec_path = bk.add_folder(
+        Path(source), folder_uuid=folder_uuid, folder_name=folder_name,
+    )
+    finished = time.time()
+    return BackupResult(
+        dest_root=Path(dest_root).resolve(),
+        computer_uuid=bk.computer_uuid,
+        plan_uuid=bk.plan_uuid,
+        folder_uuid=rec_path.parent.parent.parent.name,
+        backuprecord_path=rec_path,
+        files_written=bk.files_written,
+        trees_written=bk.trees_written,
+        bytes_plaintext=bk.bytes_plaintext,
+        bytes_on_disk=bk.bytes_on_disk,
+        blob_ids=list(bk.blob_ids),
+        started_at=started,
+        finished_at=finished,
+    )

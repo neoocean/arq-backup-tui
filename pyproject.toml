@@ -24,9 +24,10 @@ classifiers = [
 
 [project.scripts]
 arq-validator = "arq_validator.cli:main"
+arq-backup = "arq_writer.cli:main"
 
 [tool.setuptools]
-packages = ["arq_validator"]
+packages = ["arq_validator", "arq_writer"]
 
 [tool.setuptools.package-data]
 arq_validator = ["py.typed"]

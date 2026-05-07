@@ -44,7 +44,7 @@ constants.py` 의 주석 참고.)
 
 ```
 arq-backup-tui/
-├── arq_validator/                # 라이브러리 본체 (TUI 가 import)
+├── arq_validator/                # 검증 라이브러리 (TUI 가 import)
 │   ├── __init__.py               # 공개 API 노출
 │   ├── __main__.py               # `python -m arq_validator`
 │   ├── constants.py              # Arq 7 포맷 상수 (regex, magic, offset 등)
@@ -57,16 +57,28 @@ arq-backup-tui/
 │   ├── audit_drip.py             # 재개형 야간 감사 (cursor + throttle)
 │   ├── runner.py                 # ValidationTier enum + validate() 오케스트레이터
 │   └── cli.py                    # argparse CLI
-├── tests/                        # 합성 fixture 기반 단위·통합 테스트 (47건)
-│   ├── fixtures.py               # 테스트용 Arq 7 트리 빌더
-│   ├── test_crypto.py
-│   ├── test_layout.py
-│   ├── test_runner.py
-│   ├── test_audit_drip.py
-│   └── test_sftp.py
+├── arq_writer/                   # 백업 생성 라이브러리 (Arq.app 호환)
+│   ├── __init__.py               # 공개 API 노출
+│   ├── __main__.py               # `python -m arq_writer`
+│   ├── constants.py              # 압축 타입, Tree 버전 등 (validator 상수 재export)
+│   ├── lz4_block.py              # 순수 파이썬 LZ4 블록 codec
+│   ├── types.py                  # BlobLoc / FileNode / TreeNode / Tree 데이터클래스
+│   ├── serialize.py              # Node / Tree / BlobLoc 바이너리 직렬화
+│   ├── crypto_write.py           # ARQO 인코더 + encryptedkeyset.dat 빌더 + AES 암호화
+│   ├── json_configs.py           # backupconfig / backupplan / backupfolders 빌더
+│   ├── backuprecord.py           # backuprecord plist + LZ4 + ARQO 파이프라인
+│   ├── backup.py                 # Backup 클래스 + build_backup() 오케스트레이터
+│   └── cli.py                    # argparse CLI (`arq-backup create`)
+├── tests/                        # 합성/round-trip 단위·통합 테스트 (73건, ~13초)
+│   ├── fixtures.py               # 검증기 테스트용 Arq 7 트리 빌더
+│   ├── test_crypto.py / test_layout.py / test_runner.py
+│   ├── test_audit_drip.py / test_sftp.py
+│   ├── test_writer_lz4.py        # 순수 LZ4 codec round-trip
+│   ├── test_writer_format.py     # 바이너리 직렬화 + crypto round-trip
+│   └── test_writer_e2e.py        # 작성기 → 검증기 4단계 round-trip
 ├── docs/
-│   └── RESEARCH-backup-creation-feasibility.md   # (별도 조사 진행 중)
-├── pyproject.toml                # `arq-validator` 콘솔 스크립트 등록
+│   └── RESEARCH-backup-creation-feasibility.md
+├── pyproject.toml                # 콘솔 스크립트 등록
 ├── DESIGN.md                     # ← 본 문서
 └── LICENSE
 ```
@@ -332,25 +344,52 @@ path:
 S3, Backblaze B2, WebDAV, dropbox 등. `Backend` 프로토콜의 6개 메서드만
 구현하면 기존 검증 로직 전체 재사용 가능.
 
-### 9.3 백업 생성 (write-side)
+### 9.3 백업 생성 (write-side, v0 구현 완료)
 
-`arq-backup-tui` 가 Arq.app 처럼 백업을 **생성** 할 수 있는지 조사한
-결과는 `docs/RESEARCH-backup-creation-feasibility.md` 에 정리되어
-있습니다. 요약하면:
+`arq_writer/` 패키지가 v0 백업 작성기를 제공합니다 — 조사 결과
+(`docs/RESEARCH-backup-creation-feasibility.md`) 에서 권장한
+"청커·pack 컨테이너 우회, 모든 객체를 standalone EncryptedObject 로
+`standardobjects/<shard>/<blobid>` 에 저장" 전략을 채택했습니다.
 
-- **공개된 부분**: `encryptedkeyset.dat`, `EncryptedObject`/ARQO 헤더,
-  `Node`/`Tree`/`BlobLoc` 바이너리 레이아웃, JSON 설정 파일들 — 모두
-  공식 Arq 7 스펙 + arq_restore 소스(BSD 3-Clause)에 명시.
-- **공개되지 않은 부분**: Arq 7 의 `treepacks/`/`blobpacks/` `.pack` 컨테이너
-  헤더·인덱스 레이아웃, 그리고 청커(`chunkerVersion: 3` + `useBuzhash`)
-  파라미터.
-- **현재 백업을 작성하는 공개 프로젝트는 없음** (`tcsc/larq` 가 "eventually
-  writer" 목표를 명시했지만 5년 이상 비활성). 모든 서드파티 도구는
-  read/restore 전용.
-- **현실적 첫 단계**: 청커·pack 컨테이너를 우회하고 모든 객체를 단일
-  EncryptedObject 로 `standardobjects/<shard>/<blobid>` 에 쓰는 v0.
-  본 검증기로 round-trip 검증 가능, `arq_restore` (BSD) 로 Arq.app 호환성
-  확인 가능.
+#### 작성기 동작 흐름
+
+1. 무작위 32바이트 `encryption_key` / `hmac_key` / `blob_id_salt`
+   생성 → `encryptedkeyset.dat` (PBKDF2-SHA256 / AES-256-CBC / HMAC)
+2. 4개 root JSON 작성 (`backupconfig.json`, `backupplan.json`,
+   `backupfolders.json`, 폴더당 `backupfolder.json`)
+3. 소스 디렉토리 재귀 walk:
+   - 파일: 내용 → LZ4 wrap → ARQO 암호화 → `standardobjects/<2hex>/<62hex>`
+     (blob_id = `SHA-256(blob_id_salt || plaintext)`)
+   - 디렉토리: 자식 노드 수집 → Tree 바이너리 직렬화 → 위와 동일하게 저장
+4. 루트 TreeNode 를 backuprecord plist (binary plist) 에 임베드 →
+   LZ4 wrap → ARQO 암호화 → `backupfolders/<folder>/backuprecords/<NNNNN>/<num>.backuprecord`
+
+byte-identical 파일은 SHA-256 blob_id 가 같아 자연 dedup. modified-in-place
+파일은 청커가 없어 dedup 되지 않음 (운영자 도구 입장에서 acceptable).
+
+#### 호환성 검증 상태
+
+| Verdict | 상태 | 근거 |
+| --- | --- | --- |
+| **A**: 본 검증기로 round-trip | ✅ 통과 | `tests/test_writer_e2e.py` 가 4단계 모두 검증 (dry-run / quick / deep / audit) |
+| **B**: arq_restore (BSD) round-trip | ⚠️ 미검증 | sandbox 에 macOS 빌드 환경 없음. 운영자 환경에서 `arq_restore` 빌드 후 직접 확인 필요 |
+| **C**: Arq.app GUI 복원 | ⚠️ 미검증 | macOS GUI 가 필요한 수동 검증 |
+
+작성기가 생성한 binary plist + LZ4 + ARQO 모든 레이어를 직접 풀어
+plist 키들(`archived`, `arqVersion`, `node`, `treeBlobLoc.blobIdentifier`
+등)이 스펙과 일치하는지 확인하는 테스트
+(`test_backuprecord_decrypts_and_parses_as_plist`)도 통과합니다.
+
+#### 알려진 한계
+
+- **청커 미구현**: 큰 파일 한 개를 변형해 일부 바이트만 바꿔도 전체 blob 이
+  새로 생성됩니다. Arq.app 의 가변 길이 청킹은 `chunkerVersion: 3` +
+  `useBuzhash` 파라미터가 비공개라 RE 없이 재현 불가.
+- **pack 컨테이너 미사용**: 모든 객체가 standalone 으로 저장되므로 다수의
+  소형 파일이 있을 때 디렉토리 항목 수가 폭증합니다 (Arq 7 표준 sharding
+  으로 256개 디렉토리에 분산되긴 합니다).
+- **windowsattrs / xattr / ACL 메타데이터 0 으로 채움**: 기본 동작은
+  파일 내용 + 기본 stat 만 보존. 필요해지면 노드 빌더 확장 가능.
 
 ### 9.4 Hetzner 특화 안전장치
 
