@@ -123,31 +123,47 @@ class Restore:
     def _fetch_blob(self, loc: BlobLoc, keyset: Keyset) -> bytes:
         """Fetch + decrypt + (LZ4-unwrap if needed) a referenced blob.
 
-        ``loc.relativePath`` is interpreted as backend-rooted
-        (``/<computer-uuid>/standardobjects/...``). ``isPacked`` is
-        rejected — the v0 reader matches the v0 writer in only
-        supporting standalone-object storage.
+        Mirrors ``Arq7BlobReader.m::dataForBlobLoc:`` exactly:
+
+        - Packed blob (``isPacked=true``): read
+          ``backend.read_range(relativePath, offset, length)``.
+        - Standalone blob: read the whole file at ``relativePath``.
+        - If the bytes start with ``b"ARQO"``, decrypt; otherwise the
+          backup is unencrypted (legal per spec) and the bytes are
+          taken as-is.
+        - If ``compressionType == 2`` (LZ4), decompress.
+          ``compressionType == 0`` is "none". ``compressionType == 1``
+          (Gzip) appears only in legacy Arq 5 data — supported here
+          via stdlib ``gzip``.
+
+        We do **not** need to know the pack file's header / index /
+        framing — ``BlobLoc.offset`` and ``length`` are the only
+        information required to slice out a blob.
         """
         if loc.isPacked:
-            raise NotImplementedError(
-                "isPacked=true blobs (treepacks/blobpacks/largeblobpacks) "
-                "are not supported by the v0 reader; the writer never "
-                "produces them."
+            raw = self.backend.read_range(
+                loc.relativePath, loc.offset, loc.length,
             )
-        arqo = self.backend.read_all(loc.relativePath)
+        else:
+            raw = self.backend.read_all(loc.relativePath)
+
+        if raw[:4] == b"ARQO":
+            raw = decrypt_encrypted_object(
+                raw, keyset.encryption_key, keyset.hmac_key,
+                openssl_path=self.openssl_path,
+            )
+
         if loc.compressionType == 2:
-            return decrypt_lz4_arqo(
-                arqo, keyset.encryption_key, keyset.hmac_key,
-                openssl_path=self.openssl_path,
-            )
+            from arq_writer.lz4_block import lz4_unwrap
+            return lz4_unwrap(raw)
+        if loc.compressionType == 1:
+            import gzip
+            return gzip.decompress(raw)
         if loc.compressionType == 0:
-            return decrypt_encrypted_object(
-                arqo, keyset.encryption_key, keyset.hmac_key,
-                openssl_path=self.openssl_path,
-            )
+            return raw
         raise NotImplementedError(
             f"compressionType={loc.compressionType} not supported "
-            f"(only 0=none and 2=LZ4 are implemented)"
+            f"(0=none, 1=Gzip, 2=LZ4 are implemented)"
         )
 
     @staticmethod
