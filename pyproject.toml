@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arq-backup-tui"
+version = "0.1.0"
+description = "Independent validator and TUI foundation for Arq 7 backups."
+readme = { content-type = "text/plain", text = "Independent Arq 7 backup validator." }
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+keywords = ["arq", "backup", "validator", "tui"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS :: MacOS X",
+    "Topic :: System :: Archiving :: Backup",
+]
+
+[project.scripts]
+arq-validator = "arq_validator.cli:main"
+
+[tool.setuptools]
+packages = ["arq_validator"]
+
+[tool.setuptools.package-data]
+arq_validator = ["py.typed"]
