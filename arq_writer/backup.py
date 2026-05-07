@@ -47,10 +47,12 @@ from .backuprecord import (
 from .constants import (
     BACKUPFOLDERS_DIR,
     BACKUPRECORDS_DIR,
+    BLOBPACKS_DIR,
     COMPRESSION_LZ4,
     KEYSET_FILE,
     KEYSET_PLAIN_FIELD_LEN,
     STANDARDOBJECTS_DIR,
+    TREEPACKS_DIR,
     TREE_VERSION,
 )
 from .crypto_write import (
@@ -66,6 +68,7 @@ from .json_configs import (
     build_folder_plan,
 )
 from .lz4_block import lz4_wrap
+from .pack_builder import DEFAULT_MAX_PACK_BYTES, PackBuilder
 from .serialize import write_tree
 from .types import BlobLoc, FileNode, Node, Tree, TreeChild, TreeNode
 
@@ -161,6 +164,8 @@ class Backup:
         hmac_key: Optional[bytes] = None,
         blob_id_salt: Optional[bytes] = None,
         openssl_path: str = "openssl",
+        use_packs: bool = False,
+        max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
         callback: Optional[ProgressCb] = None,
     ) -> None:
         self.dest_root = Path(dest_root).resolve()
@@ -182,6 +187,8 @@ class Backup:
             blob_id_salt or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
         )
         self.openssl_path = openssl_path
+        self.use_packs = use_packs
+        self.max_pack_bytes = max_pack_bytes
         self.callback = callback
 
         # Per-run accumulators.
@@ -196,8 +203,15 @@ class Backup:
 
         # On-disk dedup cache: avoid rewriting an existing standalone
         # object when an identical-content blob has already been
-        # written in the same run.
-        self._written_blobs: Dict[str, int] = {}
+        # written in the same run. Maps blob_id -> BlobLoc so packed
+        # and standalone modes share a single source of truth.
+        self._written_blobs: Dict[str, BlobLoc] = {}
+
+        # Per-family pack builders, lazily initialized on first use
+        # to avoid creating empty pack-shaped paths when use_packs is
+        # disabled.
+        self._blob_pack: Optional[PackBuilder] = None
+        self._tree_pack: Optional[PackBuilder] = None
 
     # ------------------------------------------------------------------
     # Plan-level setup
@@ -269,31 +283,78 @@ class Backup:
     # Blob writing
     # ------------------------------------------------------------------
 
-    def _write_blob(self, plaintext: bytes) -> BlobLoc:
-        """Encrypt+LZ4-wrap+write ``plaintext`` as a standalone object.
+    def _write_blob(self, plaintext: bytes, *, is_tree: bool = False) -> BlobLoc:
+        """Encrypt+LZ4-wrap+write ``plaintext`` and return its BlobLoc.
 
-        Returns the ``BlobLoc`` that points to it. If a blob with the
-        same SHA-256 ID has already been written this run, the cached
-        on-disk size is reused without rewriting.
+        Routing depends on ``self.use_packs``:
+
+        - **standalone mode** (``use_packs=False``, the v0 default):
+          one file per blob under ``standardobjects/<shard>/<rest>``.
+        - **packed mode** (``use_packs=True``): blobs accumulate into
+          ``treepacks/`` (when ``is_tree``) or ``blobpacks/`` and
+          flush when the buffer crosses ``max_pack_bytes``.
+
+        Identical-content blobs (same SHA-256 ``blob_id``) reuse the
+        first call's BlobLoc — including offset/length when in packed
+        mode, so pack files don't carry duplicate ARQOs.
         """
         blob_id = compute_blob_id(self.blob_id_salt, plaintext)
-        if blob_id in self._written_blobs:
-            return _build_file_blobloc(
-                self.computer_uuid, blob_id, self._written_blobs[blob_id],
-            )
+        cached = self._written_blobs.get(blob_id)
+        if cached is not None:
+            return cached
         lz4_bytes = lz4_wrap(plaintext)
         arqo = build_encrypted_object(
             lz4_bytes, self.encryption_key, self.hmac_key,
             openssl_path=self.openssl_path,
         )
-        path = _absolute(self.dest_root, _path_for_blob(self.computer_uuid, blob_id))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(arqo)
-        self._written_blobs[blob_id] = len(arqo)
+
+        if self.use_packs:
+            if is_tree:
+                if self._tree_pack is None:
+                    self._tree_pack = PackBuilder(
+                        self.computer_uuid, TREEPACKS_DIR,
+                        self.dest_root,
+                        max_pack_bytes=self.max_pack_bytes,
+                        compression_type=COMPRESSION_LZ4,
+                    )
+                loc = self._tree_pack.add(blob_id, arqo)
+            else:
+                if self._blob_pack is None:
+                    self._blob_pack = PackBuilder(
+                        self.computer_uuid, BLOBPACKS_DIR,
+                        self.dest_root,
+                        max_pack_bytes=self.max_pack_bytes,
+                        compression_type=COMPRESSION_LZ4,
+                    )
+                loc = self._blob_pack.add(blob_id, arqo)
+        else:
+            path = _absolute(
+                self.dest_root,
+                _path_for_blob(self.computer_uuid, blob_id),
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(arqo)
+            loc = _build_file_blobloc(
+                self.computer_uuid, blob_id, len(arqo),
+            )
+
+        self._written_blobs[blob_id] = loc
         self.bytes_plaintext += len(plaintext)
         self.bytes_on_disk += len(arqo)
         self.blob_ids.append(blob_id)
-        return _build_file_blobloc(self.computer_uuid, blob_id, len(arqo))
+        return loc
+
+    def flush_packs(self) -> None:
+        """Flush all in-flight pack builders to disk.
+
+        Called automatically at the end of each ``add_folder`` so the
+        BlobLocs the backuprecord embeds reference fully-materialized
+        pack files. Safe to call multiple times — empty buffers no-op.
+        """
+        if self._blob_pack is not None:
+            self._blob_pack.close()
+        if self._tree_pack is not None:
+            self._tree_pack.close()
 
     # ------------------------------------------------------------------
     # Folder walk
@@ -358,7 +419,7 @@ class Backup:
 
         tree = Tree(children=children, version=TREE_VERSION)
         tree_bytes = write_tree(tree, version=TREE_VERSION)
-        tree_loc = self._write_blob(tree_bytes)
+        tree_loc = self._write_blob(tree_bytes, is_tree=True)
         self.trees_written += 1
 
         st = src.stat()
@@ -430,6 +491,11 @@ class Backup:
         # Walk + write blobs.
         root_node, _size, _count = self._walk(source)
 
+        # Flush any in-flight packs BEFORE building the backuprecord.
+        # The record embeds BlobLocs whose offsets must point at
+        # already-on-disk bytes; flushing here guarantees that.
+        self.flush_packs()
+
         # Build the backup plan dict (snapshot embedded in the record).
         plan_dict = build_backupplan(
             plan_uuid=self.plan_uuid,
@@ -490,8 +556,15 @@ def build_backup(
     computer_uuid: Optional[str] = None,
     plan_uuid: Optional[str] = None,
     folder_uuid: Optional[str] = None,
+    use_packs: bool = False,
+    max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
 ) -> BackupResult:
-    """One-shot convenience wrapper: full plan init + single folder."""
+    """One-shot convenience wrapper: full plan init + single folder.
+
+    ``use_packs=True`` switches blob storage from
+    ``standardobjects/`` to the Arq 7 ``treepacks/`` + ``blobpacks/``
+    container layout. The reader handles both transparently.
+    """
     started = time.time()
     bk = Backup(
         dest_root=dest_root,
@@ -501,6 +574,8 @@ def build_backup(
         openssl_path=openssl_path,
         computer_uuid=computer_uuid,
         plan_uuid=plan_uuid,
+        use_packs=use_packs,
+        max_pack_bytes=max_pack_bytes,
     )
     bk.init_plan()
     rec_path = bk.add_folder(

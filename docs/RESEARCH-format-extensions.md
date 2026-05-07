@@ -17,15 +17,19 @@ without re-running the local clone.
 | --- | --- | --- |
 | Read Arq 7 pack-stored blobs (`isPacked: true`) | ✅ Implemented + tested | Trivial — only need `BlobLoc.offset` / `length` |
 | Arq 5/6 `.pack` / `.index` parsers + builders | ✅ Implemented + tested | Spec is fully documented |
-| Arq 7 pack file emission (write-side) | 🟡 Format known, not yet implemented | Format is "concatenated ARQOs"; tractable |
-| Arq 5/6 `Tree` / `Commit` / `Node` binary parser | 🟡 Spec is documented but multi-version (Tree v12–22 each have different field sets) | Multi-day port; each version variant must be supported |
+| Arq 7 pack file emission (write-side) | ✅ Implemented + tested | Confirmed format: plain ARQO concatenation; PackBuilder ships in `arq_writer.pack_builder` |
+| Arq 5/6 `Tree` / `Commit` / `Node` binary parser | ✅ Implemented + tested | All documented versions (Tree v10–v22 ex. v13, Commit v3–v12); ~600 LOC across `arq_reader.arq5_binary` |
 | Chunker (`chunkerVersion: 3`, `useBuzhash`) | 🔴 No public source | Not feasible to RE; needed only for write-side dedup parity with Arq.app |
 | Arq Cloud Backup format | 🔴 Out of scope | Separate product, separate restore tool |
 
-The big wins this iteration: the v0 reader gained `isPacked: true`
-support **without needing to know the pack file's framing at all**,
-and Arq 5/6 `.pack` / `.index` files are now fully round-trippable
-through `arq_reader.arq5_pack`.
+The big wins so far: the v0 reader gained `isPacked: true` support
+**without needing to know the pack file's framing at all**, Arq 5/6
+`.pack` / `.index` files are fully round-trippable through
+`arq_reader.arq5_pack`, the writer can now emit Arq-7-shape
+`treepacks/` and `blobpacks/` containers via `Backup(use_packs=True)`,
+and Arq 5/6 `Tree` / `Node` / `Commit` / `BlobKey` binary parsers
+ship in `arq_reader.arq5_binary`. Only the chunker and Arq Cloud
+remain as concrete RE blockers.
 
 ---
 
@@ -188,8 +192,52 @@ Cite: `repo/PackBuilder.m::writeIndex:pack:`.
 
 ## 3. Arq 7 pack file format (write-side)
 
-**Verdict**: 🟡 Format known with high confidence, not yet
-implemented as a writer feature.
+**Verdict**: ✅ **Implemented + tested** —
+[`arq_writer/pack_builder.py`](../arq_writer/pack_builder.py),
+[`tests/test_writer_packed.py`](../tests/test_writer_packed.py).
+
+### Implementation
+
+A `PackBuilder` per object family accumulates ARQOs in an in-memory
+buffer and flushes a `.pack` file when the buffer crosses
+`max_pack_bytes` (default 10 MiB). Each `add(blob_id, arqo)` call
+returns a fully-formed `BlobLoc(isPacked=True, offset=..., length=...)`
+pointing into the **current** pack — flushes always close the pack
+that contained the just-returned BlobLocs first, so callers can
+build Trees + backuprecords as the walk proceeds with no deferred
+relocation pass.
+
+Pack files are named exactly per Arq 7 convention: a UUID where the
+first two hex characters become the shard directory, and the
+remaining 30 hex / 3 dashes form the filename. The validator's
+`ARQ7_PACK_NAME_RE` matches what we emit.
+
+`Backup(use_packs=True)` (and `build_backup(..., use_packs=True)`)
+routes file content blobs to `blobpacks/` and tree blobs to
+`treepacks/`. `standardobjects/` is left empty in packed mode.
+
+### Tests
+
+`tests/test_writer_packed.py` — 9 tests:
+
+- `PackBuilderUnitTests`: path shape (Arq-7 regex match), dedup
+  semantics, threshold-triggered flush.
+- `PackedBackupRoundTripTests`: byte-identical writer→reader
+  round-trip; only pack dirs populated; dedup across files; tight
+  threshold yields multiple pack files; validator passes (deep
+  tier) on packed output; layout counts confirm packs > 0 and
+  standardobjects = 0.
+
+### Out of scope
+
+- An `.index` file alongside the `.pack`. arq_restore's Arq 7 read
+  path doesn't reference one, the spec doesn't document one for
+  Arq 7, and the validator doesn't check for it. We don't emit
+  one. If a future Arq.app version starts requiring an index for
+  pack files we generate, this is a one-paragraph code change
+  (re-using `arq_reader.arq5_pack.build_pack_index` would not
+  apply — Arq 7 packs use SHA-256, not SHA-1, so the index format
+  would have to be different).
 
 ### Evidence
 
@@ -295,36 +343,54 @@ Either path is feasible but neither is sandbox-runnable today.
 
 ## 5. Arq 5 / Arq 6 read path
 
-**Verdict**: 🟡 Tractable but bulky. Deferred.
+**Verdict**: ✅ **Binary parsers implemented + tested** —
+[`arq_reader/arq5_binary.py`](../arq_reader/arq5_binary.py),
+[`tests/test_arq5_binary.py`](../tests/test_arq5_binary.py).
 
-### What's known (fully)
+What's still deferred: a top-level "Arq 5 restorer" that uses these
+parsers + the existing `.pack`/`.index` reader to walk an actual
+Arq 5/6 backup destination (analogous to `arq_reader.restore.Restore`
+for Arq 7). Tractable now that all the pieces exist — defer until a
+real Arq 5/6 backup is on hand to test against.
 
-- Backup folder UUIDs live under `bucketdata/<folder_uuid>/`.
-- Latest commit SHA-1 is at `bucketdata/<folder_uuid>/refs/heads/master`
-  with a trailing `Y`.
-- Commit binary format ("CommitV012", many versions back to V003).
-- Tree binary format ("TreeV022", many versions: V011–V022).
-- Node binary format (within Trees, also version-gated).
-- Blob storage: under `objects/<sha1>` for large files, `packsets/
-  <folder_uuid>-(blobs|trees)/<sha1>.{pack,index}` for small.
-- `BlobKey` (Arq 5's BlobLoc analogue): SHA-1, encryption-key
-  stretching flag, optional Glacier metadata.
+### What's covered (now)
 
-### Why it's bulky
+`arq_reader.arq5_binary` reverse-engineers the Arq 5/6 binary types
+by cross-referencing the published spec (`arq5_data_format.txt`)
+with `arq_restore/repo/Tree.m`, `Node.m`, `Commit.m`, and
+`BlobKeyIO.m`. Where the two disagreed (specifically, the v19+
+vs. v20+ compression-type fields), the source wins.
 
-Each Tree version adds / removes fields (`xattrs_are_compressed`,
-`acl_compression_type`, `aggregate_size_on_disk`, `create_time_*`,
-`missing_node_*`). A correct parser needs to dispatch on the version
-prefix string and apply the right field schema. Estimated size:
-~600–800 LOC for full Tree/Commit/Node coverage.
+| Parser | Versions | Notes |
+| --- | --- | --- |
+| `BinaryStream` | — | Bool / UInt32 / Int32 / UInt64 / Int64 / String / Date / Data primitives, mirroring arq_restore's `*IO` classes |
+| `parse_blobkey` | Tree v10–v22 (skipping v13) | Version-gated: stretch flag added v14, Glacier fields added v17 |
+| `parse_node` | Tree v10–v22 | Version-gated: missing-items flag added v18, compression types switched from Bool to Int32 at v19 |
+| `parse_tree` | Tree v10–v22 (skipping v13) | Version-gated: aggregate-size field present v11–v16 only, createTime added v15, missing-nodes added v18 |
+| `parse_commit` | Commit v3–v12 | Version-gated: stretch flags added v4, treeCompressionType added v10, hasMissingNodes added v8, isComplete added v9 |
 
-### What's already in place
+### Tests
 
-`arq_reader.arq5_pack` (this iteration) handles the
-`.pack` / `.index` retrieval layer. A future iteration would add a
-`Tree`/`Commit`/`Node` binary parser on top, plus an Arq 5 walker
-analogous to `arq_reader.restore.Restore` that follows BlobKey
-references through commits → trees → file blobs.
+`tests/test_arq5_binary.py` — 18 tests:
+
+- Primitive round-trips (Bool / Int*/UInt* / String / Date / Data).
+- BlobKey: full v22 (with Glacier fields), minimal v12 (no
+  stretch), null SHA-1.
+- Tree v22: empty tree, file Node, subtree Node, Unicode child
+  name, malformed-header rejection, v13 explicit reject.
+- Commit v12: no parent, with parent, malformed header.
+
+### What's still missing (deferred)
+
+- `Arq5Restore` orchestrator: walk
+  `bucketdata/<folder>/refs/heads/master` → fetch Commit blob via
+  `objects/<sha1>` (or `packsets/<folder>-trees/...`) → decrypt and
+  decompress → `parse_commit` → follow `treeBlobKey` → repeat for
+  each child Node. Each piece exists; the glue is ~150 LOC.
+- The `EncryptedObject` envelope used by Arq 5 is the SAME format
+  as Arq 7's ARQO (the `arq_validator.crypto` decryptor handles it
+  unchanged). Confirmed by reading `arq_restore/repo/
+  EncryptedObject.m`.
 
 ---
 

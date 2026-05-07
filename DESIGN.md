@@ -67,16 +67,19 @@ arq-backup-tui/
 │   ├── crypto_write.py           # ARQO 인코더 + encryptedkeyset.dat 빌더 + AES 암호화
 │   ├── json_configs.py           # backupconfig / backupplan / backupfolders 빌더
 │   ├── backuprecord.py           # backuprecord plist + LZ4 + ARQO 파이프라인
+│   ├── pack_builder.py           # Arq 7 PackBuilder — treepacks/blobpacks 생성 (use_packs=True 모드)
 │   ├── backup.py                 # Backup 클래스 + build_backup() 오케스트레이터
 │   └── cli.py                    # argparse CLI (`arq-backup create`)
 ├── arq_reader/                   # 백업 복원 라이브러리 (writer 의 역방향)
 │   ├── __init__.py
 │   ├── __main__.py               # `python -m arq_reader`
 │   ├── decrypt.py                # ARQO 전체 복호화 (HMAC verify 후 AES 2단)
-│   ├── parse.py                  # BinaryReader + Node/Tree/BlobLoc 바이너리 파서
-│   ├── restore.py                # Restore 클래스 (backuprecord -> 트리 워크 -> 파일 복원)
+│   ├── parse.py                  # BinaryReader + Arq 7 Node/Tree/BlobLoc 바이너리 파서
+│   ├── restore.py                # Restore 클래스 (standalone + isPacked=true 양쪽 지원)
+│   ├── arq5_pack.py              # Arq 5/6 .pack/.index 파서 + 빌더 (SHA-1 fanout 포함)
+│   ├── arq5_binary.py            # Arq 5/6 Tree v10-v22 / Commit v3-v12 / Node / BlobKey 바이너리 파서
 │   └── cli.py                    # argparse CLI (`arq-reader list`/`restore`)
-├── tests/                        # 합성/round-trip 단위·통합 테스트 (87건, ~16초)
+├── tests/                        # 합성/round-trip 단위·통합 테스트 (129건, ~11초)
 │   ├── fixtures.py               # 검증기 테스트용 Arq 7 트리 빌더
 │   ├── test_crypto.py / test_layout.py / test_runner.py
 │   ├── test_audit_drip.py / test_sftp.py
