@@ -31,7 +31,10 @@ from arq_writer.chunker import (
 from arq_writer.macho_buzhash_finder import (
     MACHO_MAGICS,
     PLAUSIBLE_CONSTANTS,
+    NumericHit,
     analyze_macho_for_buzhash,
+    filter_constants_near,
+    find_min_max_pairs,
     find_numeric_constants,
     find_t_table_candidates,
     infer_parameters_from_chunk_sizes,
@@ -183,6 +186,121 @@ class ParameterInferenceTests(unittest.TestCase):
     def test_inference_empty_rejected(self) -> None:
         with self.assertRaises(ValueError):
             infer_parameters_from_chunk_sizes([])
+
+
+class MinMaxPairTests(unittest.TestCase):
+    def test_co_located_pair_found(self) -> None:
+        # min=4096 at offset 100, max=131072 at offset 110: distance
+        # 10, well under the default 64-byte threshold.
+        hits = [
+            NumericHit(offset=100, width=4, value=4096, label="m"),
+            NumericHit(offset=110, width=4, value=131072, label="M"),
+            # Distractor: same min value far away.
+            NumericHit(offset=10000, width=4, value=4096, label="m"),
+        ]
+        pairs = find_min_max_pairs(hits)
+        self.assertGreaterEqual(len(pairs), 1)
+        top = pairs[0]
+        self.assertEqual(top.min_value, 4096)
+        self.assertEqual(top.max_value, 131072)
+        self.assertEqual(top.distance, 10)
+        self.assertTrue(top.is_plausible)
+
+    def test_distant_pairs_excluded(self) -> None:
+        hits = [
+            NumericHit(offset=100, width=4, value=4096, label="m"),
+            NumericHit(offset=10000, width=4, value=131072, label="M"),
+        ]
+        pairs = find_min_max_pairs(hits, max_distance_bytes=64)
+        self.assertEqual(pairs, [])
+
+    def test_implausible_min_max_ratio(self) -> None:
+        # 16 KiB / 32 KiB pair: ratio 2 < 4 → flagged not plausible
+        # (32768 is in PLAUSIBLE_MAX_VALUES; 16384 in PLAUSIBLE_MIN_VALUES).
+        hits = [
+            NumericHit(offset=100, width=4, value=16384, label="m"),
+            NumericHit(offset=104, width=4, value=32768, label="m"),
+        ]
+        pairs = find_min_max_pairs(hits)
+        # The pair is found (within distance) but not_plausible.
+        flagged_implausible = [p for p in pairs if not p.is_plausible]
+        self.assertGreaterEqual(len(flagged_implausible), 1)
+
+    def test_pairs_sorted_closest_first(self) -> None:
+        hits = [
+            NumericHit(offset=100, width=4, value=4096, label="m"),
+            NumericHit(offset=140, width=4, value=131072, label="M"),
+            NumericHit(offset=200, width=4, value=4096, label="m"),
+            NumericHit(offset=205, width=4, value=131072, label="M"),
+        ]
+        pairs = find_min_max_pairs(hits)
+        self.assertGreaterEqual(len(pairs), 2)
+        # Closest pair (5 bytes apart) must come first.
+        self.assertEqual(pairs[0].distance, 5)
+
+
+class FilterConstantsNearTests(unittest.TestCase):
+    def test_radius_filter(self) -> None:
+        hits = [
+            NumericHit(offset=1000, width=4, value=4096, label="m"),
+            NumericHit(offset=2000, width=4, value=4096, label="m"),
+            NumericHit(offset=50000, width=4, value=4096, label="m"),
+        ]
+        nearby = filter_constants_near(hits, 1500, radius_bytes=600)
+        offsets = sorted(h.offset for h in nearby)
+        self.assertEqual(offsets, [1000, 2000])
+
+
+class PairSearchCLITests(unittest.TestCase):
+    def test_pair_search_on_synthesized_report(self) -> None:
+        # Build a JSON report file mimicking analyze-binary output
+        # with a planted (4096, 131072) pair near a planted T-table
+        # offset, plus distractor pairs far away.
+        import json as _json
+        import tempfile as _tempfile
+        from arq_writer.buzhash_re_cli import main as buzhash_main
+
+        report = {
+            "file_path": "synthetic",
+            "file_size": 1_000_000,
+            "is_macho": True,
+            "t_table_candidates": [{"offset": 50000, "score": 7.9}],
+            "numeric_constants": [
+                # Real chunker pair near the T-table.
+                {"offset": 49000, "width": 4, "value": 4096, "label": "min"},
+                {"offset": 49016, "width": 4, "value": 131072, "label": "max"},
+                # Distractor pair near each other but far from table.
+                {"offset": 800000, "width": 4, "value": 4096, "label": "min"},
+                {"offset": 800020, "width": 4, "value": 131072, "label": "max"},
+            ],
+            "notes": [],
+        }
+        with _tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False,
+        ) as f:
+            _json.dump(report, f)
+            jpath = f.name
+        try:
+            # Capture stdout via io redirection.
+            import io as _io, contextlib as _contextlib
+            buf = _io.StringIO()
+            with _contextlib.redirect_stdout(buf):
+                rc = buzhash_main([
+                    "pair-search", jpath, "--radius", str(8 * 1024),
+                ])
+            self.assertEqual(rc, 0)
+            out = _json.loads(buf.getvalue())
+            self.assertEqual(out["anchor_offset"], 50000)
+            # Distractor pair at offset 800000 is well outside the
+            # 8 KiB radius from anchor 50000 → only the real pair
+            # remains.
+            self.assertEqual(len(out["pair_candidates"]), 1)
+            top = out["pair_candidates"][0]
+            self.assertEqual(top["min_value"], 4096)
+            self.assertEqual(top["max_value"], 131072)
+            self.assertTrue(top["is_plausible"])
+        finally:
+            os.unlink(jpath)
 
 
 class ChunkerRegistryTests(unittest.TestCase):

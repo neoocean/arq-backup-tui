@@ -440,7 +440,7 @@ analyzer + the user-side filtering scripts produced:
 | ``window_size``   | 256       | high       | ``mov r32, 0x100`` reproduced twice within 30 bytes of code at T-table − 2628 / − 2608 |
 | ``boundary_bits`` | 16 (mask = 0xFFFF; avg = 64 KiB) | high   | ``65536`` constant appears twice (T-table − 2609, − 2535); 16-bit mask patterns dominate the binary (725 hits vs. 13 / 72 for 13-bit / 17-bit) |
 | ``max_chunk_size``| 131072 (128 KiB) | medium | ``131072`` constant in chunker code area (T-table − 2651) |
-| ``min_chunk_size``| 4096 (4 KiB) | low (conservative) | No direct binary evidence; 4 KiB is the universal lower bound for content-defined chunkers (borg, restic, casync) and matches Arq's own minimum metadata-block size |
+| ``min_chunk_size``| 4096 (4 KiB) | low (conservative) | No co-located ``min/max`` pair in the ±32 KiB window around the T-table (the ``arq-buzhash-find pair-search`` heuristic); 4 KiB is the universal lower bound for content-defined chunkers (borg, restic, casync) and matches Arq's own minimum metadata-block size. To upgrade this confidence level, expand ``--radius`` (e.g. ±128 KiB) and/or run the ``verify-chunking`` falsification harness on a real Arq.app backup |
 
 The 1024 raw T-table bytes are inlined verbatim in
 ``arq_writer/arq_chunker_params.py`` so a future analyst can diff

@@ -271,6 +271,115 @@ def find_numeric_constants(
 
 
 # ---------------------------------------------------------------------------
+# Min / max chunk-size pairing heuristics
+# ---------------------------------------------------------------------------
+#
+# Compilers typically emit min_chunk_size and max_chunk_size as
+# immediate operands of two adjacent ``cmp`` / ``mov`` instructions in
+# the chunker's boundary-emit branch. They therefore land within a
+# few dozen bytes of each other in the .text segment. We exploit that
+# co-location to disambiguate which of the many incidental matches
+# for "4096" / "8192" / "65536" / "131072" / etc. are the real
+# chunker parameters.
+#
+# This heuristic is most useful AFTER the T table is located: the
+# chunker code lives within ~32 KiB of the table data, so we restrict
+# pair-search to that window first. The pair-search result also
+# enables disambiguating values that have multiple plausible roles
+# (256 = window or could be reach; 4096 = page size everywhere or
+# min_chunk_size).
+
+
+# Plausible min_chunk_size values (4 KiB is universal floor; 1 KiB
+# present in some research-grade chunkers; 32 KiB is the typical
+# upper bound for "min" in production chunkers).
+PLAUSIBLE_MIN_VALUES: Tuple[int, ...] = (
+    1024, 2048, 4096, 8192, 16384, 32768,
+)
+
+# Plausible max_chunk_size values. 32 KiB lower bound is unusual but
+# possible; 4 MiB upper bound covers borg / restic / casync ranges.
+PLAUSIBLE_MAX_VALUES: Tuple[int, ...] = (
+    32768, 65536, 131072, 262144, 524288,
+    1048576, 2097152, 4194304,
+)
+
+
+@dataclass
+class MinMaxPair:
+    """A co-located (min, max) candidate pair."""
+
+    min_value: int
+    max_value: int
+    min_offset: int
+    max_offset: int
+    distance: int        # |min_offset - max_offset|
+
+    @property
+    def is_plausible(self) -> bool:
+        # Real chunker pairs satisfy min < max with a meaningful
+        # ratio (≥ 4×); a 4-KiB / 8-KiB pair would split everything
+        # into 2-chunk files, which no real chunker does.
+        if self.min_value >= self.max_value:
+            return False
+        return self.max_value // self.min_value >= 4
+
+
+def find_min_max_pairs(
+    constants: List[NumericHit],
+    *,
+    max_distance_bytes: int = 64,
+) -> List[MinMaxPair]:
+    """From a list of numeric-constant hits, find every (min, max)
+    pair whose offsets are within ``max_distance_bytes`` of each
+    other, in plausibility order.
+
+    Sorted: most-plausible first by (small distance, larger ratio).
+    Pre-filtering ``constants`` to a window around the T-table
+    (e.g. ±32 KiB) before calling this is recommended — incidental
+    matches for "4096" appear all over a binary and inflate the
+    output otherwise.
+    """
+    by_value: Dict[int, List[int]] = {}
+    for h in constants:
+        by_value.setdefault(h.value, []).append(h.offset)
+
+    pairs: List[MinMaxPair] = []
+    for mn in PLAUSIBLE_MIN_VALUES:
+        for mx in PLAUSIBLE_MAX_VALUES:
+            if mx <= mn:
+                continue
+            for mn_off in by_value.get(mn, ()):
+                for mx_off in by_value.get(mx, ()):
+                    dist = abs(mn_off - mx_off)
+                    if dist <= max_distance_bytes:
+                        pairs.append(MinMaxPair(
+                            min_value=mn, max_value=mx,
+                            min_offset=mn_off, max_offset=mx_off,
+                            distance=dist,
+                        ))
+    # Most-plausible first: prefer small distance, then large ratio
+    # (a real min/max pair has a wider ratio).
+    pairs.sort(key=lambda p: (p.distance, -p.max_value // max(p.min_value, 1)))
+    return pairs
+
+
+def filter_constants_near(
+    constants: List[NumericHit],
+    center_offset: int,
+    *,
+    radius_bytes: int = 32 * 1024,
+) -> List[NumericHit]:
+    """Return only the constants whose offset lies within
+    ``±radius_bytes`` of ``center_offset`` (typically the top T-table
+    candidate's offset)."""
+    return [
+        h for h in constants
+        if abs(h.offset - center_offset) <= radius_bytes
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Top-level analyzer
 # ---------------------------------------------------------------------------
 

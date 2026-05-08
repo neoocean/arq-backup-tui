@@ -39,7 +39,10 @@ from typing import List, Optional
 
 from .chunker_oracle import compare_chunking
 from .macho_buzhash_finder import (
+    NumericHit,
     analyze_macho_for_buzhash,
+    filter_constants_near,
+    find_min_max_pairs,
     infer_parameters_from_chunk_sizes,
 )
 
@@ -94,6 +97,33 @@ def _build_parser() -> argparse.ArgumentParser:
               "plaintext chunk lengths Arq.app produced for INPUT."),
     )
 
+    p_pair = sub.add_parser(
+        "pair-search",
+        help=("From an existing analyze-binary report (JSON) or a "
+              "fresh binary, search for co-located (min,max) chunk-"
+              "size pairs near the top T-table candidate."),
+    )
+    p_pair.add_argument(
+        "report_or_binary", type=Path,
+        help=("Either a JSON report from a previous analyze-binary "
+              "run, or a Mach-O binary to analyze fresh."),
+    )
+    p_pair.add_argument(
+        "--radius", type=int, default=32 * 1024,
+        help=("Filter constants to within this many bytes of the "
+              "top T-table candidate before searching for pairs "
+              "(default 32 KiB)."),
+    )
+    p_pair.add_argument(
+        "--max-distance", type=int, default=64,
+        help=("Maximum byte distance between the min and max "
+              "constant in a co-located pair (default 64)."),
+    )
+    p_pair.add_argument(
+        "--top", type=int, default=10,
+        help="How many pair candidates to return (default 10).",
+    )
+
     return p
 
 
@@ -125,6 +155,61 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 2
         result = infer_parameters_from_chunk_sizes(sizes)
         print(json.dumps(asdict(result), indent=2))
+        return 0
+    if args.command == "pair-search":
+        path = args.report_or_binary
+        # Try interpreting as JSON first; fall back to fresh binary
+        # scan if that fails.
+        constants: List[NumericHit] = []
+        center: Optional[int] = None
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            for h in doc.get("numeric_constants", []):
+                constants.append(NumericHit(
+                    offset=int(h["offset"]),
+                    width=int(h["width"]),
+                    value=int(h["value"]),
+                    label=str(h["label"]),
+                ))
+            cands = doc.get("t_table_candidates", [])
+            if cands:
+                center = int(cands[0]["offset"])
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            report = analyze_macho_for_buzhash(path)
+            constants = report.numeric_constants
+            if report.t_table_candidates:
+                center = report.t_table_candidates[0].offset
+        if center is None:
+            print(
+                "error: input has no T-table candidate to anchor "
+                "the pair search",
+                file=sys.stderr,
+            )
+            return 2
+        windowed = filter_constants_near(
+            constants, center, radius_bytes=args.radius,
+        )
+        pairs = find_min_max_pairs(
+            windowed, max_distance_bytes=args.max_distance,
+        )[: args.top]
+        out = {
+            "anchor_offset": center,
+            "radius_bytes": args.radius,
+            "max_distance_bytes": args.max_distance,
+            "pairs_examined": len(windowed),
+            "pair_candidates": [
+                {
+                    "min_value": p.min_value,
+                    "max_value": p.max_value,
+                    "min_offset": p.min_offset,
+                    "max_offset": p.max_offset,
+                    "distance": p.distance,
+                    "is_plausible": p.is_plausible,
+                }
+                for p in pairs
+            ],
+        }
+        print(json.dumps(out, indent=2))
         return 0
     if args.command == "verify-chunking":
         input_bytes = args.input.read_bytes()
