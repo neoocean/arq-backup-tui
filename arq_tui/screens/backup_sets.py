@@ -42,6 +42,7 @@ class BackupSetListScreen(Screen):
 
     BINDINGS = [
         Binding("a", "add_destination", "Add destination", show=True),
+        Binding("v", "validate_destination", "Validate", show=True),
         Binding("escape", "app.pop_screen", "Back", show=True),
         Binding("q", "app.quit", "Quit", show=True),
     ]
@@ -272,6 +273,23 @@ class BackupSetListScreen(Screen):
     # ------------------------------------------------------------------
     # Open record on selection
     # ------------------------------------------------------------------
+
+    def action_validate_destination(self) -> None:
+        if self._opened_backend is None or self._opened_dest is None:
+            self.notify(
+                "Open a destination first.", severity="warning",
+            )
+            return
+        from .validate_run import ValidateLaunchScreen
+        password = self.app.credential_cache.get_encryption_password(
+            self._opened_dest,
+        )
+        self.app.push_screen(ValidateLaunchScreen(
+            backend=self._opened_backend,
+            password=password,
+            dest_label=self._opened_dest.display(),
+            config_dir=self.app.destination_store.config_dir,
+        ))
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         data = event.node.data
