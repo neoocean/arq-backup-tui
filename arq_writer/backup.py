@@ -249,6 +249,7 @@ class Backup:
 
         # Per-run accumulators.
         self.files_written = 0
+        self.files_reused = 0          # tree-walk reuse counter
         self.trees_written = 0
         self.bytes_plaintext = 0
         self.bytes_on_disk = 0
@@ -268,6 +269,12 @@ class Backup:
         # disabled.
         self._blob_pack: Optional[PackBuilder] = None
         self._tree_pack: Optional[PackBuilder] = None
+
+        # Prior-tree index for tree-walk reuse (cross-run skip of
+        # read+chunk on unchanged files). Populated lazily in
+        # add_folder() per folder_uuid; None means "no prior backup
+        # for this folder, walk normally".
+        self._prior_tree = None
 
     # ------------------------------------------------------------------
     # Plan-level setup
@@ -440,8 +447,13 @@ class Backup:
     # Folder walk
     # ------------------------------------------------------------------
 
-    def _walk(self, source: Path) -> Tuple[Node, int, int]:
+    def _walk(self, source: Path, rel_path: str = "") -> Tuple[Node, int, int]:
         """Recursively encode ``source`` into a Node + write blobs.
+
+        ``rel_path`` is the source-root-relative POSIX path of
+        ``source`` (empty string for the root). It's used by the
+        prior-tree index to look up previously-recorded FileNodes
+        and skip re-reading unchanged content.
 
         Returns ``(node, item_size, contained_files_count)``.
         Symlinks are NOT followed (each is treated as a regular file
@@ -449,10 +461,41 @@ class Backup:
         own conservatism).
         """
         if source.is_dir() and not source.is_symlink():
-            return self._walk_dir(source)
-        return self._walk_file(source)
+            return self._walk_dir(source, rel_path=rel_path)
+        return self._walk_file(source, rel_path=rel_path)
 
-    def _walk_file(self, src: Path) -> Tuple[FileNode, int, int]:
+    def _walk_file(
+        self, src: Path, rel_path: str = "",
+    ) -> Tuple[FileNode, int, int]:
+        # Tree-walk reuse: if we have a prior tree index AND the
+        # prior FileNode at this rel_path matches the source's
+        # current (mtime, size, mode), skip the read + chunk + hash
+        # path entirely and reuse the prior dataBlobLocs.
+        if self._prior_tree is not None and rel_path:
+            try:
+                stat_now = src.stat()
+            except OSError:
+                stat_now = None
+            if stat_now is not None:
+                prior = self._prior_tree.stat_matches(rel_path, stat_now)
+                if prior is not None:
+                    # Tally each reused BlobLoc as a "seen" blob_id
+                    # so subsequent identical-content writes hit the
+                    # within-run cache too.
+                    for loc in prior.dataBlobLocs:
+                        self._written_blobs.setdefault(
+                            loc.blobIdentifier, loc,
+                        )
+                    from .prior_tree import reuse_file_node_for
+                    node = reuse_file_node_for(stat_now, prior)
+                    self.files_written += 1
+                    self.files_reused += 1
+                    _emit(self.callback, "file_reused",
+                          path=str(src),
+                          rel_path=rel_path,
+                          size=int(stat_now.st_size),
+                          chunks=len(node.dataBlobLocs))
+                    return node, int(stat_now.st_size), 1
         try:
             data = src.read_bytes()
         except OSError as exc:
@@ -491,7 +534,9 @@ class Backup:
               blob_id=locs[0].blobIdentifier if locs else "")
         return node, len(data), 1
 
-    def _walk_dir(self, src: Path) -> Tuple[TreeNode, int, int]:
+    def _walk_dir(
+        self, src: Path, rel_path: str = "",
+    ) -> Tuple[TreeNode, int, int]:
         children: List[TreeChild] = []
         item_size = 0
         contained = 0
@@ -502,7 +547,12 @@ class Backup:
                   path=str(src), error=str(exc))
             entries = []
         for entry in entries:
-            child_node, child_size, child_count = self._walk(entry)
+            child_rel = (
+                f"{rel_path}/{entry.name}" if rel_path else entry.name
+            )
+            child_node, child_size, child_count = self._walk(
+                entry, rel_path=child_rel,
+            )
             children.append(TreeChild(name=entry.name, node=child_node))
             item_size += child_size
             contained += child_count
@@ -577,6 +627,24 @@ class Backup:
         )
         self._folder_plans.append(plan_entry)
         self._write_plan_json()
+
+        # Build the prior-tree index for this folder if dedup is on
+        # and the keyset was reused (latter implies blob_ids will
+        # line up so the prior dataBlobLocs are still valid).
+        if self.dedup_against_existing and self._keyset_was_reused:
+            from .prior_tree import PriorTreeIndex
+            idx = PriorTreeIndex(
+                self.dest_root, self.computer_uuid,
+                self.encryption_key, self.hmac_key,
+                folder_uuid=folder_uuid,
+                openssl_path=self.openssl_path,
+            )
+            self._prior_tree = idx if idx.is_usable else None
+            if self._prior_tree is not None:
+                _emit(self.callback, "prior_tree_loaded",
+                      folder_uuid=folder_uuid)
+        else:
+            self._prior_tree = None
 
         # Walk + write blobs.
         root_node, _size, _count = self._walk(source)

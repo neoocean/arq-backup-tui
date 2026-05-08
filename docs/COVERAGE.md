@@ -21,8 +21,8 @@ product are not in scope for this comparison.
 | Validate          | ✅ All four tiers (L0 / L1a / L1b / L2) + resumable audit-drip |
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41 |
 
-The aggregate test count is **198 unit tests** at the time this
-table was last updated; the suite runs in ~45 s on a stdlib-only
+The aggregate test count is **206 unit tests** at the time this
+table was last updated; the suite runs in ~52 s on a stdlib-only
 toolchain (``python -m unittest discover``).
 
 ## Detailed feature matrix
@@ -98,7 +98,8 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 | Buzhash chunking with Arq.app v7.41 params                    |  ✅    | opt-in via ``import arq_writer.arq_chunker_params`` |
 | Within-run dedup (identical SHA-256 blobs share one BlobLoc)  |  ✅    | ``Backup._written_blobs`` cache; standalone + packed modes |
 | Cross-run dedup against an existing destination               |  ✅    | ``build_backup(..., dedup_against_existing=True)`` reuses the destination's keyset and seeds the cache from ``standardobjects/`` + the most recent backuprecord (covers packed mode); see ``arq_writer.dedup`` |
-| Incremental backup (commit chain on existing destination)     |  ⚠️    | Cross-run dedup works (no rewrites of unchanged blobs). Explicit parent-commit linking via a dedicated field isn't required — Arq 7 backuprecords are ordered chronologically by path (``backuprecords/<bucket>/<num>``), so chronologically newer records are implicitly children of older ones |
+| Tree-walk reuse (skip read+chunk on unchanged files)          |  ✅    | When ``dedup_against_existing=True`` and the same ``folder_uuid`` is passed, ``arq_writer.prior_tree.PriorTreeIndex`` lazily walks the prior backup's tree and reuses any FileNode whose ``stat`` triple (mtime, size, mode) still matches — skipping ``read_bytes`` + chunker + SHA-256 hashing entirely. Tracked via ``Backup.files_reused`` and the ``file_reused`` callback event |
+| Incremental backup (commit chain on existing destination)     |  ✅    | Cross-run dedup + tree-walk reuse together cover the meaningful incremental case. Explicit parent-commit linking via a dedicated field isn't required — Arq 7 backuprecords are ordered chronologically by path (``backuprecords/<bucket>/<num>``), so chronologically newer records are implicitly children of older ones |
 | Retention / pruning of old commits                            |  🔴   | Arq.app side concern (not part of the on-disk format spec) |
 | Schedule-driven runs                                          |  🔴   | Arq.app side concern |
 
@@ -140,17 +141,21 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
   ``build_backup`` run writes a fresh backuprecord regardless of
   prior runs, so every run is a complete snapshot — no explicit
   parent-commit field is needed (Arq 7 doesn't have one). When
-  ``dedup_against_existing=True``, the writer reuses the
-  destination's existing keyset (so SHA-256 blob_ids line up across
-  runs) and seeds the within-run dedup cache from existing
-  ``standardobjects/`` files and the most-recent backuprecord's
-  walk. Result: identical content from a prior run isn't
-  re-encrypted or re-written. The remaining ❌ box would be
-  *tree-walk reuse* — recognizing that an unchanged subtree's
-  Tree blob is byte-identical to a prior run's and skipping the
-  recursive walk entirely. Today every run still walks the full
-  source tree even when dedup is on; the cost is ``O(source bytes)``
-  read + hash, not write.
+  ``dedup_against_existing=True`` and the same ``folder_uuid`` is
+  passed, the writer:
+  1. Reuses the destination's existing keyset (so SHA-256 blob_ids
+     line up across runs).
+  2. Seeds the within-run dedup cache from existing
+     ``standardobjects/`` files and the most-recent backuprecord's
+     walk.
+  3. Builds a path-keyed ``PriorTreeIndex`` for the folder and
+     skips ``read_bytes`` + chunking + hashing on every file whose
+     ``(mtime, size, mode)`` triple still matches the prior
+     FileNode — only modified files are read.
+  Net effect: an "unchanged source" rerun reads no file content
+  bytes, writes no blob bytes, and reuses the prior keyset on
+  disk. The cost reduces to one ``stat()`` per source file plus
+  one Tree blob write per directory.
 
 - **Retention / scheduling**: those concerns belong to Arq.app's
   policy layer rather than to the on-disk format. A standalone CLI
