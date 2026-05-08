@@ -450,16 +450,25 @@ table contains 256 distinct uint32 LE values (``ARQ_V7_BUZHASH_TABLE``);
 entries (0xa44016be / 0x8904a848) so a single-byte typo in the hex
 literal cannot pass CI.
 
-#### Falsification path (not yet automated)
+#### Falsification path
 
 Feed a known-content blob through Arq.app's backup engine, read back
-``BlobLoc.length`` values from the resulting backuprecord, and
-compare to the chunk lengths our :class:`Buzhash` produces with
-``ARQ_V7_CHUNKER_CONFIG``. If they match byte-for-byte, ``min`` and
-``max`` are confirmed; the medium-confidence items are upgraded to
-high. Until that test runs, the values above are best-effort static
-RE — but mismatched chunker parameters cannot produce *invalid*
-backups, only suboptimal dedup, so this is purely an optimization.
+the **plaintext** lengths of each ``dataBlobLoc`` (``BlobLoc.length``
+is the on-disk *encrypted* length; the chunker operates on
+plaintext, so the comparison must use the post-decryption,
+post-LZ4-decompression length), and compare to the chunk lengths our
+:class:`Buzhash` produces with ``ARQ_V7_CHUNKER_CONFIG``.
+
+This harness is automated as ``arq-buzhash-find verify-chunking``
+(see :mod:`arq_writer.chunker_oracle`)::
+
+    arq-buzhash-find verify-chunking ./test.bin ./observed-lengths.json
+
+A matching run upgrades ``min_chunk_size`` (and the medium-confidence
+``max_chunk_size``) to high. Until that test runs, the values above
+are best-effort static RE — but mismatched chunker parameters
+cannot produce *invalid* backups, only suboptimal dedup, so the
+harness is purely an optimization.
 
 ### Why exact matching isn't required for correctness
 
