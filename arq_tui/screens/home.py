@@ -39,6 +39,7 @@ class HomeScreen(Screen):
 
     BINDINGS = [
         Binding("n", "new_plan", "New plan", show=True),
+        Binding("r", "run_focused", "Run focused plan", show=True),
         Binding("b", "browse", "Browse backup sets", show=True),
         Binding("v", "validate", "Validate", show=True),
         Binding("q", "app.quit", "Quit", show=True),
@@ -131,10 +132,13 @@ class HomeScreen(Screen):
     # ------------------------------------------------------------------
 
     def action_new_plan(self) -> None:
-        self.notify(
-            "Plan wizard ships in M3 — coming soon.",
-            severity="information",
-        )
+        from .plan_wizard import PlanWizardScreen
+        self.app.push_screen(PlanWizardScreen(), self._after_wizard)
+
+    def _after_wizard(self, _result) -> None:
+        # The wizard saves itself + pops; we just need to refresh
+        # the plans list so the new entry shows up.
+        self._refresh_plans()
 
     def action_browse(self) -> None:
         # Local import keeps the M1 home-only test from pulling in
@@ -146,6 +150,72 @@ class HomeScreen(Screen):
         self.notify(
             "Validation runner ships in M5 — coming soon.",
             severity="information",
+        )
+
+    def action_run_focused(self) -> None:
+        plans = self._load_plans()
+        if not plans:
+            self.notify(
+                "No plans yet — press [n] to create one.",
+                severity="warning",
+            )
+            return
+        # ListView has the focused index; use its `.index` if a list
+        # rendered, otherwise default to the first plan.
+        idx = 0
+        try:
+            list_view = self.query_one("#plans-list")
+            if getattr(list_view, "index", None) is not None:
+                idx = int(list_view.index)
+        except Exception:
+            pass
+        plan = plans[max(0, min(idx, len(plans) - 1))]
+        self._run_plan(plan)
+
+    def _refresh_plans(self) -> None:
+        # Refresh by recomposing the plans-section from scratch:
+        # easier than mutating ListView in place when the empty
+        # state may need to flip on/off.
+        self.app.pop_screen()
+        self.app.push_screen(HomeScreen())
+
+    def _run_plan(self, plan) -> None:
+        # Resolve / prompt for the encryption password, then push
+        # the BackupRunScreen.
+        from ..state import Destination
+        from ..widgets.password_modal import PasswordModal
+        from .backup_run import BackupRunScreen
+
+        if plan.destination_kind == "local":
+            dest = Destination(
+                kind="local", label=plan.name,
+                path=str(plan.destination.get("path") or ""),
+            )
+        else:
+            d = plan.destination
+            dest = Destination(
+                kind="sftp", label=plan.name,
+                host=str(d.get("host") or ""),
+                port=int(d.get("port") or 22),
+                user=str(d.get("user") or ""),
+                path=str(d.get("path") or ""),
+                identity_file=str(d.get("identity_file") or ""),
+            )
+        cached_pw = self.app.credential_cache.get_encryption_password(dest)
+        if cached_pw is not None:
+            self.app.push_screen(BackupRunScreen(plan=plan, password=cached_pw))
+            return
+
+        def _with_pw(pw):
+            if not pw:
+                return
+            self.app.credential_cache.set_encryption_password(dest, pw)
+            self.app.push_screen(BackupRunScreen(plan=plan, password=pw))
+        self.app.push_screen(
+            PasswordModal(
+                prompt=f"Encryption password for {plan.name}",
+            ),
+            _with_pw,
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

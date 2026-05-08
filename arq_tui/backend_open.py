@@ -39,7 +39,12 @@ def open_backend(
     the backend is no longer needed.
     """
     if dest.kind == "local":
-        return LocalBackend(Path(dest.path))
+        path = Path(dest.path)
+        # The writer expects to be able to create the destination
+        # subtree; LocalBackend.__init__ refuses non-existent roots,
+        # so materialize the directory here on the writer's behalf.
+        path.mkdir(parents=True, exist_ok=True)
+        return LocalBackend(path)
     if dest.kind == "sftp":
         backend = SftpBackend(
             host=dest.host,

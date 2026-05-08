@@ -112,6 +112,42 @@ class PlanRegistry:
         out.sort(key=lambda pl: pl.name.lower())
         return out
 
+    def save(self, plan: Plan) -> Path:
+        """Persist ``plan`` to ``plans/<plan_id>.json``.
+
+        Caller is responsible for assigning a stable ``plan_id``
+        (typically a UUID generated at wizard-submit time).
+        Returns the absolute path that was written.
+        """
+        if not plan.plan_id:
+            raise ValueError("plan.plan_id is required")
+        self.plans_dir.mkdir(parents=True, exist_ok=True)
+        path = self.plans_dir / f"{plan.plan_id}.json"
+        data = {
+            "plan_id": plan.plan_id,
+            "name": plan.name,
+            "sources": list(plan.sources),
+            "destination_kind": plan.destination_kind,
+            "destination": dict(plan.destination),
+            "chunker": plan.chunker,
+            "use_packs": plan.use_packs,
+            "dedup_against_existing": plan.dedup_against_existing,
+            "last_run_iso": plan.last_run_iso,
+        }
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return path
+
+    def delete(self, plan_id: str) -> bool:
+        """Remove ``plans/<plan_id>.json``. Returns ``True`` if a
+        file was removed, ``False`` otherwise."""
+        path = self.plans_dir / f"{plan_id}.json"
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+
 
 # ---------------------------------------------------------------------------
 # Recent destinations
