@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arq-backup-tui"
+version = "0.1.0"
+description = "Independent validator and TUI foundation for Arq 7 backups."
+readme = { content-type = "text/plain", text = "Independent Arq 7 backup validator." }
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+keywords = ["arq", "backup", "validator", "tui"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS :: MacOS X",
+    "Topic :: System :: Archiving :: Backup",
+]
+
+[project.optional-dependencies]
+# Test suite uses only stdlib + the package itself, so this is empty
+# by design. The block exists so 'pip install -e ".[test]"' is a
+# valid no-op invocation that CI can rely on.
+test = []
+
+[project.scripts]
+arq-validator = "arq_validator.cli:main"
+arq-backup = "arq_writer.cli:main"
+arq-reader = "arq_reader.cli:main"
+arq-buzhash-find = "arq_writer.buzhash_re_cli:main"
+
+[tool.setuptools]
+packages = ["arq_validator", "arq_writer", "arq_reader"]
+
+[tool.setuptools.package-data]
+arq_validator = ["py.typed"]

@@ -1,0 +1,157 @@
+"""Build the ``backuprecord`` file.
+
+A backup record is a property list (we emit binary plist) describing:
+
+- A copy of the backup plan at backup time
+- The root ``Node`` rendered as a nested dict (not the binary Node
+  format, which lives inside ``treepacks/``)
+- Some metadata (creation date, computer OS type, folder UUIDs, etc.)
+
+The plist is then LZ4-wrapped and (when encryption is enabled, which
+it always is for our writer) wrapped in an ``EncryptedObject``. The
+output of :func:`build_backuprecord_arqo` is the raw bytes that go on
+disk as ``backupfolders/<UUID>/backuprecords/<NNNNN>/<num>.backuprecord``.
+"""
+
+from __future__ import annotations
+
+import plistlib
+import time
+from typing import Any, Dict, Optional
+
+from .crypto_write import build_encrypted_object
+from .lz4_block import lz4_wrap
+from .types import BlobLoc, FileNode, Node, TreeNode
+
+
+def blobloc_to_dict(loc: BlobLoc) -> Dict[str, Any]:
+    return {
+        "blobIdentifier": loc.blobIdentifier,
+        "isPacked": bool(loc.isPacked),
+        "relativePath": loc.relativePath,
+        "offset": int(loc.offset),
+        "length": int(loc.length),
+        "stretchEncryptionKey": bool(loc.stretchEncryptionKey),
+        "compressionType": int(loc.compressionType),
+    }
+
+
+def node_to_dict(node: Node) -> Dict[str, Any]:
+    """Render a ``Node`` as the dict shape the spec shows in the example.
+
+    Field names match the ASCII-plist sample in the Arq 7 spec
+    (``changeTime_*``, ``modificationTime_*``, ``mac_st_*``, etc.) so a
+    reader who has the spec open can recognize them at a glance.
+    """
+    is_tree = isinstance(node, TreeNode)
+    out: Dict[str, Any] = {
+        "isTree": bool(is_tree),
+        "computerOSType": int(node.computerOSType),
+        "containedFilesCount": int(node.containedFilesCount),
+        "itemSize": int(node.itemSize),
+        "modificationTime_sec": int(node.mtime_sec),
+        "modificationTime_nsec": int(node.mtime_nsec),
+        "changeTime_sec": int(node.ctime_sec),
+        "changeTime_nsec": int(node.ctime_nsec),
+        "creationTime_sec": int(node.create_time_sec),
+        "creationTime_nsec": int(node.create_time_nsec),
+        "deleted": bool(node.deleted),
+        "mac_st_dev": int(node.mac_st_dev),
+        "mac_st_ino": int(node.mac_st_ino),
+        "mac_st_mode": int(node.mac_st_mode),
+        "mac_st_nlink": int(node.mac_st_nlink),
+        "mac_st_uid": int(node.mac_st_uid),
+        "mac_st_gid": int(node.mac_st_gid),
+        "mac_st_rdev": int(node.mac_st_rdev),
+        "mac_st_flags": int(node.mac_st_flags),
+        "winAttrs": int(node.win_attrs),
+    }
+    if is_tree:
+        assert isinstance(node, TreeNode)
+        out["treeBlobLoc"] = blobloc_to_dict(node.treeBlobLoc)
+        out["dataBlobLocs"] = []
+    else:
+        assert isinstance(node, FileNode)
+        out["dataBlobLocs"] = [
+            blobloc_to_dict(b) for b in node.dataBlobLocs
+        ]
+    out["xattrsBlobLocs"] = [
+        blobloc_to_dict(b) for b in node.xattrsBlobLocs
+    ]
+    return out
+
+
+def build_backuprecord_dict(
+    *,
+    backup_folder_uuid: str,
+    backup_plan_uuid: str,
+    backup_plan_dict: Dict[str, Any],
+    root_node: Node,
+    local_path: str,
+    local_mount_point: str = "/",
+    relative_path: str = "",
+    arq_version: str = "0.1.0",
+    creation_date: Optional[float] = None,
+    computer_os_type: int = 1,
+    storage_class: str = "STANDARD",
+    volume_name: str = "",
+    version: int = 100,
+    disk_identifier: str = "ROOT",
+) -> Dict[str, Any]:
+    """Assemble the top-level dict written into the backuprecord plist."""
+    if creation_date is None:
+        creation_date = time.time()
+    return {
+        "archived": False,
+        "arqVersion": arq_version,
+        "backupFolderUUID": backup_folder_uuid,
+        "backupPlanJSON": backup_plan_dict,
+        "backupPlanUUID": backup_plan_uuid,
+        "computerOSType": int(computer_os_type),
+        "copiedFromCommit": False,
+        "copiedFromSnapshot": False,
+        "creationDate": int(creation_date),
+        "diskIdentifier": disk_identifier,
+        "errorCount": 0,
+        "isComplete": True,
+        "localMountPoint": local_mount_point,
+        "localPath": local_path,
+        "node": node_to_dict(root_node),
+        "relativePath": relative_path,
+        "storageClass": storage_class,
+        "version": int(version),
+        "volumeName": volume_name,
+    }
+
+
+def serialize_backuprecord(record: Dict[str, Any]) -> bytes:
+    """Serialize the backuprecord dict as a binary plist.
+
+    Apple's ``PropertyListSerialization`` (which Arq.app and
+    ``arq_restore`` both use under the hood) accepts XML, binary, and
+    OpenStep ASCII plists transparently. Binary plist is the smallest
+    and most reliable format Python's stdlib can emit.
+    """
+    return plistlib.dumps(record, fmt=plistlib.FMT_BINARY)
+
+
+def build_backuprecord_arqo(
+    record_dict: Dict[str, Any],
+    *,
+    encryption_key: bytes,
+    hmac_key: bytes,
+    openssl_path: str = "openssl",
+    session_key: Optional[bytes] = None,
+    data_iv: Optional[bytes] = None,
+    master_iv: Optional[bytes] = None,
+) -> bytes:
+    """Pipeline: plist -> LZ4 wrap -> ARQO. Returns on-disk bytes."""
+    plist_bytes = serialize_backuprecord(record_dict)
+    lz4_bytes = lz4_wrap(plist_bytes)
+    return build_encrypted_object(
+        lz4_bytes, encryption_key, hmac_key,
+        openssl_path=openssl_path,
+        session_key=session_key,
+        data_iv=data_iv,
+        master_iv=master_iv,
+    )

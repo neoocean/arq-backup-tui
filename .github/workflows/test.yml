@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+jobs:
+  unittest:
+    name: unittest discover (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Lower bound = pyproject's requires-python; upper bound =
+        # latest stable. Mid-range covered by 3.11.
+        python: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install package (stdlib-only, no deps to install)
+        run: pip install -e ".[test]"
+      - name: Run unittest discover (topdir = repo root)
+        run: python -m unittest discover
+      - name: Run unittest discover (topdir = tests dir)
+        run: python -m unittest discover -s tests
