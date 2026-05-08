@@ -198,6 +198,42 @@ def build_encrypted_object(
     return ARQO_MAGIC + mac + body
 
 
+def rotate_keyset_password(
+    keyset_blob: bytes,
+    *,
+    old_password: str,
+    new_password: str,
+    openssl_path: str = "openssl",
+) -> bytes:
+    """Re-encrypt an ``encryptedkeyset.dat`` payload under a new
+    password without changing the master keys.
+
+    The (encryption_key, hmac_key, blob_id_salt) triple stays the
+    same so every existing backuprecord / blob remains decryptable
+    afterward. Only the keyset's salt + IV + ciphertext + outer
+    HMAC change. Re-derives the storage AES + HMAC keys via
+    PBKDF2-SHA256 with fresh 8-byte salt.
+
+    Returns the new ``encryptedkeyset.dat`` bytes — caller is
+    responsible for writing them back via ``backend.write_all`` (or
+    `Path.write_bytes`). The old keyset is **not** modified
+    in-place by this function — atomicity is the caller's
+    responsibility (write to a temp path + rename).
+    """
+    # Local import to avoid a top-level cycle: the validator
+    # decrypt_keyset is the inverse of build_encrypted_keyset.
+    from arq_validator.crypto import decrypt_keyset
+
+    keyset = decrypt_keyset(
+        keyset_blob, old_password, openssl_path=openssl_path,
+    )
+    return build_encrypted_keyset(
+        new_password,
+        keyset.encryption_key, keyset.hmac_key, keyset.blob_id_salt,
+        openssl_path=openssl_path,
+    )
+
+
 def compute_blob_id(blob_id_salt: bytes, plaintext: bytes) -> str:
     """SHA-256 hex blob identifier — Arq 7 content addressing.
 

@@ -353,7 +353,17 @@ class Restore:
         result: RestoreResult,
         callback: Optional[ProgressCb],
     ) -> None:
+        import stat as _stat
         out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Symlinks: writer stores the link target as the file's
+        # content (under the S_IFLNK mode bit) so a restorer can
+        # rebuild the link as a symlink rather than as a regular
+        # file holding the target string.
+        is_symlink = (
+            node.mac_st_mode
+            and _stat.S_ISLNK(int(node.mac_st_mode))
+        )
         chunks: List[bytes] = []
         try:
             for loc in node.dataBlobLocs:
@@ -369,15 +379,56 @@ class Restore:
                   path=str(out_path), error=str(exc))
             return
         body = b"".join(chunks)
+
+        if is_symlink:
+            # Replace any existing entry; os.symlink errors out
+            # otherwise.
+            try:
+                if out_path.is_symlink() or out_path.exists():
+                    out_path.unlink()
+            except OSError:
+                pass
+            try:
+                target = body.decode("utf-8", errors="replace")
+                os.symlink(target, out_path)
+            except OSError as exc:
+                result.failures.append({
+                    "path": str(out_path),
+                    "kind": "symlink_create",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                _emit(callback, "file_failed",
+                      path=str(out_path), error=str(exc))
+                return
+            result.bytes_restored += len(body)
+            result.files_restored += 1
+            _emit(callback, "file_restored",
+                  path=str(out_path), size=len(body),
+                  symlink=True)
+            return
+
         out_path.write_bytes(body)
         result.bytes_restored += len(body)
         result.files_restored += 1
-        # Best-effort metadata. mtime is the only field most file
-        # systems can faithfully reproduce as a non-root user.
+
+        # Metadata restoration. Each step is wrapped in try/except
+        # so a single permission denied (e.g. uid restore as a
+        # non-root user) doesn't abort the whole file.
+        # mtime + atime
         try:
             if node.mtime_sec:
                 ts = node.mtime_sec + node.mtime_nsec / 1_000_000_000
                 os.utime(out_path, (ts, ts))
+        except OSError:
+            pass
+        # mode (perm bits only — file-type bits stay as the OS
+        # default for a regular file)
+        try:
+            if node.mac_st_mode:
+                os.chmod(
+                    out_path,
+                    _stat.S_IMODE(int(node.mac_st_mode)),
+                )
         except OSError:
             pass
         _emit(callback, "file_restored",

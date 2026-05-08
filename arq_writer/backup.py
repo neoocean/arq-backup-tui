@@ -49,8 +49,10 @@ from .constants import (
     BACKUPRECORDS_DIR,
     BLOBPACKS_DIR,
     COMPRESSION_LZ4,
+    DEFAULT_MAX_PACKED_ITEM_LENGTH,
     KEYSET_FILE,
     KEYSET_PLAIN_FIELD_LEN,
+    LARGEBLOBPACKS_DIR,
     STANDARDOBJECTS_DIR,
     TREEPACKS_DIR,
     TREE_VERSION,
@@ -138,6 +140,25 @@ def _absolute(dest_root: Path, rel: str) -> Path:
     return dest_root / rel.lstrip("/")
 
 
+def _empty_skipped_filenode() -> "FileNode":
+    """Stand-in FileNode for entries excluded by source filters.
+
+    Returned by ``_walk_file`` when a file is dropped by a size
+    limit or exclusion rule. The Tree's parent walker still
+    needs *something* node-shaped to attach so the walk doesn't
+    cascade into a NoneType crash; we surface a 0-byte FileNode
+    with no dataBlobLocs and the ``deleted`` flag set so a
+    restorer that someday does honor the flag treats it as a
+    tombstone instead of an empty file.
+    """
+    return FileNode(
+        dataBlobLocs=[],
+        itemSize=0,
+        containedFilesCount=0,
+        deleted=True,
+    )
+
+
 def _try_load_existing_keyset(
     dest_root: Path, computer_uuid: str, password: str,
     *, backend=None,
@@ -208,8 +229,11 @@ class Backup:
         openssl_path: str = "openssl",
         use_packs: bool = False,
         max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
+        large_blob_threshold: int = DEFAULT_MAX_PACKED_ITEM_LENGTH,
         chunker_config: Optional[ChunkerConfig] = None,
         dedup_against_existing: bool = False,
+        max_file_bytes: Optional[int] = None,
+        exclusions=None,
         backend=None,
         callback: Optional[ProgressCb] = None,
     ) -> None:
@@ -276,11 +300,17 @@ class Backup:
         self.openssl_path = openssl_path
         self.use_packs = use_packs
         self.max_pack_bytes = max_pack_bytes
+        self.large_blob_threshold = large_blob_threshold
         self.chunker_config = chunker_config
         self._chunker: Optional[Buzhash] = (
             Buzhash(chunker_config) if chunker_config is not None else None
         )
         self.dedup_against_existing = dedup_against_existing
+        self.max_file_bytes = max_file_bytes
+        # Default to an empty (= no-op) ExclusionRules when not
+        # supplied so _walk_dir can call .excludes(...) freely.
+        from .exclusions import ExclusionRules
+        self.exclusions = exclusions if exclusions is not None else ExclusionRules.empty()
         self.callback = callback
 
         # Per-run accumulators.
@@ -305,6 +335,7 @@ class Backup:
         # disabled.
         self._blob_pack: Optional[PackBuilder] = None
         self._tree_pack: Optional[PackBuilder] = None
+        self._large_blob_pack: Optional[PackBuilder] = None
 
         # Prior-tree index for tree-walk reuse (cross-run skip of
         # read+chunk on unchanged files). Populated lazily in
@@ -479,6 +510,22 @@ class Backup:
                         backend=self.backend,
                     )
                 loc = self._tree_pack.add(blob_id, arqo)
+            elif (
+                self.large_blob_threshold > 0
+                and len(arqo) > self.large_blob_threshold
+            ):
+                # spec: blobs whose ARQO bytes exceed
+                # maxPackedItemLength go to largeblobpacks/ instead
+                # of blobpacks/. Matches Arq.app's routing exactly.
+                if self._large_blob_pack is None:
+                    self._large_blob_pack = PackBuilder(
+                        self.computer_uuid, LARGEBLOBPACKS_DIR,
+                        self.dest_root,
+                        max_pack_bytes=self.max_pack_bytes,
+                        compression_type=COMPRESSION_LZ4,
+                        backend=self.backend,
+                    )
+                loc = self._large_blob_pack.add(blob_id, arqo)
             else:
                 if self._blob_pack is None:
                     self._blob_pack = PackBuilder(
@@ -515,12 +562,16 @@ class Backup:
             self._blob_pack.close()
         if self._tree_pack is not None:
             self._tree_pack.close()
+        if self._large_blob_pack is not None:
+            self._large_blob_pack.close()
 
     # ------------------------------------------------------------------
     # Folder walk
     # ------------------------------------------------------------------
 
-    def _walk(self, source: Path, rel_path: str = "") -> Tuple[Node, int, int]:
+    def _walk(
+        self, source: Path, rel_path: str = "",
+    ) -> "Optional[Tuple[Node, int, int]]":
         """Recursively encode ``source`` into a Node + write blobs.
 
         ``rel_path`` is the source-root-relative POSIX path of
@@ -528,10 +579,12 @@ class Backup:
         prior-tree index to look up previously-recorded FileNodes
         and skip re-reading unchanged content.
 
-        Returns ``(node, item_size, contained_files_count)``.
-        Symlinks are NOT followed (each is treated as a regular file
-        whose content is the link target — pragmatic, matches Arq's
-        own conservatism).
+        Returns ``(node, item_size, contained_files_count)``, or
+        ``None`` if the entry was skipped (file-size limit, etc.).
+
+        Symlinks are NOT followed; the writer stores the link
+        target string under the S_IFLNK mode bit so the restorer
+        can recreate them as symlinks rather than regular files.
         """
         self._check_cancel()
         if source.is_dir() and not source.is_symlink():
@@ -540,7 +593,27 @@ class Backup:
 
     def _walk_file(
         self, src: Path, rel_path: str = "",
-    ) -> Tuple[FileNode, int, int]:
+    ) -> "Optional[Tuple[FileNode, int, int]]":
+        """Process one source file. Returns ``None`` when the file
+        is skipped (size limit / exclusion); the parent ``_walk_dir``
+        drops ``None`` results from its children list."""
+        # File-size skip rule. Symlinks always pass (their lstat
+        # size is just the link-target string length).
+        if (
+            self.max_file_bytes is not None
+            and not src.is_symlink()
+        ):
+            try:
+                size = src.stat().st_size
+            except OSError:
+                size = 0
+            if size > self.max_file_bytes:
+                _emit(self.callback, "file_skipped",
+                      path=str(src), rel_path=rel_path,
+                      reason="size_limit",
+                      size=size,
+                      limit=self.max_file_bytes)
+                return None
         # Tree-walk reuse: if we have a prior tree index AND the
         # prior FileNode at this rel_path matches the source's
         # current (mtime, size, mode), skip the read + chunk + hash
@@ -570,6 +643,46 @@ class Backup:
                           size=int(stat_now.st_size),
                           chunks=len(node.dataBlobLocs))
                     return node, int(stat_now.st_size), 1
+        # Symlinks: don't follow. Store the link target string as
+        # the file's content so the restorer can rebuild the link
+        # under the S_IFLNK mode bit.
+        is_symlink = src.is_symlink()
+        if is_symlink:
+            try:
+                data = os.readlink(src).encode("utf-8")
+            except OSError as exc:
+                _emit(self.callback, "file_read_error",
+                      path=str(src), error=str(exc))
+                data = b""
+            # lstat so we get the symlink's own metadata, not the
+            # target's.
+            st = src.lstat()
+            locs = [self._write_blob(data)]
+            node = FileNode(
+                dataBlobLocs=locs,
+                itemSize=len(data),
+                containedFilesCount=1,
+                mtime_sec=int(st.st_mtime),
+                mtime_nsec=int(
+                    (st.st_mtime - int(st.st_mtime)) * 1_000_000_000
+                ),
+                ctime_sec=int(st.st_ctime),
+                ctime_nsec=int(
+                    (st.st_ctime - int(st.st_ctime)) * 1_000_000_000
+                ),
+                mac_st_mode=st.st_mode,
+                mac_st_uid=st.st_uid if hasattr(st, "st_uid") else 0,
+                mac_st_gid=st.st_gid if hasattr(st, "st_gid") else 0,
+                mac_st_ino=st.st_ino,
+                mac_st_nlink=st.st_nlink,
+            )
+            self.files_written += 1
+            _emit(self.callback, "file_written",
+                  path=str(src), size=len(data),
+                  chunks=1, symlink=True,
+                  blob_id=locs[0].blobIdentifier if locs else "")
+            return node, len(data), 1
+
         try:
             data = src.read_bytes()
         except OSError as exc:
@@ -624,9 +737,20 @@ class Backup:
             child_rel = (
                 f"{rel_path}/{entry.name}" if rel_path else entry.name
             )
-            child_node, child_size, child_count = self._walk(
-                entry, rel_path=child_rel,
-            )
+            # Exclusion filter — drop the whole entry (file or
+            # subtree) before any I/O.
+            if not self.exclusions.is_empty:
+                is_dir = entry.is_dir() and not entry.is_symlink()
+                if self.exclusions.excludes(child_rel, is_dir=is_dir):
+                    _emit(self.callback, "entry_excluded",
+                          path=str(entry), rel_path=child_rel,
+                          is_dir=is_dir)
+                    continue
+            walked = self._walk(entry, rel_path=child_rel)
+            if walked is None:
+                # File was skipped (size limit, etc.).
+                continue
+            child_node, child_size, child_count = walked
             children.append(TreeChild(name=entry.name, node=child_node))
             item_size += child_size
             contained += child_count
@@ -666,12 +790,19 @@ class Backup:
         folder_uuid: Optional[str] = None,
         folder_name: Optional[str] = None,
         local_mount_point: str = "/",
+        chunker_config: Optional[ChunkerConfig] = None,
     ) -> Path:
         """Walk ``source`` and write the resulting backuprecord.
 
         Returns the absolute path to the written backuprecord file.
         Multiple calls accumulate into the same plan; ``backupplan.json``
         is rewritten each time so it stays in sync.
+
+        ``chunker_config`` overrides the constructor-level chunker
+        for this folder only — matches Arq.app's per-folder
+        ``useBuzhash`` toggle. When set, the override applies to
+        every blob written during this ``add_folder`` call and the
+        instance reverts to the default chunker afterward.
         """
         source = Path(source).resolve()
         folder_uuid = folder_uuid or str(uuid.uuid4()).upper()
@@ -720,13 +851,34 @@ class Backup:
         else:
             self._prior_tree = None
 
+        # Per-folder chunker override — swap in for the duration
+        # of this folder's walk, then restore.
+        prev_chunker = self._chunker
+        if chunker_config is not None:
+            self._chunker = Buzhash(chunker_config)
+
         # Walk + write blobs. A cooperative cancel raised mid-walk
         # short-circuits to "no backuprecord written"; the partial
         # state we leave behind is just orphan blobs / packs, all
         # of which the next dedup-against-existing run will pick up
         # again.
         try:
-            root_node, _size, _count = self._walk(source)
+            walked = self._walk(source)
+            if walked is None:
+                # Whole source root excluded? Emit empty TreeNode
+                # so the backuprecord still has well-defined shape.
+                from .types import Tree
+                empty_tree = Tree(children=[], version=TREE_VERSION)
+                tree_loc = self._write_blob(
+                    write_tree(empty_tree, version=TREE_VERSION),
+                    is_tree=True,
+                )
+                root_node = TreeNode(
+                    treeBlobLoc=tree_loc, itemSize=0,
+                    containedFilesCount=0,
+                )
+            else:
+                root_node, _size, _count = walked
         except BackupCancelled:
             _emit(self.callback, "backup_cancelled",
                   folder_uuid=folder_uuid)
@@ -736,6 +888,11 @@ class Backup:
         # The record embeds BlobLocs whose offsets must point at
         # already-on-disk bytes; flushing here guarantees that.
         self.flush_packs()
+
+        # Restore the constructor-level chunker if this folder
+        # used an override.
+        if chunker_config is not None:
+            self._chunker = prev_chunker
 
         # Build the backup plan dict (snapshot embedded in the record).
         plan_dict = build_backupplan(
@@ -811,8 +968,11 @@ def build_backup(
     folder_uuid: Optional[str] = None,
     use_packs: bool = False,
     max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
+    large_blob_threshold: int = DEFAULT_MAX_PACKED_ITEM_LENGTH,
     chunker_config: Optional[ChunkerConfig] = None,
     dedup_against_existing: bool = False,
+    max_file_bytes: Optional[int] = None,
+    exclusions=None,
 ) -> BackupResult:
     """One-shot convenience wrapper: full plan init + single folder.
 
@@ -845,8 +1005,11 @@ def build_backup(
         plan_uuid=plan_uuid,
         use_packs=use_packs,
         max_pack_bytes=max_pack_bytes,
+        large_blob_threshold=large_blob_threshold,
         chunker_config=chunker_config,
         dedup_against_existing=dedup_against_existing,
+        max_file_bytes=max_file_bytes,
+        exclusions=exclusions,
     )
     bk.init_plan()
     rec_path = bk.add_folder(

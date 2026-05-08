@@ -40,8 +40,15 @@ def _default_config_dir() -> Path:
 
 @dataclass
 class Plan:
-    """A backup plan record. Most fields are populated by the M3
-    plan wizard; M1 only models the shape."""
+    """A backup plan record.
+
+    The ``chunker`` field selects the writer's default chunker.
+    ``per_source_chunkers`` (optional) overrides ``chunker`` for
+    specific sources by absolute source path → chunker name. Used
+    by the plan wizard's "different chunker for this source"
+    affordance and matches Arq.app's per-folder ``useBuzhash``
+    toggle.
+    """
 
     plan_id: str = ""
     name: str = ""
@@ -49,6 +56,7 @@ class Plan:
     destination_kind: str = "local"   # "local" | "sftp"
     destination: dict = field(default_factory=dict)
     chunker: str = "default"
+    per_source_chunkers: dict = field(default_factory=dict)
     use_packs: bool = True
     dedup_against_existing: bool = True
     last_run_iso: str = ""
@@ -103,6 +111,9 @@ class PlanRegistry:
                 ),
                 destination=dict(data.get("destination") or {}),
                 chunker=str(data.get("chunker") or "default"),
+                per_source_chunkers=dict(
+                    data.get("per_source_chunkers") or {}
+                ),
                 use_packs=bool(data.get("use_packs", True)),
                 dedup_against_existing=bool(
                     data.get("dedup_against_existing", True)
@@ -130,6 +141,7 @@ class PlanRegistry:
             "destination_kind": plan.destination_kind,
             "destination": dict(plan.destination),
             "chunker": plan.chunker,
+            "per_source_chunkers": dict(plan.per_source_chunkers),
             "use_packs": plan.use_packs,
             "dedup_against_existing": plan.dedup_against_existing,
             "last_run_iso": plan.last_run_iso,
