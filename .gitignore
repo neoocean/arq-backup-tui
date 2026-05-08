@@ -11,3 +11,9 @@ dist/
 venv/
 .coverage
 htmlcov/
+
+# Local-only credentials for the SFTP integration tests.
+# See docs/COMPAT-SFTP-TESTING.md.
+.env
+.env.local
+tests/integration/.env
