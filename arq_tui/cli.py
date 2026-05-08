@@ -102,6 +102,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Age cutoff in days (default 30).",
     )
 
+    # ``arq-tui machine-info <root>`` — given just the destination
+    # path, surface every metadata field Arq.app records about the
+    # source machine, plus a comparison against the current host.
+    # Useful when re-installing a Mac and asking "does this backup
+    # actually match this machine?" without any local Arq settings.
+    machine = sub.add_parser(
+        "machine-info",
+        help="Show source-machine metadata for a destination "
+             "and (optionally) compare with this host.",
+    )
+    machine.add_argument(
+        "root",
+        type=Path,
+        help="Path to the destination root (the directory that "
+             "directly contains the <COMPUTER-UUID>/ subdir).",
+    )
+    machine.add_argument(
+        "--no-compare",
+        action="store_true",
+        help="Skip the host-vs-source comparison; just dump the "
+             "source-side metadata.",
+    )
+
     return p
 
 
@@ -214,7 +237,74 @@ def main(argv: Optional[List[str]] = None) -> int:
     if parsed.command == "runs":
         return _handle_runs_command(parsed)
 
+    if parsed.command == "machine-info":
+        return _handle_machine_info_command(parsed)
+
     return 2
+
+
+def _handle_machine_info_command(parsed) -> int:
+    """Dispatch ``arq-tui machine-info <root>`` — print every
+    source-machine metadata field Arq.app recorded into the
+    destination, plus a comparison with the current host (unless
+    ``--no-compare``)."""
+    from arq_validator.backend import LocalBackend
+    from arq_validator.machine_info import (
+        compare, read_host_info, read_source_info,
+    )
+
+    root: Path = parsed.root
+    if not root.is_dir():
+        print(f"error: root is not a directory: {root}",
+              file=sys.stderr)
+        return 2
+    backend = LocalBackend(root)
+    sources = read_source_info(backend, "/")
+    if not sources:
+        print(
+            f"error: no Arq 7 computer subtrees under {root}",
+            file=sys.stderr,
+        )
+        return 2
+    host = None if parsed.no_compare else read_host_info()
+    out = {
+        "destination_root": str(root),
+        "host": (
+            None if host is None
+            else {
+                "hostname": host.hostname,
+                "computer_name": host.computer_name,
+                "username": host.username,
+                "os_name": host.os_name,
+                "os_version": host.os_version,
+            }
+        ),
+        "computers": [],
+    }
+    for src in sources:
+        comp = {
+            "computer_uuid": src.computer_uuid,
+            "computer_name": src.computer_name,
+            "os_type": src.os_type,
+            "os_version": src.os_version,
+            "arq_version": src.arq_version,
+            "plan_name": src.plan_name,
+            "folder_count": src.folder_count,
+        }
+        if host is not None:
+            m = compare(src, host)
+            comp["match"] = {
+                "computer_name": m.computer_name,
+                "os_type": m.os_type,
+                "os_version": m.os_version,
+                "verdict": (
+                    "strong" if m.is_strong_match()
+                    else "weak-or-mixed"
+                ),
+            }
+        out["computers"].append(comp)
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
 
 
 def _handle_runs_command(parsed) -> int:

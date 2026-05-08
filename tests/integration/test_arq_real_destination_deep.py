@@ -300,6 +300,45 @@ class TreeBinaryParseTests(_RealDestinationBase):
             n, 1, f"folder {fu}: walked zero trees",
         )
 
+    def test_every_folder_root_tree_parses(self) -> None:
+        """Each folder's *root* Tree blob (across both v3 + v4
+        formats) parses without raising. Catches any per-version
+        binary-layout drift the fix for v4's 38-byte trailing
+        block didn't anticipate. Stays bounded by reading only
+        the root tree (one pack file per folder)."""
+        from arq_reader.parse import parse_tree
+        rs = Restore(
+            "/", encryption_password=self.creds.dest_password,
+            backend=self.backend,
+        )
+        layout = self.layouts[0]
+        if not layout.backup_folder_uuids:
+            self.skipTest("no folders")
+        for fu in layout.backup_folder_uuids:
+            with self.subTest(folder=fu):
+                rec_path = find_latest_backuprecord(
+                    self.backend, "/", self.cu, fu,
+                )
+                arqo = self.backend.read_all(rec_path)
+                plain = decrypt_lz4_arqo(
+                    arqo, self.keyset.encryption_key,
+                    self.keyset.hmac_key,
+                )
+                rec = _parse_backuprecord(plain)
+                node = rec["node"]
+                if not node.get("isTree"):
+                    continue
+                tbl = rs._blobloc_from_dict(node["treeBlobLoc"])
+                tree_bytes = rs._fetch_blob(tbl, self.keyset)
+                version = int.from_bytes(tree_bytes[:4], "big")
+                tree = parse_tree(tree_bytes)
+                # Empty trees are unusual but legal; any decode
+                # failure is the actual signal.
+                self.assertGreaterEqual(
+                    len(tree.children), 0,
+                    f"folder {fu}: v={version} tree decode failed",
+                )
+
 
 # ---------------------------------------------------------------------------
 # Priority 3 — writer's JSON output shape vs. Arq.app's

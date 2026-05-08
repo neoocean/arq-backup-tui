@@ -278,6 +278,30 @@ Spec 의 bucket 공식은 Arq.app 내부 implementation detail 로 격하. Calle
 - 새 테스트 `test_record_paths_sort_chronologically`: 5폴더 × 5records
   decrypt 후 path 정렬과 creationDate 정렬 일치 검증 (실 destination 에서 PASS).
 
+## 7. Tree v4 binary 포맷의 38-byte trailing block
+
+### Before
+
+우리 `parse_node` 는 Tree v3 만 알고 있었습니다. 운영자의 5개 폴더 중
+4개가 Tree v4 로 기록되어 있어, 이 폴더들의 root tree 부터 walk 자체가
+`bad [String] isNotNull byte: 55 at pos=680` 같은 형태로 즉시 폭발했습니다.
+
+### After (commit `60496a1`)
+
+Hex diff 분석으로 v4 가 **모든 Node 끝에 38바이트 trailing block** 을
+추가한다는 점을 발견. 이 블록은 typical 파일 (`.DS_Store` 등) 에 대해
+**모두 zero** 였습니다 (정확한 field 분해는 Mach-O RE 가 필요하지만, 모두
+zero 라는 점이 "선택적 field들의 default 값" 임을 시사 — 추정: extras
+blob_loc count=0 + 빈 placeholder 들).
+
+Fix:
+- `arq_reader/parse.py:parse_node`: `if tree_version >= 4:
+  reader.read_raw(38)`
+- 새 `BinaryReader.read_raw(n)` 메서드 — 미해석 바이트 N개 consume
+
+검증: 운영자의 5개 폴더 모두 (v3 1개 + v4 4개) `parse_tree` 통과.
+v4 tree 의 정확한 38-byte block 분해는 follow-up RE 작업으로 deferred.
+
 ## 영향도 매트릭스
 
 | 영역 | Before | After | 영향받은 코드 |
@@ -288,6 +312,7 @@ Spec 의 bucket 공식은 Arq.app 내부 implementation detail 로 격하. Calle
 | Node 직렬화 | uid/gid 만 | userName/groupName 까지 | `arq_writer/backup.py`, `arq_writer/backuprecord.py` |
 | SFTP partial-read 성능 | pack 마다 전체 재다운로드 | 세션 캐시 — local seek | `arq_validator/sftp.py` |
 | Bucket 공식 docs | 잘못된 100x 차이 | 공식 자체를 contract 에서 제거 | `arq_validator/layout.py` |
+| Tree v4 binary 호환성 | ❌ v4 모든 폴더 walk 실패 | ✅ 38-byte trailing block opaque skip | `arq_reader/parse.py` |
 
 ## 신규 통합 테스트 카탈로그
 
