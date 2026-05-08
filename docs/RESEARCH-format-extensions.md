@@ -1,10 +1,20 @@
 # RE Feasibility for Arq formats beyond v0
 
-The v0 reader/writer pair (`arq_writer/`, `arq_reader/`) handles
-**standalone-objects** Arq 7 backups. This document tracks
-investigation of the formats we deferred — pack containers, the
-chunker, Arq 5/6, Arq Cloud — and records what additional capability
-turned out to be feasible.
+> **Status (2026-05-08)**: ✅ Most of the formats investigated below are
+> now implemented in the writer/reader pair. Pack containers (treepacks /
+> blobpacks / largeblobpacks) — shipped in PR #5. Buzhash content-defined
+> chunking — shipped in PR #5 with both generic + Arq.app v7.41-matched
+> parameters (RE'd via `arq_writer/macho_buzhash_finder.py`). Arq 5/6
+> read/restore — shipped in `arq_reader/arq5_*.py`. **Arq Cloud is the
+> only investigated format that remains out of scope** (proprietary
+> server protocol). This document is preserved as the original RE log.
+
+The reader/writer pair (`arq_writer/`, `arq_reader/`) now handles
+Arq 7 standalone + packed backups, the Buzhash chunker, and Arq 5/6
+read/restore. This document tracks the original investigation of the
+formats deferred from v0 — pack containers, the chunker, Arq 5/6,
+Arq Cloud — and records what additional capability turned out to
+be feasible.
 
 The investigation was iterative: each section is updated as code is
 written and tested. Citations point to upstream `arq_restore`

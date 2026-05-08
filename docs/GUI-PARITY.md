@@ -76,58 +76,38 @@
 | 모니터링 | 이메일 보고서 | 🔴 | 정책 레이어 |
 | 모니터링 | 시스템 알림 | 🔴 | OS-specific |
 | 모니터링 | 메뉴바 / 시스템 트레이 | 🔴 | OS-specific |
-| 보존 | hourly / daily / monthly 정책 | ❌ | v1.x — 본 PR에서 일부 |
-| 보존 | 오래된 commit 수동 삭제 | ❌ | v1.x |
-| 보존 | blob GC / vacuum | ❌ | v1.x |
+| 보존 | hourly / daily / monthly 정책 | ✅ | `RetentionPolicy(keep_last_n=, keep_hourly=, keep_daily=, keep_weekly=, keep_monthly=, keep_yearly=)` (PR #11). TUI: `MaintenanceScreen` (`[m]`, PR #12). 자동 스케줄링은 외부 cron 사용 |
+| 보존 | 오래된 commit 수동 삭제 | ✅ | `prune_records(backend, encryption_password=..., policy=...)` (PR #11). dry-run + 콜백 이벤트 지원 |
+| 보존 | blob GC / vacuum | ✅ | `gc_orphan_blobs()` 보수적 pack 단위 (PR #11). 모든 blob 이 orphan 인 pack 만 삭제 — 부분 rewrite 없음 |
 | 다중 컴퓨터 | 한 destination 공유 | ⚠️ | reader 자동 발견; writer는 single |
 | 다중 컴퓨터 | 컴퓨터별 keyset | ✅ | 각 `<CU>/encryptedkeyset.dat` 독립 |
 | 내보내기 / 가져오기 | plan 설정 export | ❌ | v1.x — `~/.config/arq-backup-tui/plans/<id>.json` 그대로 복사로 우회 |
 | 내보내기 / 가져오기 | plan 설정 import | ⚠️ | 같은 위에 같은 우회 |
 
-## 2. 우선순위 + 구현 계획
+## 2. 구현 이력 (Phase 별 PR 매핑)
 
-본 PR에서 **구현**하는 항목 (모두 in-scope, 작거나 중간 규모):
+본 문서의 초기 버전에서 정의했던 phase 1–5 우선순위는 모두
+구현 완료되었습니다. 위 §1 "Headline 패리티 표" 가 최신 상태이며,
+phase 별 매핑은 다음과 같이 보존합니다:
 
-### Phase 1 — 복원 메타데이터 (작음, 높은 가치)
+| Phase | 항목 | PR | 비고 |
+| --- | --- | --- | --- |
+| 1 | 복원 메타데이터 (mode / symlink) | (M2 이전 / writer 초기) | `Restore._restore_file_node` + S_IFLNK 분기 |
+| 2 | 소스 필터링 (`max_file_bytes`, `ExclusionRules`) | #10 | CLI 플래그 + TUI Advanced 단계 (PR #12) |
+| 3 | 스토리지 정교화 (`largeblobpacks` / 폴더별 청커) | #5 | `Backup(use_packs=True, large_blob_threshold=...)`; `Plan.per_source_chunkers` |
+| 4 | Plan / keyset 관리 | (CLI: M3 시리즈) / `rotate_keyset_password` | TUI: `MaintenanceScreen` (PR #12) |
+| 5 | 보존 정책 + blob GC | #11 | `RetentionPolicy` + `prune_records` + `gc_orphan_blobs` + `apply_retention`; TUI 통합 PR #12 |
 
-1. **mode (perm bits) 복원** — `Restore._restore_file_node`에 `os.chmod(out_path, mode & 0o7777)` 추가. 이미 mtime은 처리됨.
-2. **Symlink 처리** — writer가 `Path.is_symlink()`을 감지해서:
-   - 링크 타겟 문자열을 plaintext로 저장
-   - FileNode mode bits에 `stat.S_IFLNK` 포함
-   - 추가 boolean `is_symlink` 메타 (또는 mode bit으로 판별)
-   restorer가 mode bits에서 S_IFLNK를 보면 `os.symlink(target, path)`를 호출
+**아직 미구현으로 남은 패리티 항목** (§1 표에서 ❌ / ⚠️):
 
-### Phase 2 — 소스 필터링 (중간)
+- 백업 플랜 편집 UI (`v1.x`; recreate via wizard + delete CLI 우회 가능)
+- 일시정지 / 재개 (체크포인트 메커니즘 없음)
+- 다중 destination per plan (`v1.x`)
+- 다른 컴퓨터 별 이력 분리 (`reader 자동 발견; writer 는 single`)
+- plan 설정 export/import UI (현재는 `~/.config/arq-backup-tui/plans/<id>.json` 직접 복사로 우회)
+- 스냅샷 간 diff 뷰
+- uid/gid 보존 (cross-platform stance)
 
-3. **파일 크기 제한** — `Backup` / `build_backup`에 `max_file_bytes: Optional[int] = None`. `_walk_file`에서 `src.stat().st_size > max`이면 skip + emit `file_skipped` 콜백.
-4. **Exclusion 패턴** — `Backup`에 `exclusions: ExclusionRules` 파라미터:
-   - **glob** (`*.log`, `node_modules/`)
-   - **정규식**
-   - **`.gitignore` style** (선택적, gitignore-parser-like)
-   `_walk_dir`에서 entry name 또는 rel_path 매칭 시 skip.
-
-### Phase 3 — 스토리지 정교화 (작음)
-
-5. **`largeblobpacks/` 라우팅** — `_write_blob`에서 `len(arqo) > maxPackedItemLength` (~256 KiB)이고 `use_packs=True`이면 `_large_blob_pack`으로 라우팅. 새 PackBuilder 인스턴스.
-6. **폴더별 useBuzhash 토글** — `Plan.folder_chunkers: Dict[folder_name, str]` 또는 wizard 단계에 폴더별 청커 선택. `add_folder` 호출 시 인자로 `chunker_config` override.
-
-### Phase 4 — Plan / keyset 관리 (중간)
-
-7. **CLI plan 명령어** — `arq-backup plans list / show <id> / delete <id>` 추가. 삭제 시 인지된 destination에서 메타파일 삭제는 위험하므로 plan json 파일만 삭제.
-8. **비밀번호 변경** — `arq_writer.crypto_write.rotate_keyset_password(dest_root, computer_uuid, old_password, new_password)`. 절차:
-   - 기존 keyset 복호 → (encryption_key, hmac_key, blob_id_salt) 보존
-   - 새 salt + IV 생성
-   - 같은 키들을 새 password로 다시 암호화
-   - 기존 backuprecord / blob들은 변경 없음 (그것들의 hmac_key / encryption_key는 동일)
-
-### Phase 5 — 보존 (가장 큰 작업; 본 PR에서는 **계획만**, 구현은 follow-up)
-
-9. **Retention 정책 + blob GC**: 다음 단계로 분리.
-
-## 3. 본 PR 출력물
-
-각 phase별 commit + 통합 테스트 + COVERAGE.md / MECHANISM.md
-업데이트.
-
-미구현 항목 중 v1.x로 미루는 것은 본 문서의 표에 명시된 그대로
-유지. 향후 별도 PR에서 처리.
+**스코프 외 (🔴)** 는 §1 표 그대로: 클라우드 백엔드, 정책 레이어
+(스케줄 / throttling / 알림 / 메뉴바 / wake-from-sleep), xattr / ACL / 리소스 포크,
+macFUSE / Quick Look 등.

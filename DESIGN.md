@@ -64,15 +64,22 @@ arq-backup-tui/
 │   ├── lz4_block.py              # 순수 파이썬 LZ4 블록 codec
 │   ├── types.py                  # BlobLoc / FileNode / TreeNode / Tree 데이터클래스
 │   ├── serialize.py              # Node / Tree / BlobLoc 바이너리 직렬화
-│   ├── crypto_write.py           # ARQO 인코더 + encryptedkeyset.dat 빌더 + AES 암호화
+│   ├── crypto_write.py           # ARQO 인코더 + encryptedkeyset.dat 빌더 + AES 암호화 + rotate_keyset_password
 │   ├── json_configs.py           # backupconfig / backupplan / backupfolders 빌더
 │   ├── backuprecord.py           # backuprecord plist + LZ4 + ARQO 파이프라인
 │   ├── pack_builder.py           # Arq 7 PackBuilder — treepacks/blobpacks 생성 (use_packs=True 모드)
 │   ├── chunker.py                # Buzhash 콘텐츠 정의 청커 + 다중 버전 레지스트리
+│   ├── arq_chunker_params.py     # Arq.app v7.41 RE 파라미터 + ChunkerConfig 레지스트리
+│   ├── chunker_oracle.py         # 청커 선택 휴리스틱 (size-based fallback)
+│   ├── prior_tree_index.py       # PriorTreeIndex — tree-walk dedup 캐시 시드
+│   ├── dedup.py                  # dedup-against-existing blob 캐시 빌더
+│   ├── exclusions.py             # ExclusionRules (glob + regex + .gitignore 파싱)
+│   ├── macos_snapshot.py         # macOS APFS 스냅샷 지원 (with_apfs_snapshot, is_macos*)
+│   ├── retention.py              # RetentionPolicy + prune_records + gc_orphan_blobs + apply_retention
 │   ├── macho_buzhash_finder.py   # Arq.app Mach-O 정적 분석 + 청크 크기 행동 추론
 │   ├── buzhash_re_cli.py         # `arq-buzhash-find` CLI
 │   ├── backup.py                 # Backup 클래스 + build_backup() 오케스트레이터
-│   └── cli.py                    # argparse CLI (`arq-backup create`)
+│   └── cli.py                    # argparse CLI (`arq-backup create`, 8개 신규 플래그 포함)
 ├── arq_reader/                   # 백업 복원 라이브러리 (writer 의 역방향)
 │   ├── __init__.py
 │   ├── __main__.py               # `python -m arq_reader`
@@ -84,15 +91,58 @@ arq-backup-tui/
 │   ├── arq5_keyset.py            # Arq 5/6 encryptionvN.dat 복호화 (PBKDF2-SHA1)
 │   ├── arq5_restore.py           # Arq 5/6 백업 복원 오케스트레이터 (commit→tree→files)
 │   └── cli.py                    # argparse CLI (`arq-reader list`/`restore`)
-├── tests/                        # 합성/round-trip 단위·통합 테스트 (166건, ~17초)
+├── arq_tui/                      # Textual TUI (writer + reader + validator 통합)
+│   ├── __init__.py               # ArqTuiApp 노출
+│   ├── __main__.py               # `python -m arq_tui` 진입점
+│   ├── app.py                    # 최상위 앱 (PlanRegistry, CredentialCache, DestinationStore)
+│   ├── state.py                  # Plan / Destination 데이터클래스 + 영속 저장소
+│   ├── workers.py                # BackupWorker / RestoreWorker / ValidateWorker
+│   ├── backend_open.py           # 백엔드 open/close (LocalBackend / SftpBackend)
+│   ├── cli.py                    # `plans list/show/delete` 헤드리스 서브커맨드
+│   ├── theming.css               # 색상·여백 등 CSS
+│   ├── screens/
+│   │   ├── home.py               # 랜딩 (플랜 목록 + 빠른 액션)
+│   │   ├── plan_wizard.py        # 6단계 마법사 (sources / dest / enc / chunker / advanced / review)
+│   │   ├── backup_run.py         # 실행 + ProgressPanel
+│   │   ├── backup_sets.py        # destination/layout 브라우저 (밑에서 [m] 으로 maintenance 진입)
+│   │   ├── record_browser.py     # 단일 backuprecord 트리 워크
+│   │   ├── restore_run.py        # 복원 실행 + ProgressPanel
+│   │   ├── validate_run.py       # 검증 실행 + ProgressPanel
+│   │   ├── maintenance.py        # 비밀번호 회전 + retention 적용
+│   │   └── help.py
+│   └── widgets/
+│       ├── source_picker.py / destination_modal.py
+│       ├── password_modal.py / restore_target_modal.py
+│       └── progress_panel.py
+├── tests/                        # 합성/round-trip 단위·통합 테스트 (355건, ~140초; 7건 skip = SFTP 자격증명 의존)
 │   ├── fixtures.py               # 검증기 테스트용 Arq 7 트리 빌더
+│   ├── integration/              # 실제 Arq.app SFTP destination 호환성 검증 (.env 기반)
+│   │   ├── _creds.py             # 환경변수 + .env 자격증명 로더
+│   │   └── test_arqapp_sftp_compat.py
 │   ├── test_crypto.py / test_layout.py / test_runner.py
 │   ├── test_audit_drip.py / test_sftp.py
 │   ├── test_writer_lz4.py        # 순수 LZ4 codec round-trip
 │   ├── test_writer_format.py     # 바이너리 직렬화 + crypto round-trip
-│   └── test_writer_e2e.py        # 작성기 → 검증기 4단계 round-trip
+│   ├── test_writer_e2e.py        # 작성기 → 검증기 4단계 round-trip
+│   ├── test_writer_packed.py     # packed 모드 (treepacks/blobpacks) round-trip
+│   ├── test_writer_chunker.py    # Buzhash 청커 round-trip
+│   ├── test_writer_dedup.py      # cross-run dedup 검증
+│   ├── test_writer_tree_walk_reuse.py # PriorTreeIndex 기반 walk-reuse 검증
+│   ├── test_writer_exclusions.py # ExclusionRules glob/regex/gitignore
+│   ├── test_writer_cli_flags.py  # arq-backup CLI 8개 신규 플래그
+│   ├── test_retention.py         # RetentionPolicy + prune + GC round-trip
+│   ├── test_fingerprint.py       # 형상 지문 호환성 검증
+│   ├── test_reader_e2e.py        # Reader byte-identical 복원 검증
+│   └── test_tui_m{1..7}_*.py     # TUI 단계별 smoke + 기능 테스트
 ├── docs/
-│   └── RESEARCH-backup-creation-feasibility.md
+│   ├── DESIGN.md                                  # ← 본 문서 위치는 repo 루트
+│   ├── COMPATIBILITY.md / COVERAGE.md / GUI-PARITY.md
+│   ├── MECHANISM.md / PLAN-tui.md
+│   ├── COMPAT-VERIFICATION.md / COMPAT-SFTP-TESTING.md
+│   ├── APFS-SNAPSHOTS.md / UNICODE.md
+│   ├── RESEARCH-backup-creation-feasibility.md    # 작성 전 타당성 (구현 완료)
+│   └── RESEARCH-format-extensions.md              # pack/청커/Arq5 RE 노트 (대부분 구현 완료)
+├── arq-tui.py                    # 루트 진입점 (./arq-tui.py 로 TUI 실행)
 ├── pyproject.toml                # 콘솔 스크립트 등록
 ├── DESIGN.md                     # ← 본 문서
 └── LICENSE
@@ -334,8 +384,11 @@ path:
   바이트를 빌드 → 검증기로 복호화 round-trip
 - **합성 ARQO**: HMAC 가 valid 한 ARQO 객체를 만들고 단일/멀티 컨테이너,
   손상 케이스(바이트 플립) 등으로 실패 경로 모두 커버
-- 47건 테스트 (~9초). 실제 SFTP 서버는 sandbox 에 없으므로 SFTP 테스트는
-  생성 검증·spec 파서·`__enter__` 이전 호출 차단 contract 만 검증.
+- 355건 테스트 (~140초; 7건 skip = 실 SFTP 자격증명 의존). 실제 SFTP 서버는
+  sandbox 에 없으므로 기본 단위 테스트는 생성 검증·spec 파서·`__enter__` 이전
+  호출 차단 contract 만 검증하고, **운영자가 `.env` 자격증명으로 실 destination
+  대상 통합 테스트** 를 별도 실행할 수 있는 harness (`tests/integration/`,
+  `docs/COMPAT-SFTP-TESTING.md`) 를 제공합니다.
 
 ## 8. 의존성·실행 환경
 
@@ -345,21 +398,65 @@ path:
 - **OS 검증**: macOS, Linux. 윈도우는 미지원 (OpenSSH/openssl 의 동작
   세부가 다름).
 
-## 9. 향후 작업 (현재 미구현)
+## 9. 이미 구현 완료된 확장 (PR #5–#12)
+
+DESIGN.md 의 초기 버전에서는 청커, pack 컨테이너, TUI, 보존 정책 등이
+deferred 로 표기되어 있었으나 이후 PR 시리즈로 모두 구현되었습니다.
+역사적 기록은 `docs/RESEARCH-format-extensions.md` 와
+`docs/RESEARCH-backup-creation-feasibility.md` 에 보존되어 있고,
+현 시점 상태 요약은 다음과 같습니다.
+
+### 9.1 백업 작성 고급 기능
+
+| 기능 | PR | 활성화 방법 |
+| --- | --- | --- |
+| Buzhash content-defined chunking | #5 | `Backup(chunker_config=...)` / CLI `--chunker {none\|default\|arq_v7_41}` |
+| Arq.app v7.41 RE 청커 파라미터 | #5 | `arq_chunker_params.ARQ_V7_CHUNKER_CONFIG` |
+| Pack mode (treepacks/blobpacks) | #5 | `Backup(use_packs=True)` / CLI `--use-packs` |
+| Cross-run dedup | #5 | `Backup(dedup_against_existing=True)` / CLI `--dedup-against-existing` |
+| Tree-walk reuse (`PriorTreeIndex`) | #5 | dedup-against-existing 활성화 시 자동 |
+| `ExclusionRules` (glob/regex/.gitignore) | #10 | `Backup(exclusions=...)` / CLI `--exclude-glob/--exclude-regex/--exclude-from` |
+| max-file-bytes 컷오프 | #10 | `Backup(max_file_bytes=N)` / CLI `--max-file-bytes` |
+| macOS APFS 스냅샷 | #8 | `with_apfs_snapshot()` / CLI `--use-apfs-snapshot` |
+
+### 9.2 유지보수 기능
+
+| 기능 | PR | 진입점 |
+| --- | --- | --- |
+| `RetentionPolicy` (keep_last_n + 시간 버킷) | #11 | `apply_retention(backend, policy=...)` |
+| `prune_records()` (백업레코드 가지치기) | #11 | retention 의 첫 단계 |
+| `gc_orphan_blobs()` (보수적 pack 단위 GC) | #11 | retention 의 두 번째 단계 |
+| `Backend.unlink()` (Local + Sftp) | #11 | retention/gc 가 호출 |
+| `rotate_keyset_password()` (비밀번호 변경) | #5/#7 | 마스터 키 보존, salt+IV+ciphertext+HMAC 만 재생성 |
+
+### 9.3 TUI 통합
+
+| 기능 | PR | 위치 |
+| --- | --- | --- |
+| `arq_tui/` 패키지 (M1–M6) | (M-시리즈) | Home / wizard / backup-set browser / record browser / restore / validate |
+| Plan wizard "Advanced" 단계 (6단계) | #12 | exclusions / max-file-bytes / APFS / retention 모두 노출 |
+| `MaintenanceScreen` (`[m]`) | #12 | 비밀번호 회전 + retention 적용 + dry-run/real-run + GC 토글 |
+| 루트 `arq-tui.py` 진입점 | #12 | `./arq-tui.py` 로 즉시 실행 (sys.path 자가 삽입) |
+| `Plan` 데이터클래스 신규 필드 | #12 | `exclude_globs` / `exclude_regexes` / `exclude_gitignore_lines` / `max_file_bytes` / `use_apfs_snapshot` / `retention` |
+
+### 9.4 호환성 검증
+
+| 기능 | PR | 위치 |
+| --- | --- | --- |
+| Shape fingerprint 헬퍼 | #7 | `tests/test_fingerprint.py` (salt-독립 구조 비교) |
+| 실 Arq.app SFTP 통합 테스트 harness | #9 | `tests/integration/`, `.env.example`, `docs/COMPAT-SFTP-TESTING.md` |
+
+## 10. 향후 작업 (현재 미구현)
 
 다음은 본 문서 범위에서 의식적으로 **deferred** 로 둔 항목들입니다.
 
-### 9.1 TUI 자체
+### 10.1 추가 백엔드
 
-`textual` 등을 사용한 TUI 위젯은 별도의 PR/모듈에서. 현재 라이브러리는
-`ProgressCallback` 으로 TUI 통합 지점만 노출.
+S3, Backblaze B2, WebDAV, dropbox 등. `Backend` 프로토콜의 7개 메서드
+(`list_dir`/`stat_size`/`read_range`/`read_all`/`exists`/`is_dir`/`unlink`
++ writer 가 쓰는 `mkdir`/`write_all`) 만 구현하면 기존 로직 전체 재사용 가능.
 
-### 9.2 추가 백엔드
-
-S3, Backblaze B2, WebDAV, dropbox 등. `Backend` 프로토콜의 6개 메서드만
-구현하면 기존 검증 로직 전체 재사용 가능.
-
-### 9.3 백업 생성 (write-side, v0 구현 완료)
+### 10.2 작성기 — 백업 생성 (배경)
 
 `arq_writer/` 패키지가 v0 백업 작성기를 제공합니다 — 조사 결과
 (`docs/RESEARCH-backup-creation-feasibility.md`) 에서 권장한
@@ -402,31 +499,44 @@ plist 키들(`archived`, `arqVersion`, `node`, `treeBlobLoc.blobIdentifier`
 등)이 스펙과 일치하는지 확인하는 테스트
 (`test_backuprecord_decrypts_and_parses_as_plist`)도 통과합니다.
 
-#### 알려진 한계
+#### 알려진 한계 (현재 시점)
 
-- **청커 미구현**: 큰 파일 한 개를 변형해 일부 바이트만 바꿔도 전체 blob 이
-  새로 생성됩니다. Arq.app 의 가변 길이 청킹은 `chunkerVersion: 3` +
-  `useBuzhash` 파라미터가 비공개라 RE 없이 재현 불가.
-- **pack 컨테이너 미사용**: 모든 객체가 standalone 으로 저장되므로 다수의
-  소형 파일이 있을 때 디렉토리 항목 수가 폭증합니다 (Arq 7 표준 sharding
-  으로 256개 디렉토리에 분산되긴 합니다).
 - **windowsattrs / xattr / ACL 메타데이터 0 으로 채움**: 기본 동작은
   파일 내용 + 기본 stat 만 보존. 필요해지면 노드 빌더 확장 가능.
+- **macOS 외 OS 의 일관성 스냅샷**: APFS 외 (Linux btrfs/LVM, Windows VSS) 의
+  스냅샷은 미지원. macOS 에서는 `--use-apfs-snapshot` 으로 frozen-source 백업 가능.
 
-### 9.4 Hetzner 특화 안전장치
+> 이전에 한계로 표기되었던 **청커**와 **pack 컨테이너**는 PR #5 에서 구현되어
+> CLI `--chunker {none|default|arq_v7_41}` / `--use-packs` 로 활성화됩니다.
+> Arq.app v7.41 파라미터는 Mach-O RE (`macho_buzhash_finder.py`) 로 도출했습니다.
+> 자세한 구현 상태는 §10 "이미 구현 완료된 확장" 참조.
+
+### 10.3 Hetzner 특화 안전장치
 
 reference 가 가진 connection-rate-limit 자동 감지(`Connection refused`,
 `mux_client_request_session` 패턴 추적, 20회 연속 실패 시 조기 abort) 는
 SftpBackend 에 아직 포팅되지 않았습니다. 운영자가 Hetzner 외 대상도
 사용하는 경우 일반화된 형태로 추가 예정.
 
-### 9.5 Arq 5/6 호환성
+### 10.4 Arq 5/6 작성 (write-side)
 
-현재는 Arq 7 만 지원합니다. Arq 5/6 은 디렉토리 레이아웃이 다르고
-(`bucketdata/<folder>/refs/heads/master` + packsets/), 본 프로젝트의
-discover/검증 로직은 그대로 적용되지 않습니다.
+현재 Arq 5/6 은 **읽기/복원만** 지원합니다 (`arq_reader/arq5_*.py`).
+Arq 5/6 형식으로 백업을 생성하는 작성기는 미구현. Arq.app 자체가
+새 백업은 모두 Arq 7 형식으로 생성하므로 우선순위가 낮음.
 
-## 10. 참고 자료
+### 10.5 일관성 스냅샷 — macOS 외 OS
+
+현재는 macOS APFS 만 지원합니다 (`with_apfs_snapshot()`). Linux btrfs /
+LVM thin / ZFS, Windows VSS 는 아직 미구현. 운영자 환경의 파일시스템 종류
+에 따라 단계적으로 추가 예정.
+
+### 10.6 스케줄링·자동 실행
+
+retention 정책의 자동 적용, audit-drip 의 cron / launchd 통합, 백업의
+주기적 실행 등은 현재 모두 운영자 수동 호출. policy 레이어로 별도 PR
+에서 추가 예정.
+
+## 11. 참고 자료
 
 - Arq 7 데이터 포맷 (공식): <https://www.arqbackup.com/documentation/arq7/English.lproj/dataFormat.html>
 - Arq 5 포맷 (재사용된 PBKDF2/HMAC 규칙 출처): <https://www.arqbackup.com/arq_data_format.txt>

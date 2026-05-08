@@ -773,7 +773,7 @@ Restore.restore
 | 모듈 | 무엇을 하는가 |
 |------|--------------|
 | `arq_writer.backup` | 백업 orchestrator (Backup 클래스 + build_backup) |
-| `arq_writer.crypto_write` | encryptedkeyset.dat 빌드, ARQO 빌드, blob_id 계산 |
+| `arq_writer.crypto_write` | encryptedkeyset.dat 빌드, ARQO 빌드, blob_id 계산, `rotate_keyset_password` |
 | `arq_writer.serialize` | binary Tree / Node / BlobLoc 직렬화 |
 | `arq_writer.json_configs` | backupconfig / backupplan / backupfolder JSON |
 | `arq_writer.backuprecord` | binary plist backuprecord 빌드 |
@@ -782,7 +782,10 @@ Restore.restore
 | `arq_writer.arq_chunker_params` | Arq.app v7.41 RE된 청커 파라미터 |
 | `arq_writer.pack_builder` | treepacks/blobpacks/largeblobpacks 빌더 |
 | `arq_writer.dedup` | cross-run dedup 시드 helper들 |
-| `arq_writer.prior_tree` | tree-walk reuse용 PriorTreeIndex |
+| `arq_writer.prior_tree_index` | tree-walk reuse용 PriorTreeIndex |
+| `arq_writer.exclusions` | `ExclusionRules` (glob + regex + .gitignore-subset) |
+| `arq_writer.macos_snapshot` | macOS APFS 스냅샷 컨텍스트 매니저 (`with_apfs_snapshot`) |
+| `arq_writer.retention` | `RetentionPolicy` + `prune_records` + `gc_orphan_blobs` + `apply_retention` |
 | `arq_validator.crypto` | keyset 복호 + HMAC 검증 + ARQO 복호 |
 | `arq_validator.tiers` | L0 / L1a / L1b / L2 구현 |
 | `arq_validator.runner` | 4 tier orchestrator (`validate(...)`) |
@@ -812,3 +815,38 @@ Restore.restore
 세 흐름 모두 best-effort 오류 처리: 단일 blob 손상이 전체 백업 /
 audit / 복원을 막지 않고, `failures` 리스트에 발견을 모아 사용자
 판단에 맡깁니다.
+
+---
+
+## 부록 C. 유지보수 흐름 (PR #11–#12)
+
+위 § 1–3 은 작성·검증·복원 세 흐름을 다룹니다. PR #11 / #12 에서 추가된
+**유지보수 작업** 두 가지의 동작은 다음과 같습니다.
+
+### C.1 비밀번호 회전 — `rotate_keyset_password`
+
+- 입력: 기존 `encryptedkeyset.dat` 의 raw bytes + old/new 비밀번호
+- 절차:
+  1. `decrypt_keyset(blob, old_password)` → `(encryption_key, hmac_key, blob_id_salt)` 추출
+  2. 새 8 바이트 salt + IV 생성
+  3. `build_encrypted_keyset(new_password, encryption_key, hmac_key, blob_id_salt)` 로
+     동일 마스터 키 + 새 salt/IV 로 재암호화
+- 결과: 마스터 키 변동 없음 → 모든 기존 backuprecord / blob 그대로 복호화 가능.
+  새 keyset bytes 만 destination 에 다시 쓰면 됨 (`backend.write_all(...)`).
+
+### C.2 보존·가지치기·blob GC — `apply_retention`
+
+- 입력: backend + 비밀번호 + `RetentionPolicy` (keep_last_n + 시간 버킷 5종)
+- 1단계 `prune_records()`:
+  - 모든 `<CU>/backupfolders/<folder>/backuprecords/...backuprecord` 를 enumerate
+  - `select_retained()` 가 정책에 따라 보존 집합 결정 (시간 버킷은 OR 결합)
+  - 보존 외 record 들을 `backend.unlink(path)` 로 삭제
+- 2단계 `gc_orphan_blobs()` (선택):
+  - 보존된 모든 record 의 트리를 walk → 참조된 standalone blob ID 집합 + 참조된 pack 경로 집합 수집
+  - `<CU>/standardobjects/<2hex>/<60hex>` 중 참조 집합에 없는 blob 삭제
+  - `<CU>/treepacks/`/`blobpacks/`/`largeblobpacks/` 중 path 가 참조 pack 집합에 없는 pack 만 삭제
+    (보수적 — pack 내부 일부만 orphan 이어도 그 pack 은 보존)
+- 콜백 이벤트: `record_deleted` / `blob_deleted` / `pack_deleted` (dry-run 모드에서도 동일하게 emit)
+
+TUI 의 `MaintenanceScreen` (`arq_tui/screens/maintenance.py`) 가 양쪽 모두 sibling
+스레드로 호출하고, 결과는 `call_from_thread` 로 메인 루프에 marshal 합니다.

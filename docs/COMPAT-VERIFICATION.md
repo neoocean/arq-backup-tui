@@ -1,5 +1,12 @@
 # Arq 7 호환성 검증 전략 (sandbox 제약 하)
 
+> **Status (2026-05-08)**: Strategy A (shape fingerprint diff) ✅ 자동화
+> 구현됨 (`tests/test_fingerprint.py`); Strategy B (real-SFTP destination
+> 통합 테스트) ✅ 구현됨 (PR #9, `tests/integration/test_arqapp_sftp_compat.py`,
+> 운영자 `.env` 의존). Strategies C+ (operator-paste 워크플로, Mach-O paste,
+> arq_restore round-trip) 는 운영자 절차 문서로 본 문서에 보존됩니다 —
+> 자동화 가능한 부분은 위 두 전략으로 모두 흡수.
+
 본 프로젝트의 개발 sandbox는 macOS Arq.app을 직접 실행할 수
 없습니다. 그럼에도 writer / reader / validator의 Arq 7 호환성을
 검증해야 하므로, 이 문서는 **operator-paste 워크플로** 와 **양쪽

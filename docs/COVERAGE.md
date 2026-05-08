@@ -17,14 +17,17 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Read              | ✅ End-to-end restorer (standalone + packed objects, multi-folder, tree walk) |
 | Validate          | ✅ All four tiers (L0 / L1a / L1b / L2) + resumable audit-drip |
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with tree-walk reuse |
-| Operate           | ⚠️ Library only — schedule, throttling, notifications, GUI/TUI all absent |
+| Operate           | ⚠️ Schedule + notifications still deferred; TUI shipped (M1–M6 + maintenance), retention + blob GC shipped (PR #11), throttling still absent |
 
-The aggregate test count is **299 unit tests** at the time this
-table was last updated; the suite runs in ~103 s on a stdlib-only
+The aggregate test count is **355 unit tests** at the time this
+table was last updated; the suite runs in ~140 s on a stdlib-only
 toolchain (``python -m unittest discover``). TUI tests
-(~24 / 299) require the optional ``textual`` dep; without it
+(~50 / 355) require the optional ``textual`` dep; without it
 they auto-skip and the rest of the suite (library + RE +
-compatibility + GUI-parity + Unicode-stress) runs cleanly.
+compatibility + GUI-parity + Unicode-stress) runs cleanly. **7
+tests skip by default** because they require live SFTP credentials
+(see ``docs/COMPAT-SFTP-TESTING.md``); operators with a real Arq
+destination can run them with a ``.env`` file.
 
 For a structured **Unicode / multi-language / emoji / long-path
 audit** of every backup → validate → restore pipeline edge,
@@ -138,9 +141,11 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 | Plan editing                                                  |  ❌    | Deferred to v1.x; recreate via wizard + ``arq-tui plans delete`` |
 | Folder exclusions (file patterns / glob / regex / .gitignore) |  ✅    | ``ExclusionRules.of(wildcard=..., regex=..., gitignore_lines=...)`` passed via ``Backup(exclusions=...)`` / ``build_backup(..., exclusions=...)``; matched against full POSIX rel_path + basename |
 | File-size skip rules                                          |  ✅    | ``Backup(max_file_bytes=...)``; symlinks are exempted (only target-string size, not target file size) |
-| ``.gitignore``-style filters                                  |  ❌    | Not honored |
+| ``.gitignore``-style filters                                  |  ✅    | Minimal subset honored: ``# comments``, ``foo``, ``/foo``, ``foo/``, ``*.ext``, ``!negation``. Full ``**`` semantics absent — fall back to ``regex_excludes`` if needed |
 | ``excludedDrives`` / ``excludedNetworkInterfaces`` / ``excludedWiFiNetworkNames`` | ⚠️ | Fields emitted as empty arrays; not actually consulted by the writer |
-| Plan retention / pruning of old commits                       |  ❌    | No prune tooling — destinations grow unboundedly |
+| Plan retention / pruning of old commits                       |  ✅    | ``RetentionPolicy`` (``keep_last_n`` + ``keep_hourly``/``keep_daily``/``keep_weekly``/``keep_monthly``/``keep_yearly``) + ``apply_retention()`` (PR #11). TUI: ``MaintenanceScreen`` (PR #12) reachable via ``[m]`` from the backup-set browser. **Scheduling/automation deferred** — operator runs it on demand |
+| Orphan-blob garbage collection (post-prune)                   |  ✅    | ``gc_orphan_blobs()`` walks every retained record's tree, deletes standalone blobs not referenced + packs whose path is referenced by zero ``BlobLoc``. Conservative pack-level (no partial pack rewrite). PR #11 |
+| Keyset password rotation                                      |  ✅    | ``rotate_keyset_password()`` re-encrypts ``encryptedkeyset.dat`` while keeping master keys intact, so existing records still decrypt. TUI: ``MaintenanceScreen`` |
 
 #### 5.4 Operational
 
@@ -224,11 +229,12 @@ the FUSE mount.
 | Component                                                     | Status | Notes |
 |---------------------------------------------------------------|:------:|-------|
 | ``arq-validator`` CLI (run validation tiers)                  |  ✅    | ``arq_validator.cli`` |
-| ``arq-backup`` CLI (one-shot backup)                          |  ✅    | ``arq_writer.cli`` |
+| ``arq-backup`` CLI (one-shot backup)                          |  ✅    | ``arq_writer.cli``. Flags: ``--use-packs`` / ``--chunker {none,default,arq_v7_41}`` / ``--dedup-against-existing`` / ``--max-file-bytes`` / ``--exclude-glob`` / ``--exclude-regex`` / ``--exclude-from`` / ``--use-apfs-snapshot`` (PR #10) |
 | ``arq-reader`` CLI (one-shot restore + listing)               |  ✅    | ``arq_reader.cli`` |
 | ``arq-buzhash-find`` CLI (RE toolkit subcommands)             |  ✅    | ``arq_writer.buzhash_re_cli`` |
-| TUI (interactive frontend)                                    |  ✅    | Full M1–M6 stack landed: ``arq_tui`` package + Textual ``ArqTuiApp``. Screens: Home (plan list + quick actions) / PlanWizard (multi-source create) / BackupSetList (local + SFTP browser) / RecordBrowser (lazy tree walk + per-file metadata + mark/restore) / BackupRun + RestoreRun + ValidateRun (live progress via the ``WorkerEvent`` bridge). Activated via ``pip install -e ".[tui]"`` then ``arq-tui`` |
+| TUI (interactive frontend)                                    |  ✅    | Full M1–M6 stack landed: ``arq_tui`` package + Textual ``ArqTuiApp``. Screens: Home / PlanWizard (6 steps incl. Advanced — exclusions / max-file-bytes / APFS / retention) / BackupSetList ([m] for maintenance) / RecordBrowser / BackupRun / RestoreRun / ValidateRun / **MaintenanceScreen (password rotation + retention apply, PR #12)**. Launchers: ``arq-tui`` (pyproject script), ``python -m arq_tui``, or root ``./arq-tui.py`` |
 | Progress callback hooks (suitable for any frontend)           |  ✅    | All three components emit ``ProgressCb(kind, payload)`` events |
+| Real-Arq.app SFTP destination compat tests                    |  ✅    | ``tests/integration/test_arqapp_sftp_compat.py`` (PR #9) — 7 tests, env-var-gated; ``docs/COMPAT-SFTP-TESTING.md`` for operator runbook |
 
 ### 10. Reverse-engineering tooling
 
