@@ -33,6 +33,11 @@ test = []
 # the rich + textual dep tree.
 tui = ["textual>=0.50"]
 
+# Optional keyring integration for SFTP / encryption-password
+# storage. Off by default; users opt in if they prefer
+# OS-keyring-backed credentials over the in-memory session cache.
+tui-keyring = ["textual>=0.50", "keyring>=24"]
+
 [project.scripts]
 arq-validator = "arq_validator.cli:main"
 arq-backup = "arq_writer.cli:main"

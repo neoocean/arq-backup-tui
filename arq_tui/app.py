@@ -31,6 +31,8 @@ class ArqTuiApp(App):
     SUB_TITLE = "Independent Arq 7 backup tool"
 
     BINDINGS = [
+        Binding("question_mark", "help", "Help", show=True, key_display="?"),
+        Binding("t", "toggle_theme", "Theme", show=True),
         Binding("q", "quit", "Quit", show=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
@@ -64,6 +66,26 @@ class ArqTuiApp(App):
 
     def on_mount(self) -> None:
         self.push_screen(HomeScreen())
+
+    def action_help(self) -> None:
+        from .screens.help import HelpScreen
+        # Avoid opening multiple help screens on top of each other.
+        if not isinstance(self.screen, HelpScreen):
+            self.push_screen(HelpScreen())
+
+    def action_toggle_theme(self) -> None:
+        # Textual exposes themes by name in 8.x; flipping between
+        # the two built-ins is the cheapest "dark / light" toggle
+        # we can offer without shipping our own palette.
+        try:
+            current = getattr(self, "theme", "textual-dark")
+            self.theme = (
+                "textual-light"
+                if current.endswith("dark")
+                else "textual-dark"
+            )
+        except Exception:
+            pass
 
 
 def run_app(config_dir: Optional[Path] = None) -> int:
