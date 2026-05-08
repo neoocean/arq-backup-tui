@@ -28,6 +28,11 @@ from .audit_drip import (
     save_state as save_audit_drip_state,
 )
 from .backend import Backend, LocalBackend
+from .compatibility import (
+    CheckResult,
+    ComplianceReport,
+    check_arq7_compatibility,
+)
 from .events import Event, EventKind, ProgressCallback
 from .layout import Arq7ComputerLayout, discover_layout
 from .runner import ValidationReport, ValidationTier, validate
@@ -45,6 +50,10 @@ __all__ = [
     "LocalBackend",
     "SftpBackend",
     "SftpConnectionError",
+    # Arq 7 compatibility checker
+    "CheckResult",
+    "ComplianceReport",
+    "check_arq7_compatibility",
     # Events
     "Event",
     "EventKind",
