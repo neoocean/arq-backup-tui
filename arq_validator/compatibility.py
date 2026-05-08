@@ -33,6 +33,7 @@ import hashlib
 import hmac as _hmac
 import json
 import plistlib
+from arq_writer.backuprecord import parse_backuprecord as _parse_record
 import re
 import struct
 from dataclasses import dataclass, field
@@ -632,7 +633,7 @@ def _check_backuprecords(
                         arqo, keyset.encryption_key, keyset.hmac_key,
                         openssl_path=openssl_path,
                     )
-                    record = plistlib.loads(plist_bytes)
+                    record = _parse_record(plist_bytes)
                 except Exception as exc:
                     _add(report, _fail(
                         "B2", f"backuprecord decrypt + plist parse: {rec_path}",

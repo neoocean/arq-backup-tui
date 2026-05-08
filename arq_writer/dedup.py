@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+from arq_writer.backuprecord import parse_backuprecord as _parse_record
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -490,7 +491,7 @@ def seed_from_backuprecord(
             arqo, encryption_key, hmac_key,
             openssl_path=openssl_path,
         )
-        record = plistlib.loads(plist_bytes)
+        record = _parse_record(plist_bytes)
     except Exception:
         return 0
     if not isinstance(record, dict):

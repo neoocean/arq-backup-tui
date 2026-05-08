@@ -55,6 +55,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from arq_reader.parse import parse_tree
 from arq_writer.types import BlobLoc, FileNode, TreeNode
+from arq_writer.backuprecord import parse_backuprecord as _parse_record
 
 from . import constants as C
 from .backend import Backend
@@ -271,7 +272,7 @@ def _record_fingerprint(
             arqo, keyset.encryption_key, keyset.hmac_key,
             openssl_path=openssl_path,
         )
-        record = plistlib.loads(plist_bytes)
+        record = _parse_record(plist_bytes)
     except Exception as exc:
         out["_error"] = f"{type(exc).__name__}: {exc}"
         return out

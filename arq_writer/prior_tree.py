@@ -41,6 +41,7 @@ from typing import Any, Dict, Optional
 
 from arq_reader.parse import parse_tree
 from arq_writer.types import BlobLoc, FileNode, Tree, TreeChild, TreeNode
+from arq_writer.backuprecord import parse_backuprecord as _parse_record
 
 from .constants import BACKUPFOLDERS_DIR, BACKUPRECORDS_DIR
 
@@ -151,7 +152,7 @@ def _load_prior_root_tree_loc(
             arqo, encryption_key, hmac_key,
             openssl_path=openssl_path,
         )
-        record = plistlib.loads(plist_bytes)
+        record = _parse_record(plist_bytes)
     except Exception:
         return None
     if not isinstance(record, dict):

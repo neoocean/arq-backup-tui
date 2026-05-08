@@ -25,6 +25,42 @@ from .lz4_block import lz4_wrap
 from .types import BlobLoc, FileNode, Node, TreeNode
 
 
+def parse_backuprecord(plain: bytes) -> Dict[str, Any]:
+    """Parse a decrypted backuprecord payload, accepting either
+    Apple's binary plist (what our writer used to produce, before
+    the JSON default) or UTF-8 JSON (what Arq.app actually emits).
+
+    Discovered via real Hetzner Storage Box destination — see
+    ``docs/REAL-DATA-DISCOVERIES.md`` §2. Both formats decode into
+    a dict with the same shape, so callers don't need to know
+    which one they got. Plist is tried first because legacy round-
+    trip tests still cover it; on InvalidFileException we fall
+    back to JSON.
+
+    The same helper lives at ``arq_reader.restore._parse_backuprecord``
+    for historical reasons; this is the canonical public copy.
+    """
+    try:
+        record = plistlib.loads(plain)
+        if isinstance(record, dict):
+            return record
+    except plistlib.InvalidFileException:
+        pass
+    try:
+        record = json.loads(plain.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"backuprecord is neither binary plist nor UTF-8 JSON: "
+            f"{exc}; first 32 bytes = {plain[:32]!r}"
+        ) from exc
+    if not isinstance(record, dict):
+        raise ValueError(
+            f"backuprecord JSON is not an object: "
+            f"type={type(record).__name__}"
+        )
+    return record
+
+
 def blobloc_to_dict(loc: BlobLoc) -> Dict[str, Any]:
     return {
         "blobIdentifier": loc.blobIdentifier,

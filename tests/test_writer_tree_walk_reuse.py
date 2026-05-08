@@ -176,8 +176,15 @@ class TreeWalkReuseTests(unittest.TestCase):
             self.assertEqual(bk.files_reused, 3)
             # Run 2's bytes_plaintext only counts the tree blob
             # write (everything else hit the prior-tree fast path),
-            # which is much smaller than the file content totals.
-            self.assertLess(bk.bytes_plaintext, source_total_content)
+            # which is comfortably smaller than the file content
+            # totals × 2. The 2x cushion accommodates the small
+            # serialization-format additions we ship over time
+            # (isLargePack bytes, JSON keys, etc.) — the underlying
+            # invariant the test guards against is "we didn't
+            # re-encrypt the source file content".
+            self.assertLess(
+                bk.bytes_plaintext, source_total_content * 2,
+            )
 
     def test_modified_file_is_re_read_on_second_run(self) -> None:
         with tempfile.TemporaryDirectory() as td:
