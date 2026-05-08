@@ -17,3 +17,14 @@ htmlcov/
 .env
 .env.local
 tests/integration/.env
+# .secrets/: ignore everything except the operator-facing
+# template files (README + *.example) so the layout is
+# self-documenting in the repo while real credentials stay out.
+.secrets/*
+!.secrets/README.md
+!.secrets/sftp.json.example
+!.secrets/dest_password.example
+
+# Local p4-side artifacts (untracked; live alongside git only).
+.p4ignore
+.p4-git-sync-log
