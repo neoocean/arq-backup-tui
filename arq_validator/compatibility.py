@@ -48,6 +48,14 @@ from .crypto import decrypt_keyset
 # ---------------------------------------------------------------------------
 
 
+def _parse_record(plain):
+    # Lazy import to avoid arq_validator/__init__ → arq_writer/__init__
+    # circular import.
+    from arq_writer.backuprecord import parse_backuprecord
+    return parse_backuprecord(plain)
+
+
+
 @dataclass
 class CheckResult:
     """One pass/fail entry in a :class:`ComplianceReport`.
@@ -632,7 +640,7 @@ def _check_backuprecords(
                         arqo, keyset.encryption_key, keyset.hmac_key,
                         openssl_path=openssl_path,
                     )
-                    record = plistlib.loads(plist_bytes)
+                    record = _parse_record(plist_bytes)
                 except Exception as exc:
                     _add(report, _fail(
                         "B2", f"backuprecord decrypt + plist parse: {rec_path}",

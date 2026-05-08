@@ -45,6 +45,14 @@ from arq_writer.types import BlobLoc, FileNode, Tree, TreeChild, TreeNode
 from .constants import BACKUPFOLDERS_DIR, BACKUPRECORDS_DIR
 
 
+def _parse_record(plain):
+    # Lazy import — backuprecord lives in the same package so a top-
+    # level import would close the cycle through arq_writer/__init__.
+    from arq_writer.backuprecord import parse_backuprecord
+    return parse_backuprecord(plain)
+
+
+
 @dataclass
 class PriorMatch:
     """Result of comparing a source ``stat`` to a prior FileNode."""
@@ -151,7 +159,7 @@ def _load_prior_root_tree_loc(
             arqo, encryption_key, hmac_key,
             openssl_path=openssl_path,
         )
-        record = plistlib.loads(plist_bytes)
+        record = _parse_record(plist_bytes)
     except Exception:
         return None
     if not isinstance(record, dict):
@@ -358,7 +366,20 @@ def reuse_file_node_for(
     """Build a FileNode that shares the prior blob locations but
     reflects a fresh ``stat`` snapshot of the source — preserves
     inode-level metadata changes (uid/gid/nlink) without re-reading
-    file contents."""
+    file contents.
+
+    Resolves ``username`` / ``groupName`` from the system's
+    ``pwd`` / ``grp`` modules so the reused FileNode is byte-
+    equivalent to one a fresh ``Backup._walk_file`` call would
+    produce. Without this, a re-run with ``dedup_against_existing``
+    serializes Trees whose binary differs from run 1 only in the
+    owner-name strings → fresh tree blob_id → no dedup at the
+    Tree level.
+    """
+    from .backup import _resolve_owner
+    uid = int(src_stat.st_uid) if hasattr(src_stat, "st_uid") else 0
+    gid = int(src_stat.st_gid) if hasattr(src_stat, "st_gid") else 0
+    uname, gname = _resolve_owner(uid, gid)
     return FileNode(
         dataBlobLocs=list(prior.dataBlobLocs),
         itemSize=int(prior.itemSize),
@@ -371,9 +392,11 @@ def reuse_file_node_for(
         ctime_nsec=int(
             (src_stat.st_ctime - int(src_stat.st_ctime)) * 1_000_000_000
         ),
+        username=uname,
+        groupName=gname,
         mac_st_mode=int(src_stat.st_mode),
-        mac_st_uid=int(src_stat.st_uid) if hasattr(src_stat, "st_uid") else 0,
-        mac_st_gid=int(src_stat.st_gid) if hasattr(src_stat, "st_gid") else 0,
+        mac_st_uid=uid,
+        mac_st_gid=gid,
         mac_st_ino=int(src_stat.st_ino),
         mac_st_nlink=int(src_stat.st_nlink),
     )

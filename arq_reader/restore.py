@@ -146,41 +146,11 @@ def _build_path_filter(paths: Optional[List[str]]) -> Optional[_PathFilter]:
 
 
 def _parse_backuprecord(plain: bytes) -> Dict[str, Any]:
-    """Parse the decrypted backuprecord payload, accepting either
-    Apple's binary plist (what our writer produces) or UTF-8 JSON
-    (what Arq.app produces in practice on real destinations —
-    discovered against a Hetzner Storage Box where the operator's
-    record bytes started with ``{"backupFolderUUID":"…"}`` rather
-    than the ``bplist00`` magic).
-
-    Both formats decode into a dict with the same shape (``node``
-    + sidecar metadata), so callers don't need to know which one
-    they got. We try plist first since our own round-trip tests
-    rely on it; if that raises ``InvalidFileException`` we fall
-    back to JSON.
-    """
-    try:
-        record = plistlib.loads(plain)
-        if isinstance(record, dict):
-            return record
-    except plistlib.InvalidFileException:
-        pass
-    # Try JSON. Arq.app emits UTF-8 with no BOM, so plain decode is
-    # enough; bytes that aren't valid UTF-8 will raise here and the
-    # caller's traceback points back at the source bytes for
-    # diagnosis.
-    try:
-        record = json.loads(plain.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ValueError(
-            f"backuprecord is neither binary plist nor UTF-8 JSON: "
-            f"{exc}; first 32 bytes = {plain[:32]!r}"
-        ) from exc
-    if not isinstance(record, dict):
-        raise ValueError(
-            f"backuprecord JSON is not an object: type={type(record).__name__}"
-        )
-    return record
+    """Backward-compat alias — :func:`arq_writer.backuprecord.parse_backuprecord`
+    is the canonical public dual-format parser. Kept here so existing
+    test imports continue to work."""
+    from arq_writer.backuprecord import parse_backuprecord
+    return parse_backuprecord(plain)
 
 
 def _emit(cb: Optional[ProgressCb], kind: str, **payload: object) -> None:
@@ -555,7 +525,7 @@ class Restore:
                     arqo, keyset.encryption_key, keyset.hmac_key,
                     openssl_path=self.openssl_path,
                 )
-                rec = plistlib.loads(plain)
+                rec = _parse_backuprecord(plain)
             except Exception:
                 # Corrupt record: surface it but with empty
                 # metadata so the caller can still try it.

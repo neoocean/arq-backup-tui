@@ -70,6 +70,14 @@ SCHEMA_VERSION = 1
 # ---------------------------------------------------------------------------
 
 
+def _parse_record(plain):
+    # Lazy import to avoid arq_validator/__init__ → arq_writer/__init__
+    # circular import.
+    from arq_writer.backuprecord import parse_backuprecord
+    return parse_backuprecord(plain)
+
+
+
 @dataclass
 class FileFingerprint:
     """Per-file shape entry. ``chunk_sizes`` is the in-order list
@@ -271,7 +279,7 @@ def _record_fingerprint(
             arqo, keyset.encryption_key, keyset.hmac_key,
             openssl_path=openssl_path,
         )
-        record = plistlib.loads(plist_bytes)
+        record = _parse_record(plist_bytes)
     except Exception as exc:
         out["_error"] = f"{type(exc).__name__}: {exc}"
         return out

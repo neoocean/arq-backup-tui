@@ -152,7 +152,11 @@ class RecordBrowserScreen(Screen):
             record_arqo,
             self._keyset.encryption_key, self._keyset.hmac_key,
         )
-        record = plistlib.loads(record_plain)
+        # Dual-format: writer now defaults to JSON, but we accept
+        # the legacy binary plist destinations operators may still
+        # have on disk.
+        from arq_writer.backuprecord import parse_backuprecord
+        record = parse_backuprecord(record_plain)
         root_node_dict = record.get("node")
         if not isinstance(root_node_dict, dict):
             raise ValueError(

@@ -53,6 +53,13 @@ from arq_validator.layout import discover_layout, list_backuprecords
 # ---------------------------------------------------------------------------
 
 
+def _parse_record(plain):
+    # Lazy import — backuprecord lives in the same package so a top-
+    # level import would close the cycle through arq_writer/__init__.
+    from arq_writer.backuprecord import parse_backuprecord
+    return parse_backuprecord(plain)
+
+
 @dataclass
 class RetentionPolicy:
     """Multi-bucket retention.
@@ -171,7 +178,7 @@ def _record_creation_date(
             arqo, keyset.encryption_key, keyset.hmac_key,
             openssl_path=openssl_path,
         )
-        record = plistlib.loads(plain)
+        record = _parse_record(plain)
     except Exception:
         return 0
     if isinstance(record, dict):
@@ -325,7 +332,7 @@ def _collect_referenced_blobs(
                     keyset.encryption_key, keyset.hmac_key,
                     openssl_path=openssl_path,
                 )
-                rec = plistlib.loads(plain)
+                rec = _parse_record(plain)
             except Exception:
                 # Don't lose blobs on a single corrupt record —
                 # skip it and assume its blobs are still live.
@@ -616,7 +623,7 @@ def _collect_live_pack_paths(
                     keyset.encryption_key, keyset.hmac_key,
                     openssl_path=openssl_path,
                 )
-                rec = plistlib.loads(plain)
+                rec = _parse_record(plain)
             except Exception:
                 continue
             if not isinstance(rec, dict):

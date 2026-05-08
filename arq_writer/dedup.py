@@ -48,6 +48,14 @@ from .types import BlobLoc
 BLOB_ID_HEX_LEN = 64
 
 
+
+def _parse_record(plain):
+    # Lazy import — backuprecord lives in the same package so a top-
+    # level import would close the cycle through arq_writer/__init__.
+    from arq_writer.backuprecord import parse_backuprecord
+    return parse_backuprecord(plain)
+
+
 def _is_blob_id_path(shard: str, rest: str) -> bool:
     """Cheap filter: shard is 2 hex chars, rest is 62 hex chars,
     and concat is a valid hex blob_id."""
@@ -490,7 +498,7 @@ def seed_from_backuprecord(
             arqo, encryption_key, hmac_key,
             openssl_path=openssl_path,
         )
-        record = plistlib.loads(plist_bytes)
+        record = _parse_record(plist_bytes)
     except Exception:
         return 0
     if not isinstance(record, dict):
