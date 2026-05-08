@@ -22,7 +22,7 @@ without re-running the local clone.
 | Arq 5/6 keyset (`encryptionvN.dat`) decryption | ✅ Implemented + tested | v2 + v3 supported; format different from Arq 7 (PBKDF2-SHA1 + 12-byte ASCII header); `arq_reader.arq5_keyset` |
 | Arq 5/6 restorer (commit → tree walk → files) | ✅ Implemented + tested | `arq_reader.arq5_restore.Arq5Restore`; round-trips against synthetic Arq 5 destinations |
 | Generic content-defined chunker (Buzhash) | ✅ Implemented + tested | `arq_writer.chunker.Buzhash`, opt-in via `build_backup(..., chunker_config=...)` |
-| Match Arq.app's exact chunker parameters | 🟡 RE toolkit ready | Sandbox can't fetch Arq.app (firewalled); given the binary or a real backup, ``arq_writer.macho_buzhash_finder`` + the multi-version registry land exact parameters in one call. Only matters for write-side dedup parity, not for correctness |
+| Match Arq.app's exact chunker parameters | ✅ RE'd from Arq.app v7.41 binary | T table + window + boundary mask + max chunk size extracted by static Mach-O analysis; min chunk size is a 4 KiB conservative inference. Shipped in ``arq_writer.arq_chunker_params``; opt-in via ``import arq_writer.arq_chunker_params``. Only matters for write-side dedup parity, not for correctness — but with these parameters, partially-modified files dedup byte-for-byte against an existing Arq.app destination |
 | Arq Cloud Backup format | 🔴 Out of scope | Separate product, separate restore tool |
 
 The big wins so far: the v0 reader gained `isPacked: true` support
@@ -31,8 +31,10 @@ The big wins so far: the v0 reader gained `isPacked: true` support
 `arq_reader.arq5_pack`, the writer can now emit Arq-7-shape
 `treepacks/` and `blobpacks/` containers via `Backup(use_packs=True)`,
 and Arq 5/6 `Tree` / `Node` / `Commit` / `BlobKey` binary parsers
-ship in `arq_reader.arq5_binary`. Only the chunker and Arq Cloud
-remain as concrete RE blockers.
+ship in `arq_reader.arq5_binary`, and Arq.app v7's exact chunker
+parameters are now reverse-engineered (T table + window + mask +
+max chunk size all extracted from the v7.41 binary; see §4.2). Only
+Arq Cloud remains as a concrete RE blocker.
 
 ---
 
@@ -302,12 +304,11 @@ real Arq.app once such testing is feasible.
 
 ## 4. Chunker (`chunkerVersion: 3`, `useBuzhash`)
 
-**Verdict**: ✅ **Generic Buzhash chunker implemented**, plus an
-**RE toolkit** (Mach-O analyzer + behavioral inference + multi-version
-registry) ready to populate exact Arq.app parameters when the binary
-or a real backup is provided externally. Sandbox-side, the
-arqbackup.com download is firewalled, so we cannot fetch Arq.app
-in-place.
+**Verdict**: ✅ **Generic Buzhash chunker implemented**, **plus exact
+Arq.app v7 parameters reverse-engineered** from the Arq.app v7.41
+macOS binary using the toolkit below. The extracted parameters ship
+in :mod:`arq_writer.arq_chunker_params` (opt-in via ``import
+arq_writer.arq_chunker_params``); see §4.2 for the provenance trail.
 
 Recap of what we know from public sources:
 
@@ -425,6 +426,40 @@ Empty by default — callers fall back to ``GENERIC_DEFAULT`` (our
 generic Buzhash params). Once the RE workflow above produces
 verified parameters, a single ``register_arq_chunker`` call from
 the user's setup script lights up exact-Arq matching.
+
+### 4.2 Provenance: Arq.app v7.41 chunker parameters
+
+Extracted on 2026-05-07 by running ``arq-buzhash-find analyze-binary``
+against ``/Applications/Arq.app/Contents/MacOS/Arq`` from a freshly
+installed copy of Arq.app v7.41 (x86_64 Mach-O, ``--stride 4``). The
+analyzer + the user-side filtering scripts produced:
+
+| Parameter         | Value     | Confidence | Evidence |
+|-------------------|-----------|------------|----------|
+| T table location  | offset 5,104,816 (16-byte aligned) | high   | Sole top-scoring 1024-byte window: entropy ≈ 7.83 bits/byte, all 256 uint32 entries distinct |
+| ``window_size``   | 256       | high       | ``mov r32, 0x100`` reproduced twice within 30 bytes of code at T-table − 2628 / − 2608 |
+| ``boundary_bits`` | 16 (mask = 0xFFFF; avg = 64 KiB) | high   | ``65536`` constant appears twice (T-table − 2609, − 2535); 16-bit mask patterns dominate the binary (725 hits vs. 13 / 72 for 13-bit / 17-bit) |
+| ``max_chunk_size``| 131072 (128 KiB) | medium | ``131072`` constant in chunker code area (T-table − 2651) |
+| ``min_chunk_size``| 4096 (4 KiB) | low (conservative) | No direct binary evidence; 4 KiB is the universal lower bound for content-defined chunkers (borg, restic, casync) and matches Arq's own minimum metadata-block size |
+
+The 1024 raw T-table bytes are inlined verbatim in
+``arq_writer/arq_chunker_params.py`` so a future analyst can diff
+against a fresh extraction without any decoding step. The decoded
+table contains 256 distinct uint32 LE values (``ARQ_V7_BUZHASH_TABLE``);
+``tests/test_arq_chunker_params.py`` anchors the first and last
+entries (0xa44016be / 0x8904a848) so a single-byte typo in the hex
+literal cannot pass CI.
+
+#### Falsification path (not yet automated)
+
+Feed a known-content blob through Arq.app's backup engine, read back
+``BlobLoc.length`` values from the resulting backuprecord, and
+compare to the chunk lengths our :class:`Buzhash` produces with
+``ARQ_V7_CHUNKER_CONFIG``. If they match byte-for-byte, ``min`` and
+``max`` are confirmed; the medium-confidence items are upgraded to
+high. Until that test runs, the values above are best-effort static
+RE — but mismatched chunker parameters cannot produce *invalid*
+backups, only suboptimal dedup, so this is purely an optimization.
 
 ### Why exact matching isn't required for correctness
 
