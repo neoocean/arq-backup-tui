@@ -525,7 +525,7 @@ class Restore:
                     arqo, keyset.encryption_key, keyset.hmac_key,
                     openssl_path=self.openssl_path,
                 )
-                rec = plistlib.loads(plain)
+                rec = _parse_backuprecord(plain)
             except Exception:
                 # Corrupt record: surface it but with empty
                 # metadata so the caller can still try it.

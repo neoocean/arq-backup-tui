@@ -55,7 +55,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from arq_reader.parse import parse_tree
 from arq_writer.types import BlobLoc, FileNode, TreeNode
-from arq_writer.backuprecord import parse_backuprecord as _parse_record
 
 from . import constants as C
 from .backend import Backend
@@ -69,6 +68,14 @@ SCHEMA_VERSION = 1
 # ---------------------------------------------------------------------------
 # Shape capture
 # ---------------------------------------------------------------------------
+
+
+def _parse_record(plain):
+    # Lazy import to avoid arq_validator/__init__ → arq_writer/__init__
+    # circular import.
+    from arq_writer.backuprecord import parse_backuprecord
+    return parse_backuprecord(plain)
+
 
 
 @dataclass

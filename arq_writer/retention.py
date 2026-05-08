@@ -46,12 +46,18 @@ from arq_validator import constants as C
 from arq_validator.backend import Backend
 from arq_validator.crypto import decrypt_keyset
 from arq_validator.layout import discover_layout, list_backuprecords
-from arq_writer.backuprecord import parse_backuprecord as _parse_record
 
 
 # ---------------------------------------------------------------------------
 # Policy
 # ---------------------------------------------------------------------------
+
+
+def _parse_record(plain):
+    # Lazy import — backuprecord lives in the same package so a top-
+    # level import would close the cycle through arq_writer/__init__.
+    from arq_writer.backuprecord import parse_backuprecord
+    return parse_backuprecord(plain)
 
 
 @dataclass
