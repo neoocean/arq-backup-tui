@@ -20,7 +20,7 @@ from textual.app import App
 from textual.binding import Binding
 
 from .screens.home import HomeScreen
-from .state import PlanRegistry
+from .state import CredentialCache, DestinationStore, PlanRegistry
 
 
 class ArqTuiApp(App):
@@ -39,15 +39,28 @@ class ArqTuiApp(App):
         self, *,
         config_dir: Optional[Path] = None,
         plan_registry: Optional[PlanRegistry] = None,
+        destination_store: Optional[DestinationStore] = None,
+        credential_cache: Optional[CredentialCache] = None,
     ) -> None:
         """``config_dir`` is overridable for tests so they can point
         at a temp directory rather than the user's real
         ``~/.config/arq-backup-tui``."""
         super().__init__()
-        if plan_registry is not None:
-            self.plan_registry = plan_registry
-        else:
-            self.plan_registry = PlanRegistry(config_dir=config_dir)
+        self.plan_registry = (
+            plan_registry
+            if plan_registry is not None
+            else PlanRegistry(config_dir=config_dir)
+        )
+        self.destination_store = (
+            destination_store
+            if destination_store is not None
+            else DestinationStore(config_dir=config_dir)
+        )
+        self.credential_cache = (
+            credential_cache
+            if credential_cache is not None
+            else CredentialCache()
+        )
 
     def on_mount(self) -> None:
         self.push_screen(HomeScreen())

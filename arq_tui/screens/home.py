@@ -137,10 +137,10 @@ class HomeScreen(Screen):
         )
 
     def action_browse(self) -> None:
-        self.notify(
-            "Backup-set browser ships in M2 — coming soon.",
-            severity="information",
-        )
+        # Local import keeps the M1 home-only test from pulling in
+        # the M2 record-browser deps until they're actually used.
+        from .backup_sets import BackupSetListScreen
+        self.app.push_screen(BackupSetListScreen())
 
     def action_validate(self) -> None:
         self.notify(

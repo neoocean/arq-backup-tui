@@ -41,7 +41,10 @@ arq-buzhash-find = "arq_writer.buzhash_re_cli:main"
 arq-tui = "arq_tui.__main__:main"
 
 [tool.setuptools]
-packages = ["arq_validator", "arq_writer", "arq_reader", "arq_tui", "arq_tui.screens", "arq_tui.widgets"]
+packages = [
+    "arq_validator", "arq_writer", "arq_reader",
+    "arq_tui", "arq_tui.screens", "arq_tui.widgets",
+]
 
 [tool.setuptools.package-data]
 arq_validator = ["py.typed"]
