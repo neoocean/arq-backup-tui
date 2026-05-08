@@ -135,6 +135,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "chunker": plan.chunker,
                 "use_packs": plan.use_packs,
                 "dedup_against_existing": plan.dedup_against_existing,
+                "exclude_globs": list(plan.exclude_globs),
+                "exclude_regexes": list(plan.exclude_regexes),
+                "exclude_gitignore_lines": list(
+                    plan.exclude_gitignore_lines
+                ),
+                "max_file_bytes": plan.max_file_bytes,
+                "use_apfs_snapshot": plan.use_apfs_snapshot,
+                "retention": dict(plan.retention),
                 "last_run_iso": plan.last_run_iso,
             }
             print(json.dumps(doc, indent=2, ensure_ascii=False))

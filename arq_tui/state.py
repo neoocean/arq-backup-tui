@@ -48,6 +48,22 @@ class Plan:
     by the plan wizard's "different chunker for this source"
     affordance and matches Arq.app's per-folder ``useBuzhash``
     toggle.
+
+    ``exclude_globs`` / ``exclude_regexes`` / ``exclude_gitignore_lines``
+    feed :class:`arq_writer.ExclusionRules` at run time. Empty lists
+    mean "include everything"; the writer's default is also empty.
+
+    ``max_file_bytes`` skips any file larger than the threshold (the
+    writer emits a ``file_skipped_size`` event for each); ``None``
+    disables the limit. ``use_apfs_snapshot`` opts into walking an
+    APFS snapshot of each source on macOS; on other platforms the
+    writer emits ``apfs_snapshot_skipped`` and falls back to the
+    live walk.
+
+    ``retention`` is a free-form dict round-tripped to disk, with
+    the same field names as :class:`arq_writer.RetentionPolicy`
+    (e.g. ``{"keep_last_n": 10, "keep_daily": 7}``). Empty dict =
+    keep everything (no pruning).
     """
 
     plan_id: str = ""
@@ -59,6 +75,12 @@ class Plan:
     per_source_chunkers: dict = field(default_factory=dict)
     use_packs: bool = True
     dedup_against_existing: bool = True
+    exclude_globs: List[str] = field(default_factory=list)
+    exclude_regexes: List[str] = field(default_factory=list)
+    exclude_gitignore_lines: List[str] = field(default_factory=list)
+    max_file_bytes: Optional[int] = None
+    use_apfs_snapshot: bool = False
+    retention: dict = field(default_factory=dict)
     last_run_iso: str = ""
 
 
@@ -100,6 +122,13 @@ class PlanRegistry:
                 continue
             if not isinstance(data, dict):
                 continue
+            mfb_raw = data.get("max_file_bytes")
+            try:
+                max_file_bytes = (
+                    int(mfb_raw) if mfb_raw not in (None, "") else None
+                )
+            except (TypeError, ValueError):
+                max_file_bytes = None
             out.append(Plan(
                 plan_id=str(data.get("plan_id") or ""),
                 name=str(data.get("name") or ""),
@@ -118,6 +147,21 @@ class PlanRegistry:
                 dedup_against_existing=bool(
                     data.get("dedup_against_existing", True)
                 ),
+                exclude_globs=[
+                    str(s) for s in data.get("exclude_globs") or []
+                ],
+                exclude_regexes=[
+                    str(s) for s in data.get("exclude_regexes") or []
+                ],
+                exclude_gitignore_lines=[
+                    str(s)
+                    for s in data.get("exclude_gitignore_lines") or []
+                ],
+                max_file_bytes=max_file_bytes,
+                use_apfs_snapshot=bool(
+                    data.get("use_apfs_snapshot", False)
+                ),
+                retention=dict(data.get("retention") or {}),
                 last_run_iso=str(data.get("last_run_iso") or ""),
             ))
         out.sort(key=lambda pl: pl.name.lower())
@@ -144,6 +188,12 @@ class PlanRegistry:
             "per_source_chunkers": dict(plan.per_source_chunkers),
             "use_packs": plan.use_packs,
             "dedup_against_existing": plan.dedup_against_existing,
+            "exclude_globs": list(plan.exclude_globs),
+            "exclude_regexes": list(plan.exclude_regexes),
+            "exclude_gitignore_lines": list(plan.exclude_gitignore_lines),
+            "max_file_bytes": plan.max_file_bytes,
+            "use_apfs_snapshot": plan.use_apfs_snapshot,
+            "retention": dict(plan.retention),
             "last_run_iso": plan.last_run_iso,
         }
         with path.open("w", encoding="utf-8") as f:
