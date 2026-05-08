@@ -1,15 +1,48 @@
 # 실제 SFTP destination 기반 호환성 테스트
 
-> **Status (2026-05-08)**: ✅ PR #9 에서 구현됨. 본 문서는 harness
-> (`tests/integration/test_arqapp_sftp_compat.py`, `tests/integration/_creds.py`,
-> `.env.example`) 의 운영자 워크플로 사양입니다. 7 개의 통합 테스트가 기본 환경에서는
-> skip 되고, `.env` 자격증명을 제공한 운영자에게만 실행됩니다.
+> **Status (2026-05-08)**: ✅ PR #9 에서 형식/형상 호환성 검증
+> harness (`test_arqapp_sftp_compat.py`) 가 도입됨. 후속으로
+> `test_arq_real_destination.py` 와 `.secrets/` 자격증명 디렉터리가
+> 추가되어 **reader / validator / writer 세 기둥의 런타임 동작**을
+> 실 destination 에서 검증할 수 있게 되었습니다. 모든 통합 테스트는
+> 기본 환경에서는 skip 되고, 자격증명을 제공한 운영자에게만
+> 실행됩니다.
 
 본 문서는 운영자가 **실제 운영 중인 Arq 7 SFTP destination**을
-sandbox에서 사용하여 reader / validator / fingerprint의 호환성을
-자동 검증하는 절차를 정의합니다. `docs/COMPAT-VERIFICATION.md`
+sandbox에서 사용하여 reader / validator / writer / fingerprint
+호환성을 자동 검증하는 절차를 정의합니다. `docs/COMPAT-VERIFICATION.md`
 에서 ⭐로 표시한 Strategy A + B를 자동화된 회귀 테스트로 전환
 합니다.
+
+## 0. 자격증명 소스 — `.secrets/` 또는 `.env`
+
+자격증명은 다음 세 소스 순서로 해결됩니다 (먼저 발견된 값이 우선):
+
+1. **`.secrets/`** (권장) — 워크스테이션에서 장기간 유지하는 경우
+   추천. 한 곳에 모여 있어 감사 / 회전이 쉽습니다. 레이아웃:
+   ```
+   .secrets/
+   ├── README.md                  ← 커밋됨 (안내)
+   ├── sftp.json.example          ← 커밋됨 (템플릿)
+   ├── dest_password.example      ← 커밋됨 (템플릿)
+   ├── sftp.json                  ← 로컬 전용, 실제 SFTP 정보
+   └── dest_password              ← 로컬 전용, Arq 암호화 비밀번호
+   ```
+   설정 절차:
+   ```sh
+   cp .secrets/sftp.json.example      .secrets/sftp.json
+   cp .secrets/dest_password.example  .secrets/dest_password
+   $EDITOR .secrets/sftp.json
+   $EDITOR .secrets/dest_password
+   chmod 600 .secrets/sftp.json .secrets/dest_password
+   ```
+2. **`.env`** (legacy) — `KEY=VALUE` 한 줄씩, 한 파일. PR #9
+   호환을 위해 유지.
+3. **`os.environ`** (CI / 일회성) — 직접 환경변수 export.
+
+`.gitignore` / `.p4ignore` 가 실 자격증명 파일 (`.secrets/sftp.json`,
+`.secrets/dest_password`, `.env`, `.env.local`) 을 git / Perforce 양쪽에서
+모두 제외합니다. 템플릿 (`README.md`, `*.example`) 만 커밋됩니다.
 
 ## 1. 보안 정책
 
@@ -108,7 +141,7 @@ python -m unittest discover -s tests/integration -v 2>&1 | tail -50
 
 ## 4. 테스트 카탈로그
 
-`tests/integration/test_arqapp_sftp_compat.py` 안의 7개 테스트:
+### 4.1 형식·형상 호환성 — `test_arqapp_sftp_compat.py` (PR #9, 7 tests)
 
 | 테스트 | 무엇을 검증 |
 |--------|------------|
@@ -119,6 +152,24 @@ python -m unittest discover -s tests/integration -v 2>&1 | tail -50
 | `test_fingerprint_is_well_formed_json` | `compute_shape_fingerprint` 출력이 JSON-serialize 가능, schema_version=1 |
 | `test_records_list_at_least_one` | 최소 한 개 backuprecord 존재 |
 | `test_sample_standalone_object_arqo_valid` | 1 MiB 이하 standalone object 16개 sampling → ARQO + HMAC + blob_id = SHA-256(salt+plaintext) 검증 |
+
+### 4.2 런타임 동작 — `test_arq_real_destination.py` (3 tests)
+
+세 기둥 (reader / validator / writer) 의 실제 동작을 sandbox 가
+아닌 운영자의 실 destination 에서 검증합니다. 단, **writer 는 절대
+운영자 destination 의 root 에 쓰지 않고** `creds.write_subdir`
+(기본 `.arq-backup-tui-write-test`) 의 dot-prefixed 서브디렉터리에서
+만 동작합니다.
+
+| 테스트 | 클래스 | 무엇을 검증 |
+|--------|--------|------------|
+| `test_restore_latest_record_of_first_folder` | `RealDestinationReaderTests` | 첫 폴더의 최신 record 를 tempdir 에 복원 → 트리에 비-empty 파일 존재 (decrypt 가 정상이면 반드시 통과) |
+| `test_audit_drip_capped_at_a_few_megabytes` | `RealDestinationValidatorTests` | L2 audit-drip 4 MiB / 20 초 cap 으로 실행 → 실패 0, cursor 진행 |
+| `test_round_trip_via_real_sftp` | `RealDestinationWriterTests` | sandbox 디렉터리에 합성 backup 작성 → reader 로 복원 → byte-identical 비교 (alpha.txt + 한글.txt + subdir/gamma.bin) → DEEP tier validator |
+
+writer 테스트는 setUp / tearDown 에서 sandbox 를 `rm -rf` 로
+재초기화 / 정리합니다. 운영자의 실 데이터는 절대 변경되지
+않습니다.
 
 각 테스트는 **자체적으로 SFTP 마스터 1개**를 setup하고 cleanup하므로
 순서 독립.

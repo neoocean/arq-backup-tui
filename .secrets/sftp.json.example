@@ -1,0 +1,9 @@
+{
+  "host": "u123.your-storagebox.de",
+  "port": 23,
+  "user": "u123",
+  "root": "/home/u123/arq",
+  "identity_file": "~/.ssh/id_ed25519",
+  "_alt_password_auth": "Set \"password\" instead of \"identity_file\" for password auth — exactly one of the two must be set.",
+  "write_subdir": ".arq-backup-tui-write-test"
+}
