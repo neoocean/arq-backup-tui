@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -107,10 +107,36 @@ class PlanWizardScreen(Screen):
     }
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, plan: "Optional[Plan]" = None) -> None:
+        """Create a new plan, or edit the given one.
+
+        When ``plan`` is provided every input is pre-filled from it
+        and ``Save`` overwrites the existing plan file (the
+        ``plan_id`` is preserved). The encryption password is NOT
+        pre-filled — it lives only in the in-memory cache and the
+        keyset on disk, never in the plan JSON, so the operator
+        re-confirms it as part of editing.
+        """
         super().__init__()
         self.draft = _Draft()
         self._step_index = 0
+        self._editing_plan = plan
+        if plan is not None:
+            self.draft.sources = list(plan.sources)
+            self.draft.destination_kind = plan.destination_kind
+            self.draft.destination = dict(plan.destination)
+            self.draft.chunker = plan.chunker
+            self.draft.use_packs = plan.use_packs
+            self.draft.dedup_against_existing = plan.dedup_against_existing
+            self.draft.exclude_globs = list(plan.exclude_globs)
+            self.draft.exclude_regexes = list(plan.exclude_regexes)
+            self.draft.exclude_gitignore_lines = list(
+                plan.exclude_gitignore_lines
+            )
+            self.draft.max_file_bytes = plan.max_file_bytes
+            self.draft.use_apfs_snapshot = plan.use_apfs_snapshot
+            self.draft.retention = dict(plan.retention)
+            self.draft.name = plan.name
 
     # ------------------------------------------------------------------
     # Compose
@@ -119,7 +145,12 @@ class PlanWizardScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical(id="container"):
-            yield Static("New plan", classes="step-title")
+            title = (
+                "Edit plan"
+                if self._editing_plan is not None
+                else "New plan"
+            )
+            yield Static(title, classes="step-title")
             yield Static(
                 self._step_indicator(),
                 id="step-indicator",
@@ -288,6 +319,101 @@ class PlanWizardScreen(Screen):
     # Navigation
     # ------------------------------------------------------------------
 
+    def on_mount(self) -> None:
+        # When editing an existing plan, push the draft's pre-loaded
+        # values into the actual widgets so the operator sees what's
+        # already saved before they touch anything. Build-from-scratch
+        # mode (``self._editing_plan is None``) leaves the wizard in
+        # its empty default state.
+        if self._editing_plan is None:
+            return
+        d = self.draft
+        try:
+            picker = self.query_one(SourcePicker)
+            picker.paths = list(d.sources)
+        except Exception:
+            pass
+        if d.destination_kind == "local":
+            self.query_one(
+                "#dest-kind-local", RadioButton,
+            ).value = True
+            self.query_one(
+                "#dest-local-path", Input,
+            ).value = str(d.destination.get("path") or "")
+        else:
+            self.query_one(
+                "#dest-kind-sftp", RadioButton,
+            ).value = True
+            self.query_one(
+                "#dest-sftp-host", Input,
+            ).value = str(d.destination.get("host") or "")
+            self.query_one(
+                "#dest-sftp-user", Input,
+            ).value = str(d.destination.get("user") or "")
+            self.query_one(
+                "#dest-sftp-port", Input,
+            ).value = str(d.destination.get("port") or 22)
+            self.query_one(
+                "#dest-sftp-root", Input,
+            ).value = str(d.destination.get("path") or "")
+            self.query_one(
+                "#dest-sftp-identity", Input,
+            ).value = str(d.destination.get("identity_file") or "")
+        # Chunker radios — only one of three is true.
+        for wid in ("chunker-default", "chunker-arq", "chunker-none"):
+            self.query_one(f"#{wid}", RadioButton).value = False
+        if d.chunker == "arq_v7_41":
+            self.query_one("#chunker-arq", RadioButton).value = True
+        elif d.chunker == "none":
+            self.query_one("#chunker-none", RadioButton).value = True
+        else:
+            self.query_one("#chunker-default", RadioButton).value = True
+        # Layout + dedup radios.
+        self.query_one(
+            "#layout-packs", RadioButton,
+        ).value = bool(d.use_packs)
+        self.query_one(
+            "#layout-standalone", RadioButton,
+        ).value = not bool(d.use_packs)
+        self.query_one(
+            "#dedup-on", RadioButton,
+        ).value = bool(d.dedup_against_existing)
+        self.query_one(
+            "#dedup-off", RadioButton,
+        ).value = not bool(d.dedup_against_existing)
+        # Advanced step.
+        self.query_one("#adv-globs", TextArea).text = "\n".join(
+            d.exclude_globs
+        )
+        self.query_one("#adv-regexes", TextArea).text = "\n".join(
+            d.exclude_regexes
+        )
+        self.query_one("#adv-gitignore", TextArea).text = "\n".join(
+            d.exclude_gitignore_lines
+        )
+        if d.max_file_bytes is not None:
+            self.query_one(
+                "#adv-max-file-bytes", Input,
+            ).value = str(d.max_file_bytes)
+        self.query_one(
+            "#adv-apfs-on", RadioButton,
+        ).value = bool(d.use_apfs_snapshot)
+        self.query_one(
+            "#adv-apfs-off", RadioButton,
+        ).value = not bool(d.use_apfs_snapshot)
+        for ret_field, widget_id in (
+            ("keep_last_n", "#adv-keep-last-n"),
+            ("keep_daily", "#adv-keep-daily"),
+            ("keep_weekly", "#adv-keep-weekly"),
+            ("keep_monthly", "#adv-keep-monthly"),
+            ("keep_yearly", "#adv-keep-yearly"),
+        ):
+            v = d.retention.get(ret_field)
+            if v is not None:
+                self.query_one(widget_id, Input).value = str(v)
+        # Plan name (review step).
+        self.query_one("#plan-name", Input).value = d.name
+
     def _step_indicator(self) -> str:
         idx = self._step_index
         return f"Step {idx + 1} of {len(self.STEPS)}: {self.STEPS[idx]}"
@@ -397,7 +523,14 @@ class PlanWizardScreen(Screen):
         if step == "encryption":
             pw1 = self.query_one("#enc-password", Input).value
             pw2 = self.query_one("#enc-password2", Input).value
+            # When editing, an empty password field means "don't
+            # touch the cached credential" — the keyset isn't being
+            # rotated here (use MaintenanceScreen for that). New-
+            # plan mode still requires both fields.
             if not pw1:
+                if self._editing_plan is not None:
+                    self.draft.encryption_password = ""
+                    return True
                 self.notify(
                     "Password cannot be empty.", severity="error",
                 )
@@ -560,8 +693,17 @@ class PlanWizardScreen(Screen):
 
     def _save_and_exit(self) -> None:
         d = self.draft
+        # Preserve plan_id + last_run_iso when editing — both are
+        # references the rest of the system depends on. A fresh
+        # plan gets a new UUID.
+        if self._editing_plan is not None:
+            plan_id = self._editing_plan.plan_id
+            last_run_iso = self._editing_plan.last_run_iso
+        else:
+            plan_id = str(uuid.uuid4()).upper()
+            last_run_iso = ""
         plan = Plan(
-            plan_id=str(uuid.uuid4()).upper(),
+            plan_id=plan_id,
             name=d.name,
             sources=list(d.sources),
             destination_kind=d.destination_kind,
@@ -575,6 +717,7 @@ class PlanWizardScreen(Screen):
             max_file_bytes=d.max_file_bytes,
             use_apfs_snapshot=d.use_apfs_snapshot,
             retention=dict(d.retention),
+            last_run_iso=last_run_iso,
         )
         try:
             self.app.plan_registry.save(plan)
@@ -584,14 +727,20 @@ class PlanWizardScreen(Screen):
             )
             return
         # Cache the encryption password for this plan's destination
-        # so the run screen doesn't immediately re-prompt.
+        # so the run screen doesn't immediately re-prompt. Editing
+        # mode allows blank ("don't touch") — preserve any existing
+        # cache entry rather than wiping it with an empty string.
         from ..state import Destination
         dest = self._draft_to_destination(plan)
-        self.app.credential_cache.set_encryption_password(
-            dest, d.encryption_password,
-        )
+        if d.encryption_password:
+            self.app.credential_cache.set_encryption_password(
+                dest, d.encryption_password,
+            )
         self.app.destination_store.add_or_touch(dest)
-        self.notify(f"Plan '{plan.name}' saved.", severity="information")
+        verb = "updated" if self._editing_plan is not None else "saved"
+        self.notify(
+            f"Plan '{plan.name}' {verb}.", severity="information",
+        )
         self.app.pop_screen()
 
     @staticmethod

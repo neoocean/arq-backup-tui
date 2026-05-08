@@ -434,6 +434,57 @@ class Restore:
         _emit(callback, "file_restored",
               path=str(out_path), size=len(body))
 
+    def _count_tree(
+        self,
+        tree_blob_loc: BlobLoc,
+        keyset: Keyset,
+        path_filter: "Optional[_PathFilter]",
+        *,
+        rel_path: str = "",
+    ) -> "tuple[int, int]":
+        """Walk ``tree_blob_loc`` recursively and return
+        ``(file_count, total_bytes)`` covering everything that the
+        full restore would process.
+
+        Honours ``path_filter`` so a partial restore plans only the
+        bytes it's about to materialize. Tree blobs are fetched once
+        here and again during the actual restore — for remote
+        backends this is a small cost (tree blobs are tiny relative
+        to file blobs) in exchange for a real ETA. Tree-fetch
+        failures are silently absorbed into a zero-count for that
+        subtree; restore proper will surface them as
+        ``tree_failed`` events when it tries again.
+        """
+        if path_filter is not None and not path_filter.descend(rel_path):
+            return (0, 0)
+        try:
+            tree_bytes = self._fetch_blob(tree_blob_loc, keyset)
+        except (DecryptError, OSError, NotImplementedError):
+            return (0, 0)
+        tree = parse_tree(tree_bytes)
+        files = 0
+        total_bytes = 0
+        for child in tree.children:
+            child_rel = (
+                f"{rel_path}/{child.name}" if rel_path else child.name
+            )
+            if isinstance(child.node, TreeNode):
+                f, b = self._count_tree(
+                    child.node.treeBlobLoc, keyset, path_filter,
+                    rel_path=child_rel,
+                )
+                files += f
+                total_bytes += b
+            elif isinstance(child.node, FileNode):
+                if (
+                    path_filter is not None
+                    and not path_filter.matches(child_rel)
+                ):
+                    continue
+                files += 1
+                total_bytes += int(child.node.itemSize or 0)
+        return (files, total_bytes)
+
     # ------------------------------------------------------------------
     # Public entry points
     # ------------------------------------------------------------------
@@ -512,6 +563,7 @@ class Restore:
         backuprecord_path: Optional[str] = None,
         paths: Optional[List[str]] = None,
         callback: Optional[ProgressCb] = None,
+        plan_totals: bool = True,
     ) -> RestoreResult:
         """Restore from a backup folder.
 
@@ -531,6 +583,14 @@ class Restore:
 
         ``computer_uuid`` may be omitted when the destination has
         exactly one computer subtree.
+
+        ``plan_totals`` (default True): walk the tree once before
+        restore to count total files + total bytes, then emit a
+        single ``restore_planned`` event so a progress UI can
+        compute ETA. Set ``False`` for headless / streaming use
+        where the extra tree-blob fetches aren't worth the up-front
+        cost. The pre-walk respects ``paths`` so only the subtree
+        that's actually about to be restored gets counted.
         """
         if computer_uuid is None:
             computer_uuid = self._resolve_single_computer(folder_uuid)
@@ -573,6 +633,13 @@ class Restore:
             tree_blob_loc = self._blobloc_from_dict(
                 node_dict["treeBlobLoc"]
             )
+            if plan_totals:
+                total_files, total_bytes = self._count_tree(
+                    tree_blob_loc, keyset, path_filter,
+                )
+                _emit(callback, "restore_planned",
+                      total_files=total_files,
+                      total_bytes=total_bytes)
             self._restore_dir_node(
                 tree_blob_loc, out_dir, keyset, result, callback,
                 rel_path="", path_filter=path_filter,
@@ -596,6 +663,10 @@ class Restore:
                     mtime_sec=int(node_dict.get("modificationTime_sec", 0)),
                     mtime_nsec=int(node_dict.get("modificationTime_nsec", 0)),
                 )
+                if plan_totals:
+                    _emit(callback, "restore_planned",
+                          total_files=1,
+                          total_bytes=file_node.itemSize)
                 self._restore_file_node(
                     file_node, out_dir, keyset, result, callback,
                 )

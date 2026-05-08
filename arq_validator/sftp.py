@@ -35,6 +35,89 @@ class SftpConnectionError(RuntimeError):
     """Raised when the SSH master cannot be established."""
 
 
+class SftpRateLimitedError(SftpConnectionError):
+    """Raised when the backend is hitting a connection-rate limit
+    on the server side (Hetzner Storage Box being the common one).
+
+    Triggered after :class:`_RateLimitTracker.threshold` consecutive
+    SSH / SFTP commands fail with a ``Connection refused`` /
+    ``mux_client_request_session`` style error, meaning the upstream
+    is throttling new sessions on the multiplexed master and
+    further attempts within the rate-limit window will keep
+    failing. Callers should back off (sleep tens of seconds) before
+    retrying, or surface to the user that the destination is
+    refusing connections.
+    """
+
+
+# Stderr substrings that indicate the server is refusing new
+# sessions on the multiplexed master rather than a real protocol
+# fault. Hetzner Storage Box hits the first three within seconds
+# of opening more than ~10 sftp-bursting subprocesses; the fourth
+# is what OpenSSH prints when the master itself dropped the new
+# session under load.
+_RATE_LIMIT_PATTERNS = (
+    "Connection refused",
+    "Connection reset by peer",
+    "mux_client_request_session",
+    "no master connection",
+    "Control socket connect",
+    "channel_setup_fwd_listener",
+    "Connection closed by remote host",
+)
+
+
+class _RateLimitTracker:
+    """Counts consecutive Hetzner-style rate-limit failures.
+
+    A single ``SftpBackend`` owns one tracker. Each command run
+    through the backend funnels its ``stderr`` here via
+    :meth:`record`; matches against any of
+    :data:`_RATE_LIMIT_PATTERNS` increment a streak counter, and
+    once it reaches ``threshold`` the backend raises
+    :class:`SftpRateLimitedError` so callers fail fast instead of
+    flooding the upstream with doomed retries.
+
+    ``threshold = 20`` mirrors the reference operator-side
+    `arq-validate.py` value tuned against Hetzner Storage Box.
+    """
+
+    def __init__(self, threshold: int = 20) -> None:
+        self.threshold = threshold
+        self.consecutive_failures = 0
+        # Total over the lifetime of the backend (for diagnostics).
+        self.total_failures = 0
+        self.last_pattern: Optional[str] = None
+
+    def record(
+        self, returncode: int, stderr_text: str,
+    ) -> Optional[str]:
+        """Inspect one command result. Returns the matched pattern
+        on hit, ``None`` otherwise. Callers raise
+        :class:`SftpRateLimitedError` when ``consecutive_failures``
+        crosses the threshold; this method does not raise itself
+        so the wrapping context can decide when to surface.
+        """
+        if returncode == 0:
+            self.consecutive_failures = 0
+            self.last_pattern = None
+            return None
+        for pat in _RATE_LIMIT_PATTERNS:
+            if pat in stderr_text:
+                self.consecutive_failures += 1
+                self.total_failures += 1
+                self.last_pattern = pat
+                return pat
+        # Non-rate-limit failure resets the streak — the next
+        # command is what counts.
+        self.consecutive_failures = 0
+        self.last_pattern = None
+        return None
+
+    def threshold_hit(self) -> bool:
+        return self.consecutive_failures >= self.threshold
+
+
 class SftpBackend:
     """SSH/SFTP-backed implementation of the ``Backend`` protocol.
 
@@ -68,6 +151,7 @@ class SftpBackend:
         ssh_path: str = "ssh",
         sftp_path: str = "sftp",
         root: str = "",
+        rate_limit_abort_threshold: int = 20,
     ) -> None:
         """``root`` (optional): when set, every backend-method path
         is interpreted relative to this server-side prefix. Use it
@@ -99,6 +183,14 @@ class SftpBackend:
         self._sock_dir: Optional[Path] = None
         self._sock: Optional[Path] = None
         self._master: Optional[subprocess.Popen] = None
+        # Hetzner-style upstream rate-limit detector. Inspected
+        # after every _run_ssh / _run_sftp_batch call; raises
+        # SftpRateLimitedError once consecutive_failures hits
+        # ``rate_limit_abort_threshold`` so the caller can back
+        # off rather than flood the server with doomed retries.
+        self._rate_limit = _RateLimitTracker(
+            threshold=rate_limit_abort_threshold,
+        )
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -264,10 +356,12 @@ class SftpBackend:
             self._user_at_host(),
             remote_cmd,
         ]
-        return subprocess.run(
+        cp = subprocess.run(
             cmd, capture_output=True,
             timeout=timeout if timeout is not None else self.op_timeout_sec,
         )
+        self._track_rate_limit(cp)
+        return cp
 
     def _run_sftp_batch(
         self, batch_text: str, *, timeout: Optional[int] = None,
@@ -287,15 +381,58 @@ class SftpBackend:
                 "-P", str(self.port),
                 self._user_at_host(),
             ]
-            return subprocess.run(
+            cp = subprocess.run(
                 cmd, capture_output=True, text=True,
                 timeout=timeout if timeout is not None else self.op_timeout_sec,
             )
+            self._track_rate_limit(cp)
+            return cp
         finally:
             try:
                 Path(path).unlink()
             except OSError:
                 pass
+
+    def _track_rate_limit(
+        self, cp: subprocess.CompletedProcess,
+    ) -> None:
+        """Feed the tracker with this command's stderr and raise
+        :class:`SftpRateLimitedError` if the consecutive-failure
+        threshold has been reached.
+
+        Per-command stderr can be ``bytes`` (default for the
+        binary-output ``_run_ssh`` path) or ``str`` (the
+        text-mode ``_run_sftp_batch`` path); decode defensively
+        so the same tracker handles both.
+        """
+        stderr = cp.stderr
+        if isinstance(stderr, (bytes, bytearray)):
+            stderr_text = stderr.decode("utf-8", "replace")
+        else:
+            stderr_text = stderr or ""
+        self._rate_limit.record(cp.returncode, stderr_text)
+        if self._rate_limit.threshold_hit():
+            raise SftpRateLimitedError(
+                f"SFTP backend hit rate-limit threshold "
+                f"({self._rate_limit.consecutive_failures} consecutive "
+                f"failures); last pattern matched: "
+                f"{self._rate_limit.last_pattern!r}. Back off and "
+                f"retry, or set rate_limit_abort_threshold higher "
+                f"to suppress."
+            )
+
+    @property
+    def rate_limit_failures(self) -> int:
+        """Total number of rate-limit-shaped failures seen since
+        construction (informational; the tracker also exposes
+        ``consecutive_failures`` for the current streak)."""
+        return self._rate_limit.total_failures
+
+    @property
+    def consecutive_rate_limit_failures(self) -> int:
+        """Length of the current rate-limit failure streak. Resets
+        to zero on the next successful command."""
+        return self._rate_limit.consecutive_failures
 
     # ------------------------------------------------------------------
     # Path resolution (honors optional self.root prefix)

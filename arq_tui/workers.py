@@ -301,6 +301,7 @@ class RestoreWorker(_BaseWorker):
             backuprecord_path=self.backuprecord_path,
             paths=self.paths,
             callback=self._emit,
+            plan_totals=True,
         )
 
 
