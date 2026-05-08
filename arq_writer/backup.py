@@ -128,6 +128,31 @@ def _absolute(dest_root: Path, rel: str) -> Path:
     return dest_root / rel.lstrip("/")
 
 
+def _try_load_existing_keyset(
+    dest_root: Path, computer_uuid: str, password: str,
+) -> Optional[Tuple[bytes, bytes, bytes]]:
+    """Best-effort: read an existing ``encryptedkeyset.dat`` and
+    return ``(encryption_key, hmac_key, blob_id_salt)`` so a
+    follow-up backup against the same destination produces matching
+    blob_ids.
+
+    Returns ``None`` on any error (file missing, wrong password,
+    corrupt blob). The caller falls back to fresh random keys —
+    correct, but defeats cross-run dedup.
+    """
+    keyset_path = (
+        Path(dest_root) / computer_uuid / KEYSET_FILE
+    )
+    if not keyset_path.is_file():
+        return None
+    try:
+        from arq_validator.crypto import decrypt_keyset
+        ks = decrypt_keyset(keyset_path.read_bytes(), password)
+    except Exception:
+        return None
+    return ks.encryption_key, ks.hmac_key, ks.blob_id_salt
+
+
 def _build_file_blobloc(
     computer_uuid: str, blob_id: str, length_on_disk: int,
 ) -> BlobLoc:
@@ -168,6 +193,7 @@ class Backup:
         use_packs: bool = False,
         max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
         chunker_config: Optional[ChunkerConfig] = None,
+        dedup_against_existing: bool = False,
         callback: Optional[ProgressCb] = None,
     ) -> None:
         self.dest_root = Path(dest_root).resolve()
@@ -179,15 +205,38 @@ class Backup:
             computer_uuid or str(uuid.uuid4()).upper()
         )
         self.plan_uuid = plan_uuid or str(uuid.uuid4()).upper()
-        self.encryption_key = (
-            encryption_key or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
-        )
-        self.hmac_key = (
-            hmac_key or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
-        )
-        self.blob_id_salt = (
-            blob_id_salt or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
-        )
+        # When dedup_against_existing is on, try to reuse the
+        # destination's existing keyset so blob_ids (which are
+        # SHA-256 over salt+plaintext) line up across runs. Fall
+        # through to fresh random keys if anything is missing.
+        loaded_keys = None
+        if (
+            dedup_against_existing
+            and encryption_key is None
+            and hmac_key is None
+            and blob_id_salt is None
+        ):
+            loaded_keys = _try_load_existing_keyset(
+                self.dest_root,
+                self.computer_uuid,
+                encryption_password,
+            )
+        if loaded_keys is not None:
+            self.encryption_key, self.hmac_key, self.blob_id_salt = (
+                loaded_keys
+            )
+            self._keyset_was_reused = True
+        else:
+            self.encryption_key = (
+                encryption_key or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
+            )
+            self.hmac_key = (
+                hmac_key or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
+            )
+            self.blob_id_salt = (
+                blob_id_salt or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
+            )
+            self._keyset_was_reused = False
         self.openssl_path = openssl_path
         self.use_packs = use_packs
         self.max_pack_bytes = max_pack_bytes
@@ -195,6 +244,7 @@ class Backup:
         self._chunker: Optional[Buzhash] = (
             Buzhash(chunker_config) if chunker_config is not None else None
         )
+        self.dedup_against_existing = dedup_against_existing
         self.callback = callback
 
         # Per-run accumulators.
@@ -238,17 +288,27 @@ class Backup:
         (cu_root / STANDARDOBJECTS_DIR).mkdir(exist_ok=True)
         (cu_root / BACKUPFOLDERS_DIR).mkdir(exist_ok=True)
 
-        keyset_blob = build_encrypted_keyset(
-            self.password,
-            self.encryption_key, self.hmac_key, self.blob_id_salt,
-            openssl_path=self.openssl_path,
-        )
-        (cu_root / KEYSET_FILE).write_bytes(keyset_blob)
-        _emit(
-            self.callback, "keyset_written",
-            path=str(cu_root / KEYSET_FILE),
-            size=len(keyset_blob),
-        )
+        # Don't overwrite an existing valid keyset — the prior
+        # backuprecords were encrypted under that one's master key,
+        # so rewriting it (with a fresh random IV/salt) would break
+        # restore of every record older than this run.
+        if not self._keyset_was_reused:
+            keyset_blob = build_encrypted_keyset(
+                self.password,
+                self.encryption_key, self.hmac_key, self.blob_id_salt,
+                openssl_path=self.openssl_path,
+            )
+            (cu_root / KEYSET_FILE).write_bytes(keyset_blob)
+            _emit(
+                self.callback, "keyset_written",
+                path=str(cu_root / KEYSET_FILE),
+                size=len(keyset_blob),
+            )
+        else:
+            _emit(
+                self.callback, "keyset_reused",
+                path=str(cu_root / KEYSET_FILE),
+            )
 
         config = build_backupconfig(
             backup_name=self.backup_name,
@@ -267,6 +327,20 @@ class Backup:
         # Plan written here is a placeholder; rewritten on each
         # add_folder() call so it always reflects the current state.
         self._write_plan_json()
+
+        # Seed the within-run dedup cache from any prior backups
+        # already on this destination so we don't re-encrypt + re-
+        # write identical content. Best-effort: parse failures don't
+        # abort the run, they just lose the dedup boost.
+        if self.dedup_against_existing:
+            from .dedup import seed_existing_destination
+            report = seed_existing_destination(
+                self.dest_root, self.computer_uuid,
+                self._written_blobs,
+                encryption_key=self.encryption_key,
+                hmac_key=self.hmac_key,
+            )
+            _emit(self.callback, "dedup_seeded", **report)
 
         _emit(self.callback, "plan_initialized",
               computer_uuid=self.computer_uuid,
@@ -575,6 +649,7 @@ def build_backup(
     use_packs: bool = False,
     max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
     chunker_config: Optional[ChunkerConfig] = None,
+    dedup_against_existing: bool = False,
 ) -> BackupResult:
     """One-shot convenience wrapper: full plan init + single folder.
 
@@ -587,6 +662,14 @@ def build_backup(
     according to the rolling hash, each becoming its own ``BlobLoc``.
     Restore concatenates them in order. See
     :mod:`arq_writer.chunker` for the trade-offs.
+
+    ``dedup_against_existing=True`` seeds the within-run blob-id
+    cache from the destination's existing ``standardobjects/`` and
+    most-recent backuprecord. Subsequent runs skip re-encrypting +
+    re-writing any blob whose content (and therefore SHA-256
+    ``blob_id``) is already on disk. Backup correctness is unchanged
+    either way; this flag only affects I/O cost on incremental
+    re-runs against the same destination.
     """
     started = time.time()
     bk = Backup(
@@ -600,6 +683,7 @@ def build_backup(
         use_packs=use_packs,
         max_pack_bytes=max_pack_bytes,
         chunker_config=chunker_config,
+        dedup_against_existing=dedup_against_existing,
     )
     bk.init_plan()
     rec_path = bk.add_folder(

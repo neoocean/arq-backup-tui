@@ -21,8 +21,8 @@ product are not in scope for this comparison.
 | Validate          | ✅ All four tiers (L0 / L1a / L1b / L2) + resumable audit-drip |
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41 |
 
-The aggregate test count is **190 unit tests** at the time this
-table was last updated; the suite runs in ~35 s on a stdlib-only
+The aggregate test count is **198 unit tests** at the time this
+table was last updated; the suite runs in ~45 s on a stdlib-only
 toolchain (``python -m unittest discover``).
 
 ## Detailed feature matrix
@@ -96,7 +96,9 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 | Packed emission (``treepacks/`` + ``blobpacks/`` + ``largeblobpacks/``) |  ✅    | ``Backup(use_packs=True)`` |
 | Buzhash chunking with generic params                          |  ✅    | ``build_backup(..., chunker_config=ChunkerConfig(...))`` |
 | Buzhash chunking with Arq.app v7.41 params                    |  ✅    | opt-in via ``import arq_writer.arq_chunker_params`` |
-| Incremental backup (commit chain on existing destination)     |  ❌    | Each ``build_backup`` writes a new full backuprecord; no parent-commit linking yet. Backup is still valid (Arq.app accepts standalone records) but doesn't dedup against history without manual parent-commit wiring |
+| Within-run dedup (identical SHA-256 blobs share one BlobLoc)  |  ✅    | ``Backup._written_blobs`` cache; standalone + packed modes |
+| Cross-run dedup against an existing destination               |  ✅    | ``build_backup(..., dedup_against_existing=True)`` reuses the destination's keyset and seeds the cache from ``standardobjects/`` + the most recent backuprecord (covers packed mode); see ``arq_writer.dedup`` |
+| Incremental backup (commit chain on existing destination)     |  ⚠️    | Cross-run dedup works (no rewrites of unchanged blobs). Explicit parent-commit linking via a dedicated field isn't required — Arq 7 backuprecords are ordered chronologically by path (``backuprecords/<bucket>/<num>``), so chronologically newer records are implicitly children of older ones |
 | Retention / pruning of old commits                            |  🔴   | Arq.app side concern (not part of the on-disk format spec) |
 | Schedule-driven runs                                          |  🔴   | Arq.app side concern |
 
@@ -135,11 +137,20 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
   until a concrete user need surfaces.
 
 - **Incremental backup / commit chain on the writer side**: each
-  ``build_backup`` run currently writes a fresh full backuprecord;
-  the writer doesn't yet inspect existing commits to chain. The
-  backup is still valid (Arq.app accepts standalone backuprecords
-  in a folder) but doesn't dedup against history without manual
-  parent-commit wiring. Could be added without spec extension.
+  ``build_backup`` run writes a fresh backuprecord regardless of
+  prior runs, so every run is a complete snapshot — no explicit
+  parent-commit field is needed (Arq 7 doesn't have one). When
+  ``dedup_against_existing=True``, the writer reuses the
+  destination's existing keyset (so SHA-256 blob_ids line up across
+  runs) and seeds the within-run dedup cache from existing
+  ``standardobjects/`` files and the most-recent backuprecord's
+  walk. Result: identical content from a prior run isn't
+  re-encrypted or re-written. The remaining ❌ box would be
+  *tree-walk reuse* — recognizing that an unchanged subtree's
+  Tree blob is byte-identical to a prior run's and skipping the
+  recursive walk entirely. Today every run still walks the full
+  source tree even when dedup is on; the cost is ``O(source bytes)``
+  read + hash, not write.
 
 - **Retention / scheduling**: those concerns belong to Arq.app's
   policy layer rather than to the on-disk format. A standalone CLI
