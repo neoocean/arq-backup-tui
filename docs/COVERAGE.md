@@ -19,12 +19,12 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with tree-walk reuse |
 | Operate           | ⚠️ Library only — schedule, throttling, notifications, GUI/TUI all absent |
 
-The aggregate test count is **265 unit tests** at the time this
-table was last updated; the suite runs in ~92 s on a stdlib-only
-toolchain (``python -m unittest discover``). 24 of those are TUI
-tests that require the optional ``textual`` dep — without it they
-auto-skip and the rest of the suite (library + RE +
-compatibility) runs cleanly.
+The aggregate test count is **283 unit tests** at the time this
+table was last updated; the suite runs in ~86 s on a stdlib-only
+toolchain (``python -m unittest discover``). TUI tests
+(~24 / 283) require the optional ``textual`` dep; without it
+they auto-skip and the rest of the suite (library + RE +
+compatibility + GUI-parity) runs cleanly.
 
 For a structured **format-conformance audit** of any destination
 this project produces (or any Arq 7 destination, regardless of
@@ -57,7 +57,7 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 | LZ4 block compression (compress + decompress)                 |  ✅    | ``arq_writer.lz4_block`` |
 | ``stretchEncryptionKey`` per-blob flag                        |  ✅    | Honored on both read and write paths |
 | Unencrypted backups (``isEncrypted: false``)                  |  ❌    | Writer always emits encrypted backups; reader hard-codes ARQO magic check before decrypt — would need a small change to read genuinely unencrypted destinations |
-| Password change / keyset rotation                             |  ❌    | No tooling to re-encrypt the keyset under a new password |
+| Password change / keyset rotation                             |  ✅    | ``arq_writer.rotate_keyset_password(blob, old_password, new_password)``: re-encrypts the keyset under the new password without touching master keys, so existing records stay decryptable |
 
 ### 2. Object storage layout
 
@@ -68,7 +68,7 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 | ``treepacks/`` read + write                                   |  ✅    | ``arq_writer.pack_builder`` (write), ``arq_reader.restore`` (read) |
 | ``blobpacks/`` read + write                                   |  ✅    | Same modules |
 | ``largeblobpacks/`` read                                      |  ✅    | Reader treats it transparently via ``BlobLoc.relativePath`` |
-| ``largeblobpacks/`` write (large-file routing)                |  ❌    | Writer puts every non-tree blob into ``blobpacks/`` regardless of size; ``maxPackedItemLength`` (~256 KiB) routing not implemented |
+| ``largeblobpacks/`` write (large-file routing)                |  ✅    | Writer routes blobs whose ARQO bytes exceed ``large_blob_threshold`` (default = ``maxPackedItemLength`` ≈ 256 KiB) to ``largeblobpacks/`` |
 | ``backupfolders/<folder>/backuprecords/<bucket>/<num>``       |  ✅    | Both directions |
 | Multi-folder per computer                                     |  ✅    | ``Backup.add_folder`` can be called multiple times in one run |
 | Multi-computer per destination                                |  ⚠️    | Reader auto-discovers multiple computers; writer always writes to a fresh or single computer UUID per ``Backup`` instance |
@@ -94,7 +94,7 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 | Behavioral chunker-parameter inference from chunk-size dist   |  ✅    | ``infer_parameters_from_chunk_sizes`` |
 | (min, max) co-located pair-search heuristic                   |  ✅    | ``find_min_max_pairs`` + ``arq-buzhash-find pair-search`` |
 | Falsification harness (compare our chunks vs. Arq.app)        |  ✅    | ``arq_writer.chunker_oracle`` + ``arq-buzhash-find verify-chunking`` |
-| Per-folder ``useBuzhash`` toggle                              |  ⚠️    | Spec exposes the flag per folder; our writer applies one ``chunker_config`` to the whole ``Backup`` |
+| Per-folder ``useBuzhash`` toggle                              |  ✅    | ``Backup.add_folder(..., chunker_config=...)`` overrides the constructor-level chunker for one folder; ``Plan.per_source_chunkers`` wires it into the registry |
 
 ### 5. Backup (write path)
 
@@ -123,9 +123,10 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 | Arq 7 capability                                              | Status | Notes |
 |---------------------------------------------------------------|:------:|-------|
 | Plan creation (``backupplan.json``)                           |  ✅    | ``arq_writer.json_configs.build_backupplan`` |
-| Plan listing / editing                                        |  ❌    | No high-level API to add/remove folders from an existing plan |
-| Folder exclusions (file patterns / glob / regex)              |  ❌    | Writer walks the full source tree without exclusion rules |
-| File-size skip rules                                          |  ❌    | All files are backed up regardless of size |
+| Plan listing / show / delete                                  |  ✅    | ``arq-tui plans list/show/delete`` headless CLI |
+| Plan editing                                                  |  ❌    | Deferred to v1.x; recreate via wizard + ``arq-tui plans delete`` |
+| Folder exclusions (file patterns / glob / regex / .gitignore) |  ✅    | ``ExclusionRules.of(wildcard=..., regex=..., gitignore_lines=...)`` passed via ``Backup(exclusions=...)`` / ``build_backup(..., exclusions=...)``; matched against full POSIX rel_path + basename |
+| File-size skip rules                                          |  ✅    | ``Backup(max_file_bytes=...)``; symlinks are exempted (only target-string size, not target file size) |
 | ``.gitignore``-style filters                                  |  ❌    | Not honored |
 | ``excludedDrives`` / ``excludedNetworkInterfaces`` / ``excludedWiFiNetworkNames`` | ⚠️ | Fields emitted as empty arrays; not actually consulted by the writer |
 | Plan retention / pruning of old commits                       |  ❌    | No prune tooling — destinations grow unboundedly |
@@ -166,9 +167,9 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 
 | Arq 7 capability                                              | Status | Notes |
 |---------------------------------------------------------------|:------:|-------|
-| mtime / ctime preservation on restore                         |  ⚠️    | Times are stored in the FileNode but the restorer doesn't currently call ``utime``; restored files take "now" mtime |
-| Unix mode (perm bits)                                         |  ⚠️    | Mode stored; restorer honors it for new files but doesn't ``chmod`` after the fact |
-| Symlinks                                                      |  ❌    | Source-side: not followed (good); restore-side: not physically emitted as symlinks |
+| mtime / ctime preservation on restore                         |  ✅    | Restorer calls ``os.utime`` after each file write |
+| Unix mode (perm bits)                                         |  ✅    | Restorer calls ``os.chmod`` with ``S_IMODE(node.mac_st_mode)`` |
+| Symlinks                                                      |  ✅    | Writer stores link target under ``S_IFLNK``; restorer recreates with ``os.symlink`` |
 | Hardlinks                                                     |  ❌    | Each file treated as a separate blob; matches Arq.app's behavior |
 | Extended attributes (xattrs)                                  |  ❌    | Parsed and exposed in ``Node`` but not applied to restored files |
 | ACLs (POSIX or NFSv4)                                         |  ❌    | Same |

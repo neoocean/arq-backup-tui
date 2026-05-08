@@ -35,7 +35,9 @@ from .crypto_write import (
     build_encrypted_keyset,
     build_encrypted_object,
     compute_blob_id,
+    rotate_keyset_password,
 )
+from .exclusions import ExclusionRules
 from .lz4_block import lz4_block_compress, lz4_block_decompress, lz4_wrap
 from .types import BlobLoc, FileNode, Tree, TreeNode
 
@@ -44,6 +46,7 @@ __all__ = [
     "BackupResult",
     "build_backup",
     "BlobLoc",
+    "ExclusionRules",
     "FileNode",
     "Tree",
     "TreeNode",
@@ -51,6 +54,7 @@ __all__ = [
     "build_encrypted_object",
     "aes_256_cbc_encrypt",
     "compute_blob_id",
+    "rotate_keyset_password",
     "lz4_block_compress",
     "lz4_block_decompress",
     "lz4_wrap",
