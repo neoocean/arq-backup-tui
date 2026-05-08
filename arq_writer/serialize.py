@@ -68,9 +68,19 @@ def write_string(value: Optional[str]) -> bytes:
 
 
 def write_blobloc(loc: BlobLoc) -> bytes:
+    """Serialize one BlobLoc in Arq 7's on-disk binary layout.
+
+    The actual layout (validated against Arq.app-produced trees on
+    a real Hetzner Storage Box destination) carries ``isLargePack``
+    immediately after ``isPacked``; this byte was missing from our
+    earlier writer + reader pair. Round-trip stays correct because
+    both ends were symmetric, but Arq.app refused to read what we
+    emit. Adding this byte aligns us with Arq.app exactly.
+    """
     out = bytearray()
     out += write_string(loc.blobIdentifier)
     out += write_bool(loc.isPacked)
+    out += write_bool(loc.isLargePack)
     out += write_string(loc.relativePath)
     out += write_uint64(loc.offset)
     out += write_uint64(loc.length)

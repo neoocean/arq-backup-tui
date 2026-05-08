@@ -97,8 +97,23 @@ class BinaryReader:
 
 
 def parse_blobloc(reader: BinaryReader) -> BlobLoc:
+    """Parse one binary BlobLoc entry.
+
+    The actual on-disk Arq 7 BlobLoc layout (discovered by walking
+    real Arq.app-produced trees over a Hetzner Storage Box) carries
+    an extra ``isLargePack`` boolean between ``isPacked`` and
+    ``relativePath`` — the published spec / our earlier writer
+    omitted it. Without consuming this byte every downstream field
+    shifts by one and the parser explodes mid-string at the next
+    ``read_string``. ``isLargePack`` distinguishes
+    ``largeblobpacks/`` blobs from ordinary ``treepacks/`` /
+    ``blobpacks/`` ones; the reader currently surfaces it via the
+    ``BlobLoc.isLargePack`` attribute and downstream code routes
+    largeblobpack reads the same way as regular pack reads.
+    """
     blob_id = reader.read_string()
     is_packed = reader.read_bool()
+    is_large_pack = reader.read_bool()
     rel_path = reader.read_string()
     offset = reader.read_uint64()
     length = reader.read_uint64()
@@ -107,6 +122,7 @@ def parse_blobloc(reader: BinaryReader) -> BlobLoc:
     return BlobLoc(
         blobIdentifier=blob_id or "",
         isPacked=is_packed,
+        isLargePack=is_large_pack,
         relativePath=rel_path or "",
         offset=offset,
         length=length,

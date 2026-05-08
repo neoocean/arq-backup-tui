@@ -28,7 +28,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 class SftpConnectionError(RuntimeError):
@@ -191,6 +191,16 @@ class SftpBackend:
         self._rate_limit = _RateLimitTracker(
             threshold=rate_limit_abort_threshold,
         )
+        # Per-session whole-file cache for the SFTP-only fallback in
+        # ``read_range``. Chrooted endpoints (Hetzner Storage Box)
+        # reject ssh shell commands, so byte-range reads have to
+        # download the whole file via ``sftp get``. Without this
+        # cache, a single restore of an Arq destination ends up
+        # re-downloading the same pack file once per blob inside it
+        # — minutes instead of milliseconds. The cache is cleared
+        # in ``__exit__`` so on-disk temp files don't leak past the
+        # context manager. Maps remote path → local cached file.
+        self._read_cache: Dict[str, Path] = {}
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -294,6 +304,16 @@ class SftpBackend:
         self._cleanup()
 
     def _cleanup(self) -> None:
+        # Drop the per-session pack-file cache so on-disk temps don't
+        # leak past the context manager. Best-effort: a half-downloaded
+        # file or a manually-removed cache entry shouldn't block
+        # cleanup.
+        for cached in list(self._read_cache.values()):
+            try:
+                cached.unlink()
+            except OSError:
+                pass
+        self._read_cache.clear()
         if self._sock and self._sock.exists():
             try:
                 subprocess.run(
@@ -548,31 +568,39 @@ class SftpBackend:
     ) -> bytes:
         """Whole-file fallback used when ``ssh head/dd`` is rejected.
 
+        Caches the downloaded file in ``self._read_cache`` so
+        subsequent range-reads against the same path (very common
+        for pack files — one pack typically holds dozens of blobs)
+        hit the local copy instead of re-downloading the whole
+        thing. Cache entries are cleaned up in ``__exit__``.
+
         ``path`` must already be ``_resolve``-d (callers in this
         module pass the resolved path).
         """
-        fd, tmp = tempfile.mkstemp(prefix="arq-sftp-get-")
-        os.close(fd)
-        # sftp's ``get`` overwrites whatever was at ``tmp``, but
-        # mkstemp+close left an empty file there which is fine.
-        try:
+        cached = self._read_cache.get(path)
+        if cached is None or not cached.is_file():
+            fd, tmp = tempfile.mkstemp(prefix="arq-sftp-cache-")
+            os.close(fd)
+            cached = Path(tmp)
             cp = self._run_sftp_batch(
-                f"get {shlex.quote(path)} {shlex.quote(tmp)}\nbye\n",
+                f"get {shlex.quote(path)} {shlex.quote(str(cached))}\nbye\n",
                 timeout=timeout,
             )
             if cp.returncode != 0:
+                # Best-effort cleanup of the half-downloaded file
+                # before surfacing the failure.
+                try:
+                    cached.unlink()
+                except OSError:
+                    pass
                 raise RuntimeError(
                     f"sftp get {path}: rc={cp.returncode} "
                     f"err={(cp.stderr or '').strip()[:300]}"
                 )
-            with open(tmp, "rb") as f:
-                f.seek(offset)
-                return f.read(length)
-        finally:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            self._read_cache[path] = cached
+        with open(cached, "rb") as f:
+            f.seek(offset)
+            return f.read(length)
 
     def read_all(self, path: str) -> bytes:
         return self.read_range(path, 0, self.stat_size(path))

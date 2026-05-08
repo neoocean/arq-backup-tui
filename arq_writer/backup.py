@@ -140,6 +140,41 @@ def _absolute(dest_root: Path, rel: str) -> Path:
     return dest_root / rel.lstrip("/")
 
 
+def _resolve_owner(
+    uid: int, gid: int,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(username, group_name)`` for a uid/gid pair.
+
+    Arq.app's backuprecord ``node`` dict carries ``userName`` and
+    ``groupName`` alongside the numeric ``mac_st_uid``/``mac_st_gid``;
+    leaving them off makes the round-trip diverge from Arq.app and
+    blocks GUI ownership UI. We resolve via stdlib ``pwd``/``grp``
+    on POSIX systems; lookup misses (uid not in passwd, e.g.
+    LDAP-only environments) and Windows (no ``pwd``/``grp``)
+    return ``None`` so the writer emits an empty string per
+    Arq.app convention.
+    """
+    username = None
+    group_name = None
+    try:
+        import pwd  # POSIX-only
+        try:
+            username = pwd.getpwuid(uid).pw_name
+        except (KeyError, OSError):
+            pass
+    except ImportError:
+        pass
+    try:
+        import grp  # POSIX-only
+        try:
+            group_name = grp.getgrgid(gid).gr_name
+        except (KeyError, OSError):
+            pass
+    except ImportError:
+        pass
+    return username, group_name
+
+
 def _empty_skipped_filenode() -> "FileNode":
     """Stand-in FileNode for entries excluded by source filters.
 
@@ -664,6 +699,10 @@ class Backup:
             # target's.
             st = src.lstat()
             locs = [self._write_blob(data)]
+            uname, gname = _resolve_owner(
+                st.st_uid if hasattr(st, "st_uid") else 0,
+                st.st_gid if hasattr(st, "st_gid") else 0,
+            )
             node = FileNode(
                 dataBlobLocs=locs,
                 itemSize=len(data),
@@ -676,6 +715,8 @@ class Backup:
                 ctime_nsec=int(
                     (st.st_ctime - int(st.st_ctime)) * 1_000_000_000
                 ),
+                username=uname,
+                groupName=gname,
                 mac_st_mode=st.st_mode,
                 mac_st_uid=st.st_uid if hasattr(st, "st_uid") else 0,
                 mac_st_gid=st.st_gid if hasattr(st, "st_gid") else 0,
@@ -706,6 +747,10 @@ class Backup:
         else:
             locs = [self._write_blob(data)]
         st = src.stat()
+        uname, gname = _resolve_owner(
+            st.st_uid if hasattr(st, "st_uid") else 0,
+            st.st_gid if hasattr(st, "st_gid") else 0,
+        )
         node = FileNode(
             dataBlobLocs=locs,
             itemSize=len(data),
@@ -714,6 +759,8 @@ class Backup:
             mtime_nsec=int((st.st_mtime - int(st.st_mtime)) * 1_000_000_000),
             ctime_sec=int(st.st_ctime),
             ctime_nsec=int((st.st_ctime - int(st.st_ctime)) * 1_000_000_000),
+            username=uname,
+            groupName=gname,
             mac_st_mode=st.st_mode,
             mac_st_uid=st.st_uid if hasattr(st, "st_uid") else 0,
             mac_st_gid=st.st_gid if hasattr(st, "st_gid") else 0,

@@ -15,6 +15,7 @@ disk as ``backupfolders/<UUID>/backuprecords/<NNNNN>/<num>.backuprecord``.
 
 from __future__ import annotations
 
+import json
 import plistlib
 import time
 from typing import Any, Dict, Optional
@@ -28,6 +29,7 @@ def blobloc_to_dict(loc: BlobLoc) -> Dict[str, Any]:
     return {
         "blobIdentifier": loc.blobIdentifier,
         "isPacked": bool(loc.isPacked),
+        "isLargePack": bool(loc.isLargePack),
         "relativePath": loc.relativePath,
         "offset": int(loc.offset),
         "length": int(loc.length),
@@ -56,6 +58,14 @@ def node_to_dict(node: Node) -> Dict[str, Any]:
         "creationTime_sec": int(node.create_time_sec),
         "creationTime_nsec": int(node.create_time_nsec),
         "deleted": bool(node.deleted),
+        # ``userName`` / ``groupName`` round-trip the resolved
+        # owner of the file as Arq.app records them. Discovered
+        # against the operator's real Hetzner destination — our
+        # earlier writer omitted both, which would block Arq.app
+        # from showing UI ownership info on restore even though
+        # the numeric ``mac_st_uid``/``gid`` was present.
+        "userName": node.username or "",
+        "groupName": node.groupName or "",
         "mac_st_dev": int(node.mac_st_dev),
         "mac_st_ino": int(node.mac_st_ino),
         "mac_st_mode": int(node.mac_st_mode),
@@ -124,15 +134,38 @@ def build_backuprecord_dict(
     }
 
 
-def serialize_backuprecord(record: Dict[str, Any]) -> bytes:
-    """Serialize the backuprecord dict as a binary plist.
+def serialize_backuprecord(
+    record: Dict[str, Any], *, fmt: str = "json",
+) -> bytes:
+    """Serialize the backuprecord dict for on-disk storage.
 
-    Apple's ``PropertyListSerialization`` (which Arq.app and
-    ``arq_restore`` both use under the hood) accepts XML, binary, and
-    OpenStep ASCII plists transparently. Binary plist is the smallest
-    and most reliable format Python's stdlib can emit.
+    Two formats supported, switchable via ``fmt``:
+
+    - ``"json"`` (default): UTF-8 JSON with no BOM. This is what
+      **Arq.app actually emits** on real destinations — discovered
+      against a Hetzner Storage Box where the operator's records
+      started with ``{"backupFolderUUID":"…"}`` rather than the
+      ``bplist00`` magic the spec describes. JSON is also the only
+      format Arq.app's own restore code path appears to read on
+      modern installs.
+    - ``"binary-plist"``: legacy Apple binary plist via stdlib
+      ``plistlib.dumps(fmt=FMT_BINARY)``. Kept for backward compat
+      with destinations our writer produced before the JSON
+      switch. The reader's ``_parse_backuprecord`` accepts both.
+
+    JSON encoding follows Arq.app's conventions: dict keys preserved
+    in their insertion order, ``ensure_ascii=False`` so non-ASCII
+    paths round-trip transparently, no indent (matches the dense
+    one-line format Arq.app emits).
     """
-    return plistlib.dumps(record, fmt=plistlib.FMT_BINARY)
+    if fmt == "binary-plist":
+        return plistlib.dumps(record, fmt=plistlib.FMT_BINARY)
+    if fmt != "json":
+        raise ValueError(
+            f"unknown backuprecord format: {fmt!r}; "
+            f"expected 'json' or 'binary-plist'"
+        )
+    return json.dumps(record, ensure_ascii=False).encode("utf-8")
 
 
 def build_backuprecord_arqo(

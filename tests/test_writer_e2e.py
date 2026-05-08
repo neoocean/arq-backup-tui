@@ -160,12 +160,17 @@ class WriterEndToEndTests(unittest.TestCase):
         # doesn't produce a fourth blob.
         self.assertEqual(res.files_written, 3)
 
-    def test_backuprecord_decrypts_and_parses_as_plist(self) -> None:
-        """Decrypt the writer's backuprecord and parse the inner plist.
+    def test_backuprecord_decrypts_and_parses(self) -> None:
+        """Decrypt the writer's backuprecord and parse the inner payload.
 
         Goes through every layer the writer assembles: ARQO HMAC →
-        AES-256-CBC decrypt → LZ4 decompress → plist parse. Asserts
-        the spec-required top-level keys are all present and well-typed.
+        AES-256-CBC decrypt → LZ4 decompress → JSON / plist parse.
+        Asserts the spec-required top-level keys are all present
+        and well-typed. The writer now defaults to JSON
+        (Arq.app-compatible) for the inner serialization, but the
+        reader-side helper used here accepts both formats so this
+        test still covers writers configured for binary-plist
+        output.
         """
         from arq_validator.crypto import (
             aes_256_cbc_decrypt,
@@ -202,10 +207,14 @@ class WriterEndToEndTests(unittest.TestCase):
             keyset.encryption_key, master_iv, enc_session,
         )
         data_iv, session_key = session_pt[:16], session_pt[16:48]
-        # Decrypt the ciphertext to get the LZ4-wrapped plist bytes.
+        # Decrypt the ciphertext to get the LZ4-wrapped record bytes.
         lz4_wrapped = aes_256_cbc_decrypt(session_key, data_iv, ciphertext)
-        plist_bytes = lz4_unwrap(lz4_wrapped)
-        parsed = plistlib.loads(plist_bytes)
+        record_bytes = lz4_unwrap(lz4_wrapped)
+        # Parse via the dual-format helper so the test stays correct
+        # whether the writer emitted JSON (Arq.app-compatible default)
+        # or binary plist.
+        from arq_reader.restore import _parse_backuprecord
+        parsed = _parse_backuprecord(record_bytes)
 
         # Assert spec-required keys are present.
         for required in ("archived", "arqVersion", "backupFolderUUID",
