@@ -424,13 +424,17 @@ class Backup:
         )
         self.backend.write_all(
             self._cu_path("backupconfig.json"),
-            json.dumps(config, indent=2).encode("utf-8"),
+            json.dumps(
+                config, indent=2, ensure_ascii=False,
+            ).encode("utf-8"),
         )
 
         folders_idx = build_backupfolders_json(self.computer_uuid)
         self.backend.write_all(
             self._cu_path("backupfolders.json"),
-            json.dumps(folders_idx, indent=2).encode("utf-8"),
+            json.dumps(
+                folders_idx, indent=2, ensure_ascii=False,
+            ).encode("utf-8"),
         )
 
         # Plan written here is a placeholder; rewritten on each
@@ -467,7 +471,9 @@ class Backup:
         )
         self.backend.write_all(
             self._cu_path("backupplan.json"),
-            json.dumps(plan, indent=2).encode("utf-8"),
+            json.dumps(
+                plan, indent=2, ensure_ascii=False,
+            ).encode("utf-8"),
         )
 
     # ------------------------------------------------------------------
@@ -818,7 +824,9 @@ class Backup:
         )
         self.backend.write_all(
             f"{bf_rel}/backupfolder.json",
-            json.dumps(bf_json, indent=2).encode("utf-8"),
+            json.dumps(
+                bf_json, indent=2, ensure_ascii=False,
+            ).encode("utf-8"),
         )
 
         # Update accumulated plan metadata before walking so the

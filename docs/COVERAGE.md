@@ -19,12 +19,23 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with tree-walk reuse |
 | Operate           | ⚠️ Library only — schedule, throttling, notifications, GUI/TUI all absent |
 
-The aggregate test count is **283 unit tests** at the time this
-table was last updated; the suite runs in ~86 s on a stdlib-only
+The aggregate test count is **299 unit tests** at the time this
+table was last updated; the suite runs in ~103 s on a stdlib-only
 toolchain (``python -m unittest discover``). TUI tests
-(~24 / 283) require the optional ``textual`` dep; without it
+(~24 / 299) require the optional ``textual`` dep; without it
 they auto-skip and the rest of the suite (library + RE +
-compatibility + GUI-parity) runs cleanly.
+compatibility + GUI-parity + Unicode-stress) runs cleanly.
+
+For a structured **Unicode / multi-language / emoji / long-path
+audit** of every backup → validate → restore pipeline edge,
+see ``docs/UNICODE.md`` and
+``tests/test_unicode_path_stress.py``. The fixture generator at
+``tests/fixtures_unicode.py`` covers 11 scripts (Latin / Hangul /
+CJK / Arabic / Hebrew / Greek / Cyrillic / Thai / Devanagari /
+Vietnamese), 8 emoji shapes (single + ZWJ + variation selectors
++ regional indicators + skin tones), 28 special-character
+filenames, NFC/NFD normalization preservation, 250-byte filenames,
+and 30-level deep paths. Every fixture round-trips byte-for-byte.
 
 For a structured **format-conformance audit** of any destination
 this project produces (or any Arq 7 destination, regardless of
