@@ -472,23 +472,34 @@ class SftpBackend:
         return sorted(set(names))
 
     def stat_size(self, path: str) -> int:
+        # Chrooted SFTP-only servers (Hetzner Storage Box, etc.) reject
+        # arbitrary `ssh ... stat` commands — only the sftp protocol is
+        # available. ``ls -l`` over sftp returns one long-format line
+        # per matched path; the file size lives in column 5
+        # (``-rw-r--r--    ?  user  group   <size>  Mon DD  YYYY  /full/path``).
         path = self._resolve(path)
-        cp = self._run_ssh(
-            f"stat -c %s {shlex.quote(path)} 2>/dev/null || "
-            f"stat -f %z {shlex.quote(path)}"
-        )
+        cp = self._run_sftp_batch(f"ls -l {shlex.quote(path)}\nbye\n")
         if cp.returncode != 0:
             raise RuntimeError(
-                f"ssh stat {path}: rc={cp.returncode} "
-                f"err={(cp.stderr.decode(errors='replace') or '').strip()[:300]}"
+                f"sftp ls -l {path}: rc={cp.returncode} "
+                f"err={(cp.stderr or '').strip()[:300]}"
             )
-        out = cp.stdout.decode(errors="replace").strip()
-        try:
-            return int(out)
-        except ValueError as exc:
-            raise RuntimeError(
-                f"ssh stat {path}: unparseable output {out!r}"
-            ) from exc
+        for line in (cp.stdout or "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("sftp>"):
+                continue
+            cols = line.split()
+            # Long-format minimum: perms links user group size date... name
+            if len(cols) < 6:
+                continue
+            try:
+                return int(cols[4])
+            except ValueError:
+                continue
+        raise RuntimeError(
+            f"sftp ls -l {path}: no size column parsed from "
+            f"{(cp.stdout or '')[:300]!r}"
+        )
 
     def read_range(self, path: str, offset: int, length: int) -> bytes:
         if offset < 0 or length < 0:
@@ -498,6 +509,14 @@ class SftpBackend:
         if length == 0:
             return b""
         path = self._resolve(path)
+        # Chrooted SFTP-only servers (Hetzner Storage Box etc.) reject
+        # arbitrary ``ssh ... head -c`` / ``ssh ... dd`` commands. Try
+        # the ssh path first because it's range-native (cheap on small
+        # reads) — if the server rejects shell commands we fall back
+        # to a full ``sftp get`` + in-memory slice. The fallback is
+        # correct but downloads the whole file even for partial reads,
+        # so callers reading byte ranges out of large pack files on
+        # SFTP-only endpoints will pay the bandwidth cost.
         if offset == 0:
             remote = f"head -c {length} {shlex.quote(path)}"
         else:
@@ -512,32 +531,72 @@ class SftpBackend:
             int(length / (1024 * 1024)) + self.op_timeout_sec,
         )
         cp = self._run_ssh(remote, timeout=timeout)
-        if cp.returncode != 0:
-            raise RuntimeError(
-                f"ssh read_range {path} [{offset}+{length}]: "
-                f"rc={cp.returncode} "
-                f"err={(cp.stderr.decode(errors='replace') or '').strip()[:300]}"
+        if cp.returncode == 0:
+            return cp.stdout
+        # SSH-side rejection (Hetzner-style chrooted endpoint, exit
+        # code 8 / "Command not found"). Fall back to sftp ``get`` of
+        # the whole file + in-memory slice. Correct for any range,
+        # just bandwidth-wasteful when the file is large and we only
+        # wanted a few bytes.
+        return self._read_range_via_sftp_get(
+            path, offset, length, timeout=timeout,
+        )
+
+    def _read_range_via_sftp_get(
+        self, path: str, offset: int, length: int,
+        *, timeout: int,
+    ) -> bytes:
+        """Whole-file fallback used when ``ssh head/dd`` is rejected.
+
+        ``path`` must already be ``_resolve``-d (callers in this
+        module pass the resolved path).
+        """
+        fd, tmp = tempfile.mkstemp(prefix="arq-sftp-get-")
+        os.close(fd)
+        # sftp's ``get`` overwrites whatever was at ``tmp``, but
+        # mkstemp+close left an empty file there which is fine.
+        try:
+            cp = self._run_sftp_batch(
+                f"get {shlex.quote(path)} {shlex.quote(tmp)}\nbye\n",
+                timeout=timeout,
             )
-        return cp.stdout
+            if cp.returncode != 0:
+                raise RuntimeError(
+                    f"sftp get {path}: rc={cp.returncode} "
+                    f"err={(cp.stderr or '').strip()[:300]}"
+                )
+            with open(tmp, "rb") as f:
+                f.seek(offset)
+                return f.read(length)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     def read_all(self, path: str) -> bytes:
         return self.read_range(path, 0, self.stat_size(path))
 
     def exists(self, path: str) -> bool:
+        # sftp ``cd <path>`` succeeds for directories, fails for files
+        # AND missing paths — so we additionally try ``ls -l <path>``
+        # which succeeds for files. Either success → exists.
         path = self._resolve(path)
-        cp = self._run_ssh(
-            f"test -e {shlex.quote(path)} && echo Y || echo N",
-            timeout=self.connect_timeout_sec,
-        )
-        return cp.returncode == 0 and cp.stdout.decode().strip() == "Y"
+        cp_cd = self._run_sftp_batch(f"cd {shlex.quote(path)}\nbye\n")
+        if cp_cd.returncode == 0:
+            return True
+        cp_ls = self._run_sftp_batch(f"ls -l {shlex.quote(path)}\nbye\n")
+        return cp_ls.returncode == 0
 
     def is_dir(self, path: str) -> bool:
+        # ``cd <path>`` is the cleanest directory probe over sftp:
+        # rc=0 ⇒ directory, rc=1 ⇒ file or missing (stderr distinguishes
+        # the two but :meth:`is_dir` only cares about the boolean).
+        # Works on chrooted SFTP-only endpoints that reject arbitrary
+        # ``ssh ... test -d`` commands.
         path = self._resolve(path)
-        cp = self._run_ssh(
-            f"test -d {shlex.quote(path)} && echo Y || echo N",
-            timeout=self.connect_timeout_sec,
-        )
-        return cp.returncode == 0 and cp.stdout.decode().strip() == "Y"
+        cp = self._run_sftp_batch(f"cd {shlex.quote(path)}\nbye\n")
+        return cp.returncode == 0
 
     # ------------------------------------------------------------------
     # Write methods
@@ -547,24 +606,56 @@ class SftpBackend:
         self, path: str, *,
         parents: bool = True, exist_ok: bool = True,
     ) -> None:
-        """``mkdir [-p] <path>`` over the existing SSH master.
+        """Create ``path`` as a directory on the SFTP server.
 
-        ``mkdir -p`` ignores already-existing directories, which
-        matches the ``exist_ok=True`` default. With ``exist_ok=False``
-        we additionally test that the target didn't exist before the
-        call so the SFTP wrapper matches POSIX semantics.
+        Issues ``mkdir`` commands through the sftp protocol so the
+        method works on chrooted SFTP-only endpoints (Hetzner Storage
+        Box, etc.) that reject arbitrary ``ssh ... mkdir`` shell
+        commands. ``parents=True`` walks the path components and
+        ``mkdir`` each one in turn; pre-existing directories are
+        absorbed by ``exist_ok=True`` (the ``mkdir`` command's
+        "Failure" stderr is treated as success when ``cd`` confirms
+        the target exists as a directory).
         """
         if not exist_ok and self.exists(path):
             raise FileExistsError(f"sftp mkdir: already exists: {path}")
-        path = self._resolve(path)
-        flag = "-p" if parents else ""
-        cmd = f"mkdir {flag} {shlex.quote(path)}".strip()
-        cp = self._run_ssh(cmd)
-        if cp.returncode != 0:
-            err = (cp.stderr.decode(errors="replace") or "").strip()[:300]
-            raise RuntimeError(
-                f"sftp mkdir {path}: rc={cp.returncode} err={err}"
+        resolved = self._resolve(path)
+        if parents:
+            # Build cumulative ancestor list so we can mkdir each one
+            # in the right order. Skip any components that already
+            # exist as directories (the ``cd`` probe is the same one
+            # is_dir uses, so it works on Hetzner-style endpoints).
+            parts = [p for p in resolved.split("/") if p]
+            cur = "/" if resolved.startswith("/") else ""
+            targets = []
+            for part in parts:
+                cur = (cur + part) if cur in ("", "/") else f"{cur}/{part}"
+                cur_with_slash = cur if cur.startswith("/") else f"/{cur}"
+                targets.append(cur_with_slash)
+        else:
+            targets = [resolved]
+        for tgt in targets:
+            # Skip if already a directory.
+            cp_probe = self._run_sftp_batch(
+                f"cd {shlex.quote(tgt)}\nbye\n",
             )
+            if cp_probe.returncode == 0:
+                continue
+            cp = self._run_sftp_batch(
+                f"mkdir {shlex.quote(tgt)}\nbye\n",
+            )
+            if cp.returncode != 0:
+                # Tolerate "already exists" / race when exist_ok.
+                if exist_ok:
+                    cp_after = self._run_sftp_batch(
+                        f"cd {shlex.quote(tgt)}\nbye\n",
+                    )
+                    if cp_after.returncode == 0:
+                        continue
+                raise RuntimeError(
+                    f"sftp mkdir {tgt}: rc={cp.returncode} "
+                    f"err={(cp.stderr or '').strip()[:300]}"
+                )
 
     def write_all(self, path: str, data: bytes) -> None:
         """Atomically write ``data`` to ``path`` on the SFTP server.
@@ -592,9 +683,13 @@ class SftpBackend:
             cp = self._run_sftp_batch(batch)
             if cp.returncode != 0:
                 err = (cp.stderr or "").strip()[:300]
-                # Best-effort cleanup of the orphan partial.
+                # Best-effort cleanup of the orphan partial. Use the
+                # sftp protocol's own ``rm`` so chrooted endpoints
+                # don't reject the shell-level rm we used to issue.
                 try:
-                    self._run_ssh(f"rm -f {shlex.quote(partial)}")
+                    self._run_sftp_batch(
+                        f"rm {shlex.quote(partial)}\nbye\n",
+                    )
                 except Exception:
                     pass
                 raise RuntimeError(
@@ -607,14 +702,21 @@ class SftpBackend:
                 pass
 
     def unlink(self, path: str) -> None:
-        """``rm -f <path>`` over the SSH master. Missing target =
+        """Remove ``path`` via the sftp protocol. Missing target =
         silent OK (matches ``rm -f`` semantics so a re-run is
-        idempotent)."""
+        idempotent). Works on chrooted SFTP-only endpoints because
+        we never reach for shell ``rm``."""
         self._require_open()
         path = self._resolve(path)
-        cp = self._run_ssh(f"rm -f {shlex.quote(path)}")
-        if cp.returncode != 0:
-            err = (cp.stderr.decode(errors="replace") or "").strip()[:300]
-            raise RuntimeError(
-                f"sftp unlink {path}: rc={cp.returncode} err={err}"
-            )
+        cp = self._run_sftp_batch(f"rm {shlex.quote(path)}\nbye\n")
+        if cp.returncode == 0:
+            return
+        err = (cp.stderr or "").strip()
+        # Treat "no such file" as a no-op (rm -f semantics).
+        # OpenSSH sftp returns rc=1 with "No such file or directory"
+        # in stderr when the target is missing.
+        if "No such file" in err or "no such file" in err:
+            return
+        raise RuntimeError(
+            f"sftp unlink {path}: rc={cp.returncode} err={err[:300]}"
+        )

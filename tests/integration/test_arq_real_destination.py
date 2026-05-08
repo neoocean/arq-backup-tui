@@ -40,7 +40,7 @@ from arq_validator import (
 )
 from arq_validator.layout import find_latest_backuprecord
 from arq_validator.sftp import SftpBackend
-from arq_writer import build_backup
+from arq_writer import Backup
 
 from tests.integration._creds import resolve_creds, skip_reason
 
@@ -87,7 +87,7 @@ class RealDestinationReaderTests(unittest.TestCase):
         decrypt/HMAC step worked."""
         backend = _open_backend(self.creds, root=self.creds.root)
         try:
-            layouts = discover_layout(backend, "/")
+            layouts = discover_layout(backend, "/", enumerate_objects=False)
             self.assertGreaterEqual(len(layouts), 1)
             cu = layouts[0].computer_uuid
             folder_uuids = list(layouts[0].backup_folder_uuids)
@@ -161,38 +161,39 @@ class RealDestinationValidatorTests(unittest.TestCase):
     def test_audit_drip_capped_at_a_few_megabytes(self) -> None:
         """Run an L2-equivalent audit with a tight wall-clock +
         bytes budget so the test always finishes quickly. Asserts
-        that whatever the audit DID examine had no HMAC failures
-        and the cursor file got written (i.e. the run can be
-        resumed)."""
+        that whatever the audit DID examine had no HMAC failures.
+        The bytes cap (`audit_max_bytes`) makes the run bounded
+        even on huge destinations."""
         backend = _open_backend(self.creds, root=self.creds.root)
         try:
-            with tempfile.TemporaryDirectory() as td:
-                state_dir = Path(td) / "state"
-                state_dir.mkdir()
-                report = validate(
-                    backend, root="/",
-                    tier=ValidationTier.AUDIT,
-                    encryption_password=self.creds.dest_password,
-                    audit_state_dir=state_dir,
-                    audit_max_bytes=4 * 1024 * 1024,
-                    audit_max_runtime_sec=20.0,
+            report = validate(
+                backend, root="/",
+                tier=ValidationTier.AUDIT,
+                encryption_password=self.creds.dest_password,
+                audit_max_bytes=4 * 1024 * 1024,
+                audit_max_runtime_sec=20.0,
+            )
+            self.assertIsNone(
+                report.error,
+                msg=f"audit errored: {report.error}",
+            )
+            if report.audit is not None:
+                self.assertEqual(
+                    report.audit.files_fail, 0,
+                    msg=f"audit surfaced fail-count "
+                        f"{report.audit.files_fail}: "
+                        f"{report.audit.failures[:3]}",
                 )
-                self.assertIsNone(
-                    report.error,
-                    msg=f"audit errored: {report.error}",
+                self.assertEqual(
+                    report.audit.files_error, 0,
+                    msg=f"audit surfaced error-count "
+                        f"{report.audit.files_error}: "
+                        f"{report.audit.failures[:3]}",
                 )
-                if report.l2 is not None:
-                    self.assertEqual(
-                        len(report.l2.failed or []),
-                        0,
-                        msg=f"audit-drip surfaced failures: "
-                            f"{report.l2.failed}",
-                    )
-                    self.assertGreater(
-                        report.l2.files_checked,
-                        0,
-                        msg="audit-drip examined zero objects",
-                    )
+                self.assertGreater(
+                    report.audit.files_total, 0,
+                    msg="audit examined zero objects",
+                )
         finally:
             backend.close()
 
@@ -279,12 +280,19 @@ class RealDestinationWriterTests(unittest.TestCase):
                 )
 
                 # ── Writer ──
-                build_backup(
-                    source=src, dest_root="/",
+                # build_backup() is a local-FS convenience wrapper;
+                # for backend-injected runs we drive the lower-level
+                # Backup class directly. dest_root="/" is the
+                # SFTP-namespace anchor — the backend (rooted at
+                # creds.write_subdir_path) maps that to the sandbox.
+                bk = Backup(
+                    dest_root=Path("/"),
                     encryption_password=self.creds.dest_password,
                     backup_name="real-sftp-roundtrip",
                     backend=backend,
                 )
+                bk.init_plan()
+                bk.add_folder(src, folder_name=src.name)
 
                 # ── Reader ──
                 rs = Restore(
@@ -327,10 +335,10 @@ class RealDestinationWriterTests(unittest.TestCase):
                     report.error,
                     msg=f"validator errored: {report.error}",
                 )
-                if report.l1a is not None:
-                    self.assertEqual(report.l1a.fail, 0)
-                if report.l1b is not None:
-                    self.assertEqual(report.l1b.fail, 0)
+                if report.magic_check is not None:
+                    self.assertEqual(report.magic_check.fail, 0)
+                if report.backuprecord is not None:
+                    self.assertEqual(report.backuprecord.fail, 0)
         finally:
             backend.close()
 

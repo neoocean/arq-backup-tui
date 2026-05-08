@@ -115,7 +115,9 @@ def _enumerate_sharded_dir(
 
 
 def discover_layout(
-    backend: Backend, root: str = "/", *, concurrency: int = 8,
+    backend: Backend, root: str = "/", *,
+    concurrency: int = 8,
+    enumerate_objects: bool = True,
 ) -> List[Arq7ComputerLayout]:
     """Discover all Arq 7 computer subtrees under ``root``.
 
@@ -123,6 +125,14 @@ def discover_layout(
     UUID. ``backup_folder_uuids`` is top-level only — the nested
     ``backuprecords/<NNNNN>/<num>.backuprecord`` structure is walked
     on-demand by the L1b tier so cheap modes don't pay the cost.
+
+    ``enumerate_objects=False`` skips the per-shard ``list_dir`` walk
+    of ``standardobjects/``, ``treepacks/``, ``blobpacks/``, and
+    ``largeblobpacks/``. Use it when a caller only needs the
+    computer UUID + folder UUIDs (most non-audit codepaths) — on a
+    real destination over SFTP the full walk dispatches up to
+    ``256 × 4 = 1024`` ``list_dir`` calls and routinely takes
+    minutes.
     """
     layouts: List[Arq7ComputerLayout] = []
     if not backend.is_dir(root):
@@ -140,22 +150,23 @@ def discover_layout(
         layout.has_keyset = backend.exists(
             f"{cu_root}/{C.KEYSET_FILE}"
         )
-        layout.blobpacks = _enumerate_sharded_dir(
-            backend, f"{cu_root}/{C.BLOBPACKS_DIR}",
-            C.PACK_NAME_RE, concurrency=concurrency,
-        )
-        layout.treepacks = _enumerate_sharded_dir(
-            backend, f"{cu_root}/{C.TREEPACKS_DIR}",
-            C.PACK_NAME_RE, concurrency=concurrency,
-        )
-        layout.largeblobpacks = _enumerate_sharded_dir(
-            backend, f"{cu_root}/{C.LARGEBLOBPACKS_DIR}",
-            C.PACK_NAME_RE, concurrency=concurrency,
-        )
-        layout.standardobjects = _enumerate_sharded_dir(
-            backend, f"{cu_root}/{C.STANDARDOBJECTS_DIR}",
-            C.STANDARDOBJECT_NAME_RE, concurrency=concurrency,
-        )
+        if enumerate_objects:
+            layout.blobpacks = _enumerate_sharded_dir(
+                backend, f"{cu_root}/{C.BLOBPACKS_DIR}",
+                C.PACK_NAME_RE, concurrency=concurrency,
+            )
+            layout.treepacks = _enumerate_sharded_dir(
+                backend, f"{cu_root}/{C.TREEPACKS_DIR}",
+                C.PACK_NAME_RE, concurrency=concurrency,
+            )
+            layout.largeblobpacks = _enumerate_sharded_dir(
+                backend, f"{cu_root}/{C.LARGEBLOBPACKS_DIR}",
+                C.PACK_NAME_RE, concurrency=concurrency,
+            )
+            layout.standardobjects = _enumerate_sharded_dir(
+                backend, f"{cu_root}/{C.STANDARDOBJECTS_DIR}",
+                C.STANDARDOBJECT_NAME_RE, concurrency=concurrency,
+            )
         bf_root = f"{cu_root}/{C.BACKUPFOLDERS_DIR}"
         if backend.is_dir(bf_root):
             try:
