@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from arq_validator import constants as C
-from arq_validator.backend import LocalBackend
+from arq_validator.backend import Backend, LocalBackend
 from arq_validator.crypto import Keyset, decrypt_keyset
 from arq_validator.layout import (
     discover_layout,
@@ -82,11 +82,26 @@ class Restore:
         encryption_password: str,
         *,
         openssl_path: str = "openssl",
+        backend: Optional[Backend] = None,
     ) -> None:
-        self.src = Path(src).resolve()
+        """Open a backup destination for restore.
+
+        ``backend`` opts out of the default ``LocalBackend(src)`` path
+        and lets the caller use any object that satisfies the
+        :class:`~arq_validator.backend.Backend` Protocol. The
+        validator's :class:`~arq_validator.sftp.SftpBackend` is the
+        primary alternative; in that mode ``src`` is the backend-
+        relative root path inside the SFTP server (typically the
+        absolute server path that points at the backup destination,
+        e.g. ``"/home/arq/dest1"``), not a local filesystem path.
+        """
+        self.src = Path(src) if backend is None else src
         self.password = encryption_password
         self.openssl_path = openssl_path
-        self.backend = LocalBackend(self.src)
+        if backend is not None:
+            self.backend = backend
+        else:
+            self.backend = LocalBackend(Path(src).resolve())
         self._layouts = None
         self._keyset_by_computer: Dict[str, Keyset] = {}
 

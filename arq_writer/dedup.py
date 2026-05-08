@@ -65,20 +65,58 @@ def seed_from_standardobjects(
     dest_root: Path,
     computer_uuid: str,
     cache: Dict[str, BlobLoc],
+    *,
+    backend=None,
 ) -> int:
     """Scan ``standardobjects/`` and populate ``cache`` with one
     BlobLoc per existing file.
 
+    When ``backend`` is provided, the listing goes through it
+    (so SFTP destinations work the same way as local). Otherwise
+    falls back to local ``os.scandir`` for backward compatibility.
+
     Returns the count of entries added. Files already in the cache
     are not overwritten — the within-run cache always wins.
-
-    Cheap: ``os.scandir`` based, no decrypt, no parse. On a
-    destination with N standalone objects the cost is O(N) directory
-    entries + 64 bytes per BlobLoc.
     """
-    so_root = (
-        Path(dest_root) / computer_uuid / STANDARDOBJECTS_DIR
-    )
+    so_rel = f"/{computer_uuid}/{STANDARDOBJECTS_DIR}"
+    if backend is not None:
+        if not backend.is_dir(so_rel):
+            return 0
+        try:
+            shards = backend.list_dir(so_rel)
+        except Exception:
+            return 0
+        added = 0
+        for shard in shards:
+            shard_rel = f"{so_rel}/{shard}"
+            try:
+                if not backend.is_dir(shard_rel):
+                    continue
+                files = backend.list_dir(shard_rel)
+            except Exception:
+                continue
+            for rest in files:
+                if not _is_blob_id_path(shard, rest):
+                    continue
+                blob_id = shard + rest
+                if blob_id in cache:
+                    continue
+                file_rel = f"{shard_rel}/{rest}"
+                try:
+                    size = backend.stat_size(file_rel)
+                except Exception:
+                    continue
+                cache[blob_id] = BlobLoc(
+                    blobIdentifier=blob_id,
+                    isPacked=False,
+                    relativePath=file_rel,
+                    offset=0,
+                    length=size,
+                )
+                added += 1
+        return added
+    # Local fallback — kept for callers that pass dest_root only.
+    so_root = Path(dest_root) / computer_uuid / STANDARDOBJECTS_DIR
     if not so_root.is_dir():
         return 0
     added = 0
@@ -172,6 +210,8 @@ def find_latest_backuprecord(
 
 def find_latest_backuprecord_per_folder(
     dest_root: Path, computer_uuid: str,
+    *,
+    backend=None,
 ) -> Dict[str, Path]:
     """Return ``{folder_uuid: latest_backuprecord_path}`` for every
     folder under the given computer.
@@ -186,8 +226,49 @@ def find_latest_backuprecord_per_folder(
 
     Path layout: ``<dest>/<cu>/backupfolders/<folder_uuid>/backuprecords/<bucket>/<num>.backuprecord``.
     The folder's "latest" record is the lexicographic max of
-    ``(bucket, num)``.
+    ``(bucket, num)``. Returned ``Path`` values are the backend's
+    own opaque path representations — for ``LocalBackend`` they're
+    real ``Path`` objects, for SFTP they're ``Path``-wrapped POSIX
+    strings that should only be passed back into the same backend.
     """
+    bf_rel = f"/{computer_uuid}/{BACKUPFOLDERS_DIR}"
+    if backend is not None:
+        if not backend.is_dir(bf_rel):
+            return {}
+        try:
+            folders = backend.list_dir(bf_rel)
+        except Exception:
+            return {}
+        out: Dict[str, Path] = {}
+        for folder_uuid in folders:
+            rec_root_rel = f"{bf_rel}/{folder_uuid}/{BACKUPRECORDS_DIR}"
+            if not backend.is_dir(rec_root_rel):
+                continue
+            try:
+                buckets = backend.list_dir(rec_root_rel)
+            except Exception:
+                continue
+            latest_key = None
+            latest_path: Optional[str] = None
+            for bucket in buckets:
+                bucket_rel = f"{rec_root_rel}/{bucket}"
+                try:
+                    if not backend.is_dir(bucket_rel):
+                        continue
+                    recs = backend.list_dir(bucket_rel)
+                except Exception:
+                    continue
+                for rec in recs:
+                    if not rec.endswith(".backuprecord"):
+                        continue
+                    key = (bucket, rec)
+                    if latest_key is None or key > latest_key:
+                        latest_key = key
+                        latest_path = f"{bucket_rel}/{rec}"
+            if latest_path is not None:
+                out[folder_uuid] = Path(latest_path)
+        return out
+    # Local fallback path.
     bf_root = Path(dest_root) / computer_uuid / BACKUPFOLDERS_DIR
     if not bf_root.is_dir():
         return {}
@@ -272,6 +353,7 @@ def _fetch_tree_blob(
     hmac_key: bytes,
     *,
     openssl_path: str = "openssl",
+    backend=None,
 ):
     """Fetch + decrypt + (LZ4-unwrap) a tree blob at ``loc`` and
     return a parsed ``Tree`` (or ``None`` on any failure)."""
@@ -282,7 +364,14 @@ def _fetch_tree_blob(
     except ImportError:  # pragma: no cover
         return None
     try:
-        if loc.isPacked:
+        if backend is not None:
+            if loc.isPacked:
+                raw = backend.read_range(
+                    loc.relativePath, loc.offset, loc.length,
+                )
+            else:
+                raw = backend.read_all(loc.relativePath)
+        elif loc.isPacked:
             with open(
                 Path(dest_root).joinpath(loc.relativePath.lstrip("/")),
                 "rb",
@@ -314,6 +403,7 @@ def _harvest_tree_recursive(
     *,
     openssl_path: str = "openssl",
     visited: Optional[set] = None,
+    backend=None,
 ) -> None:
     """Walk a Tree and every nested Tree, accumulating every
     referenced BlobLoc into ``bag``.
@@ -330,6 +420,7 @@ def _harvest_tree_recursive(
     tree = _fetch_tree_blob(
         tree_loc, dest_root, encryption_key, hmac_key,
         openssl_path=openssl_path,
+        backend=backend,
     )
     if tree is None:
         return
@@ -343,6 +434,7 @@ def _harvest_tree_recursive(
                 encryption_key, hmac_key,
                 openssl_path=openssl_path,
                 visited=visited,
+                backend=backend,
             )
         elif isinstance(node, FileNode):
             for loc in node.dataBlobLocs:
@@ -366,6 +458,7 @@ def seed_from_backuprecord(
     hmac_key: bytes,
     dest_root: Optional[Path] = None,
     openssl_path: str = "openssl",
+    backend=None,
 ) -> int:
     """Decrypt the backuprecord at ``rec_path``, walk its embedded
     Node and every reachable Tree blob, and seed ``cache`` with
@@ -389,7 +482,10 @@ def seed_from_backuprecord(
         return 0
 
     try:
-        arqo = Path(rec_path).read_bytes()
+        if backend is not None:
+            arqo = backend.read_all(str(rec_path))
+        else:
+            arqo = Path(rec_path).read_bytes()
         plist_bytes = decrypt_lz4_arqo(
             arqo, encryption_key, hmac_key,
             openssl_path=openssl_path,
@@ -405,7 +501,7 @@ def seed_from_backuprecord(
     bag: Dict[str, BlobLoc] = {}
     _harvest_bloblocs(node, bag)
     # Recursive walk for full coverage when dest_root is known.
-    if dest_root is not None and node.get("isTree"):
+    if (dest_root is not None or backend is not None) and node.get("isTree"):
         tloc_dict = node.get("treeBlobLoc")
         if isinstance(tloc_dict, dict):
             try:
@@ -425,9 +521,12 @@ def seed_from_backuprecord(
                     ),
                 )
                 _harvest_tree_recursive(
-                    root_loc, Path(dest_root), bag,
+                    root_loc,
+                    Path(dest_root) if dest_root is not None else Path("/"),
+                    bag,
                     encryption_key, hmac_key,
                     openssl_path=openssl_path,
+                    backend=backend,
                 )
             except (KeyError, TypeError, ValueError):
                 pass
@@ -452,6 +551,7 @@ def seed_existing_destination(
     *,
     encryption_key: Optional[bytes] = None,
     hmac_key: Optional[bytes] = None,
+    backend=None,
 ) -> Dict[str, Any]:
     """Best-effort full seed: standalone-scan + (if keys available)
     walk every folder's most recent backuprecord.
@@ -472,12 +572,12 @@ def seed_existing_destination(
         "backuprecord_paths": [],
     }
     out["standardobjects_added"] = seed_from_standardobjects(
-        dest_root, computer_uuid, cache,
+        dest_root, computer_uuid, cache, backend=backend,
     )
     if encryption_key is None or hmac_key is None:
         return out
     per_folder = find_latest_backuprecord_per_folder(
-        dest_root, computer_uuid,
+        dest_root, computer_uuid, backend=backend,
     )
     paths_walked: list = []
     total_added = 0
@@ -486,7 +586,8 @@ def seed_existing_destination(
             rec, cache,
             encryption_key=encryption_key,
             hmac_key=hmac_key,
-            dest_root=Path(dest_root),
+            dest_root=Path(dest_root) if dest_root is not None else None,
+            backend=backend,
         )
         total_added += added
         paths_walked.append(str(rec))

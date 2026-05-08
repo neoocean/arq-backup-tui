@@ -20,7 +20,16 @@ from typing import List, Protocol, runtime_checkable
 
 @runtime_checkable
 class Backend(Protocol):
-    """Minimal interface a storage backend must implement."""
+    """Minimal interface a storage backend must implement.
+
+    Read methods (``list_dir`` / ``stat_size`` / ``read_range`` /
+    ``read_all`` / ``exists`` / ``is_dir``) are required for both
+    validator and reader use.
+
+    Write methods (``mkdir`` / ``write_all``) are required for the
+    writer. Read-only backends can leave them as no-ops or raisers;
+    callers that mutate the destination assume both are available.
+    """
 
     def list_dir(self, path: str) -> List[str]:
         """Return the entries (names only) under ``path``, sorted."""
@@ -44,6 +53,23 @@ class Backend(Protocol):
 
     def is_dir(self, path: str) -> bool:
         """Return True iff ``path`` is an existing directory."""
+        ...
+
+    def mkdir(
+        self, path: str, *,
+        parents: bool = True, exist_ok: bool = True,
+    ) -> None:
+        """Create a directory. With ``parents=True``, missing
+        intermediates are created. With ``exist_ok=True``, an
+        existing directory at ``path`` is silently OK."""
+        ...
+
+    def write_all(self, path: str, data: bytes) -> None:
+        """Write ``data`` as the full content of the file at
+        ``path``. Atomicity guarantees are backend-defined; for
+        ``LocalBackend`` writes go straight to the path, for
+        ``SftpBackend`` they go through a local temp file plus
+        ``sftp put``."""
         ...
 
 
@@ -113,3 +139,19 @@ class LocalBackend:
             return self._resolve(path).is_dir()
         except (PermissionError, OSError):
             return False
+
+    def mkdir(
+        self, path: str, *,
+        parents: bool = True, exist_ok: bool = True,
+    ) -> None:
+        # _resolve requires the parent to exist (uses .resolve()),
+        # so build the path manually for missing-tree creation.
+        rel = path.lstrip("/")
+        full = self.root / rel
+        full.mkdir(parents=parents, exist_ok=exist_ok)
+
+    def write_all(self, path: str, data: bytes) -> None:
+        rel = path.lstrip("/")
+        full = self.root / rel
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_bytes(data)

@@ -67,13 +67,22 @@ class SftpBackend:
         known_hosts_file: Optional[os.PathLike] = None,
         ssh_path: str = "ssh",
         sftp_path: str = "sftp",
+        root: str = "",
     ) -> None:
+        """``root`` (optional): when set, every backend-method path
+        is interpreted relative to this server-side prefix. Use it
+        when a caller wants to address the backup via root-relative
+        paths like ``"/<cu>/standardobjects/..."`` rather than
+        absolute server paths. Validator callers that already build
+        absolute paths leave ``root=""`` (the default) unchanged.
+        """
         if not host:
             raise ValueError("host is required")
         self.host = host
         self.port = port
         self.user = user
         self._password = password
+        self.root = root.rstrip("/")
         self.identity_file = (
             Path(identity_file) if identity_file else None
         )
@@ -289,10 +298,26 @@ class SftpBackend:
                 pass
 
     # ------------------------------------------------------------------
+    # Path resolution (honors optional self.root prefix)
+    # ------------------------------------------------------------------
+
+    def _resolve(self, path: str) -> str:
+        """Return the absolute server-side path for a backend-method
+        argument. Empty ``root`` is the historical pass-through; a
+        non-empty ``root`` prepends to leading-slash paths so callers
+        can address blobs via root-relative POSIX strings."""
+        if not self.root:
+            return path
+        if not path.startswith("/"):
+            return path
+        return self.root + path
+
+    # ------------------------------------------------------------------
     # Backend protocol
     # ------------------------------------------------------------------
 
     def list_dir(self, path: str) -> List[str]:
+        path = self._resolve(path)
         cp = self._run_sftp_batch(f"ls -1 {shlex.quote(path)}\nbye\n")
         if cp.returncode != 0:
             raise RuntimeError(
@@ -310,6 +335,7 @@ class SftpBackend:
         return sorted(set(names))
 
     def stat_size(self, path: str) -> int:
+        path = self._resolve(path)
         cp = self._run_ssh(
             f"stat -c %s {shlex.quote(path)} 2>/dev/null || "
             f"stat -f %z {shlex.quote(path)}"
@@ -334,6 +360,7 @@ class SftpBackend:
             )
         if length == 0:
             return b""
+        path = self._resolve(path)
         if offset == 0:
             remote = f"head -c {length} {shlex.quote(path)}"
         else:
@@ -360,6 +387,7 @@ class SftpBackend:
         return self.read_range(path, 0, self.stat_size(path))
 
     def exists(self, path: str) -> bool:
+        path = self._resolve(path)
         cp = self._run_ssh(
             f"test -e {shlex.quote(path)} && echo Y || echo N",
             timeout=self.connect_timeout_sec,
@@ -367,8 +395,76 @@ class SftpBackend:
         return cp.returncode == 0 and cp.stdout.decode().strip() == "Y"
 
     def is_dir(self, path: str) -> bool:
+        path = self._resolve(path)
         cp = self._run_ssh(
             f"test -d {shlex.quote(path)} && echo Y || echo N",
             timeout=self.connect_timeout_sec,
         )
         return cp.returncode == 0 and cp.stdout.decode().strip() == "Y"
+
+    # ------------------------------------------------------------------
+    # Write methods
+    # ------------------------------------------------------------------
+
+    def mkdir(
+        self, path: str, *,
+        parents: bool = True, exist_ok: bool = True,
+    ) -> None:
+        """``mkdir [-p] <path>`` over the existing SSH master.
+
+        ``mkdir -p`` ignores already-existing directories, which
+        matches the ``exist_ok=True`` default. With ``exist_ok=False``
+        we additionally test that the target didn't exist before the
+        call so the SFTP wrapper matches POSIX semantics.
+        """
+        if not exist_ok and self.exists(path):
+            raise FileExistsError(f"sftp mkdir: already exists: {path}")
+        path = self._resolve(path)
+        flag = "-p" if parents else ""
+        cmd = f"mkdir {flag} {shlex.quote(path)}".strip()
+        cp = self._run_ssh(cmd)
+        if cp.returncode != 0:
+            err = (cp.stderr.decode(errors="replace") or "").strip()[:300]
+            raise RuntimeError(
+                f"sftp mkdir {path}: rc={cp.returncode} err={err}"
+            )
+
+    def write_all(self, path: str, data: bytes) -> None:
+        """Atomically write ``data`` to ``path`` on the SFTP server.
+
+        Implementation: write to a local temp file, ``sftp put`` it
+        to a sibling ``<path>.partial.<pid>``, then ``rename`` to the
+        final name. The ``put + rename`` pair makes a partial-write
+        observable as the temp suffix rather than as a corrupt
+        destination — the rename is atomic on POSIX filesystems.
+        """
+        self._require_open()
+        path = self._resolve(path)
+        fd, tmp_local = tempfile.mkstemp(prefix="arq-writer-put-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            # Stash under a sibling partial path so a crash mid-put
+            # leaves the destination intact.
+            partial = f"{path}.partial.{os.getpid()}"
+            batch = (
+                f"put {shlex.quote(tmp_local)} {shlex.quote(partial)}\n"
+                f"rename {shlex.quote(partial)} {shlex.quote(path)}\n"
+                f"bye\n"
+            )
+            cp = self._run_sftp_batch(batch)
+            if cp.returncode != 0:
+                err = (cp.stderr or "").strip()[:300]
+                # Best-effort cleanup of the orphan partial.
+                try:
+                    self._run_ssh(f"rm -f {shlex.quote(partial)}")
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"sftp put {path}: rc={cp.returncode} err={err}"
+                )
+        finally:
+            try:
+                os.unlink(tmp_local)
+            except OSError:
+                pass

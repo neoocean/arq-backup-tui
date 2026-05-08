@@ -57,10 +57,52 @@ def _list_record_paths_for_folder(
     dest_root: Path,
     computer_uuid: str,
     folder_uuid: Optional[str],
+    *,
+    backend=None,
 ) -> list:
     """Return every backuprecord path under
     ``<dest>/<cu>/backupfolders/[<folder>/]backuprecords/<bucket>/<num>.backuprecord``.
+
+    With ``backend`` set, traversal uses ``list_dir`` / ``is_dir`` so
+    SFTP destinations work; otherwise falls back to local
+    ``os.scandir``.
     """
+    if backend is not None:
+        bf_rel = f"/{computer_uuid}/{BACKUPFOLDERS_DIR}"
+        if not backend.is_dir(bf_rel):
+            return []
+        out = []
+        try:
+            folders = (
+                [folder_uuid] if folder_uuid is not None
+                else [
+                    f for f in backend.list_dir(bf_rel)
+                    if backend.is_dir(f"{bf_rel}/{f}")
+                ]
+            )
+        except Exception:
+            return []
+        for f in folders:
+            rec_root_rel = f"{bf_rel}/{f}/{BACKUPRECORDS_DIR}"
+            if not backend.is_dir(rec_root_rel):
+                continue
+            try:
+                buckets = backend.list_dir(rec_root_rel)
+            except Exception:
+                continue
+            for bucket in buckets:
+                bucket_rel = f"{rec_root_rel}/{bucket}"
+                if not backend.is_dir(bucket_rel):
+                    continue
+                try:
+                    recs = backend.list_dir(bucket_rel)
+                except Exception:
+                    continue
+                for rec in recs:
+                    if rec.endswith(".backuprecord"):
+                        out.append(Path(f"{bucket_rel}/{rec}"))
+        return out
+    # Local fallback path.
     bf_root = (
         Path(dest_root) / computer_uuid / BACKUPFOLDERS_DIR
     )
@@ -89,7 +131,7 @@ def _list_record_paths_for_folder(
 
 def _load_prior_root_tree_loc(
     rec_path: Path, encryption_key: bytes, hmac_key: bytes,
-    *, openssl_path: str = "openssl",
+    *, openssl_path: str = "openssl", backend=None,
 ) -> Optional[BlobLoc]:
     """Decrypt the backuprecord and return its root ``treeBlobLoc``.
 
@@ -101,8 +143,12 @@ def _load_prior_root_tree_loc(
     except ImportError:  # pragma: no cover
         return None
     try:
+        if backend is not None:
+            arqo = backend.read_all(str(rec_path))
+        else:
+            arqo = rec_path.read_bytes()
         plist_bytes = decrypt_lz4_arqo(
-            rec_path.read_bytes(), encryption_key, hmac_key,
+            arqo, encryption_key, hmac_key,
             openssl_path=openssl_path,
         )
         record = plistlib.loads(plist_bytes)
@@ -156,17 +202,20 @@ class PriorTreeIndex:
         *,
         folder_uuid: Optional[str] = None,
         openssl_path: str = "openssl",
+        backend=None,
     ) -> None:
         self.dest_root = Path(dest_root)
         self.computer_uuid = computer_uuid
         self.encryption_key = encryption_key
         self.hmac_key = hmac_key
         self.openssl_path = openssl_path
+        self.backend = backend
         self._tree_cache: Dict[str, Tree] = {}
         self._root_tree_loc: Optional[BlobLoc] = None
 
         recs = _list_record_paths_for_folder(
             self.dest_root, computer_uuid, folder_uuid,
+            backend=backend,
         )
         if not recs:
             return
@@ -176,6 +225,7 @@ class PriorTreeIndex:
         self._root_tree_loc = _load_prior_root_tree_loc(
             rec, encryption_key, hmac_key,
             openssl_path=openssl_path,
+            backend=backend,
         )
 
     @property
@@ -194,7 +244,14 @@ class PriorTreeIndex:
         except ImportError:  # pragma: no cover
             return None
         try:
-            if loc.isPacked:
+            if self.backend is not None:
+                if loc.isPacked:
+                    raw = self.backend.read_range(
+                        loc.relativePath, loc.offset, loc.length,
+                    )
+                else:
+                    raw = self.backend.read_all(loc.relativePath)
+            elif loc.isPacked:
                 with open(
                     self.dest_root.joinpath(
                         loc.relativePath.lstrip("/")

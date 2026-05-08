@@ -94,12 +94,21 @@ class PackBuilder:
         *,
         max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
         compression_type: int = 2,
+        backend=None,
     ) -> None:
         self.computer_uuid = computer_uuid
         self.family = family
-        self.dest_root = Path(dest_root).resolve()
+        # dest_root is kept for backward-compat callers that pass a
+        # local Path; when ``backend`` is provided, write_all takes
+        # over and dest_root becomes purely informational (used only
+        # in the LocalBackend default below).
+        self.dest_root = Path(dest_root).resolve() if backend is None else Path(dest_root)
         self.max_pack_bytes = max_pack_bytes
         self.compression_type = compression_type
+        if backend is None:
+            from arq_validator.backend import LocalBackend
+            backend = LocalBackend(self.dest_root)
+        self.backend = backend
 
         self._buffer = bytearray()
         self._current_relative_path = _allocate_pack_path(
@@ -161,10 +170,12 @@ class PackBuilder:
     # ------------------------------------------------------------------
 
     def _flush(self) -> None:
-        path = self.dest_root / self._current_relative_path.lstrip("/")
-        path.parent.mkdir(parents=True, exist_ok=True)
         body = bytes(self._buffer)
-        path.write_bytes(body)
+        # write_all on LocalBackend already creates parent dirs;
+        # SftpBackend mkdir is cheaper than chasing per-file errors.
+        parent = self._current_relative_path.rsplit("/", 1)[0] or "/"
+        self.backend.mkdir(parent, parents=True, exist_ok=True)
+        self.backend.write_all(self._current_relative_path, body)
         self.packs_written.append(PackFileInfo(
             relative_path=self._current_relative_path,
             size=len(body),

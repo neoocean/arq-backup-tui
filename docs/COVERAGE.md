@@ -19,8 +19,8 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with tree-walk reuse |
 | Operate           | ⚠️ Library only — schedule, throttling, notifications, GUI/TUI all absent |
 
-The aggregate test count is **209 unit tests** at the time this
-table was last updated; the suite runs in ~55 s on a stdlib-only
+The aggregate test count is **213 unit tests** at the time this
+table was last updated; the suite runs in ~32 s on a stdlib-only
 toolchain (``python -m unittest discover``).
 
 ## Detailed feature matrix
@@ -186,7 +186,7 @@ the FUSE mount.
 |---------------------------------------------------------------|:---------:|:------:|:------:|-------|
 | Local filesystem                                              |    ✅     |  ✅    |  ✅    | Default; ``LocalBackend`` |
 | NAS (any local-mounted network filesystem)                    |    ✅     |  ✅    |  ✅    | Indistinguishable from local; same ``LocalBackend`` path |
-| SFTP                                                          |    ✅     |  ❌    |  ❌    | ``SftpBackend`` exists for the validator. Reader/writer don't yet thread the ``Backend`` abstraction through their I/O paths — both currently use ``Path.read_bytes`` / ``Path.write_bytes`` directly. Wiring the reader's ``Backend`` parameter through ``Restore`` and the writer's blob-writing path is the remaining work to fully meet the project's goal |
+| SFTP                                                          |    ✅     |  ✅    |  ✅    | ``SftpBackend`` (extended with ``mkdir`` + ``write_all``) is injectable into both ``Restore(..., backend=...)`` and ``Backup(..., backend=...)``. All writer I/O — keyset, JSON sidecars, standalone blobs, pack files, backuprecords — routes through the backend. Cross-run dedup (``standardobjects/`` scan + per-folder backuprecord recursive walk + ``PriorTreeIndex``) is also backend-aware |
 | S3 (any class) / Wasabi / Backblaze B2 / Storj / Google Cloud / Azure Blob / OneDrive / Dropbox / Box / Google Drive / pCloud | 🔴 | 🔴 | 🔴 | **Out of scope.** Native cloud-API clients are not part of this project's goals. Arq.app is the supported tool for cloud destinations |
 | Any cloud backend via ``rclone mount``                        |    ✅     |  ✅    |  ✅    | Workaround, not a built-in feature: a FUSE mount makes the cloud destination look local to ``LocalBackend`` |
 

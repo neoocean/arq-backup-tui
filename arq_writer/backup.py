@@ -130,6 +130,7 @@ def _absolute(dest_root: Path, rel: str) -> Path:
 
 def _try_load_existing_keyset(
     dest_root: Path, computer_uuid: str, password: str,
+    *, backend=None,
 ) -> Optional[Tuple[bytes, bytes, bytes]]:
     """Best-effort: read an existing ``encryptedkeyset.dat`` and
     return ``(encryption_key, hmac_key, blob_id_salt)`` so a
@@ -137,17 +138,22 @@ def _try_load_existing_keyset(
     blob_ids.
 
     Returns ``None`` on any error (file missing, wrong password,
-    corrupt blob). The caller falls back to fresh random keys —
-    correct, but defeats cross-run dedup.
+    corrupt blob, network failure). The caller falls back to fresh
+    random keys — correct, but defeats cross-run dedup.
     """
-    keyset_path = (
-        Path(dest_root) / computer_uuid / KEYSET_FILE
-    )
-    if not keyset_path.is_file():
-        return None
+    keyset_rel = f"/{computer_uuid}/{KEYSET_FILE}"
     try:
+        if backend is not None:
+            if not backend.exists(keyset_rel):
+                return None
+            blob = backend.read_all(keyset_rel)
+        else:
+            keyset_path = Path(dest_root) / computer_uuid / KEYSET_FILE
+            if not keyset_path.is_file():
+                return None
+            blob = keyset_path.read_bytes()
         from arq_validator.crypto import decrypt_keyset
-        ks = decrypt_keyset(keyset_path.read_bytes(), password)
+        ks = decrypt_keyset(blob, password)
     except Exception:
         return None
     return ks.encryption_key, ks.hmac_key, ks.blob_id_salt
@@ -194,9 +200,28 @@ class Backup:
         max_pack_bytes: int = DEFAULT_MAX_PACK_BYTES,
         chunker_config: Optional[ChunkerConfig] = None,
         dedup_against_existing: bool = False,
+        backend=None,
         callback: Optional[ProgressCb] = None,
     ) -> None:
-        self.dest_root = Path(dest_root).resolve()
+        # When ``backend`` is None we drive a LocalBackend rooted at
+        # dest_root (so all backend-relative paths starting with /
+        # land under dest_root on disk). When ``backend`` is given,
+        # paths are passed through verbatim and ``dest_root`` is
+        # only used internally for path *construction*; for SFTP
+        # callers should pass dest_root="/" (or the SFTP-server-side
+        # root that anchors the backup destination).
+        if backend is None:
+            from arq_validator.backend import LocalBackend
+            self.dest_root = Path(dest_root).resolve()
+            # The writer creates the destination on demand; LocalBackend
+            # requires the root to exist, so materialize it here.
+            self.dest_root.mkdir(parents=True, exist_ok=True)
+            self.backend = LocalBackend(self.dest_root)
+        else:
+            # dest_root is a path *within* the backend's namespace.
+            # Keep it as-is (don't resolve, which is local-fs-only).
+            self.dest_root = Path(dest_root)
+            self.backend = backend
         self.password = encryption_password
         self.backup_name = backup_name
         self.computer_name = computer_name or os.uname().nodename
@@ -220,6 +245,7 @@ class Backup:
                 self.dest_root,
                 self.computer_uuid,
                 encryption_password,
+                backend=self.backend,
             )
         if loaded_keys is not None:
             self.encryption_key, self.hmac_key, self.blob_id_salt = (
@@ -283,6 +309,11 @@ class Backup:
     def computer_root(self) -> Path:
         return self.dest_root / self.computer_uuid
 
+    def _cu_path(self, *parts: str) -> str:
+        """Return a backend-relative POSIX path under the computer
+        root: ``"/<cu>/<parts...>"``."""
+        return "/" + "/".join((self.computer_uuid, *parts))
+
     def init_plan(self) -> None:
         """Write the four root-level configs + ``encryptedkeyset.dat``.
 
@@ -290,31 +321,33 @@ class Backup:
         content (modulo the random IV/salt in the keyset, which is
         regenerated on each call).
         """
-        cu_root = self.computer_root()
-        cu_root.mkdir(parents=True, exist_ok=True)
-        (cu_root / STANDARDOBJECTS_DIR).mkdir(exist_ok=True)
-        (cu_root / BACKUPFOLDERS_DIR).mkdir(exist_ok=True)
+        self.backend.mkdir(self._cu_path(), parents=True, exist_ok=True)
+        self.backend.mkdir(
+            self._cu_path(STANDARDOBJECTS_DIR), exist_ok=True,
+        )
+        self.backend.mkdir(
+            self._cu_path(BACKUPFOLDERS_DIR), exist_ok=True,
+        )
 
         # Don't overwrite an existing valid keyset — the prior
         # backuprecords were encrypted under that one's master key,
         # so rewriting it (with a fresh random IV/salt) would break
         # restore of every record older than this run.
+        keyset_path = self._cu_path(KEYSET_FILE)
         if not self._keyset_was_reused:
             keyset_blob = build_encrypted_keyset(
                 self.password,
                 self.encryption_key, self.hmac_key, self.blob_id_salt,
                 openssl_path=self.openssl_path,
             )
-            (cu_root / KEYSET_FILE).write_bytes(keyset_blob)
+            self.backend.write_all(keyset_path, keyset_blob)
             _emit(
                 self.callback, "keyset_written",
-                path=str(cu_root / KEYSET_FILE),
-                size=len(keyset_blob),
+                path=keyset_path, size=len(keyset_blob),
             )
         else:
             _emit(
-                self.callback, "keyset_reused",
-                path=str(cu_root / KEYSET_FILE),
+                self.callback, "keyset_reused", path=keyset_path,
             )
 
         config = build_backupconfig(
@@ -322,13 +355,15 @@ class Backup:
             computer_name=self.computer_name,
             is_encrypted=True,
         )
-        (cu_root / "backupconfig.json").write_text(
-            json.dumps(config, indent=2)
+        self.backend.write_all(
+            self._cu_path("backupconfig.json"),
+            json.dumps(config, indent=2).encode("utf-8"),
         )
 
         folders_idx = build_backupfolders_json(self.computer_uuid)
-        (cu_root / "backupfolders.json").write_text(
-            json.dumps(folders_idx, indent=2)
+        self.backend.write_all(
+            self._cu_path("backupfolders.json"),
+            json.dumps(folders_idx, indent=2).encode("utf-8"),
         )
 
         # Plan written here is a placeholder; rewritten on each
@@ -346,6 +381,7 @@ class Backup:
                 self._written_blobs,
                 encryption_key=self.encryption_key,
                 hmac_key=self.hmac_key,
+                backend=self.backend,
             )
             _emit(self.callback, "dedup_seeded", **report)
 
@@ -362,8 +398,9 @@ class Backup:
             creation_time=time.time(),
             update_time=time.time(),
         )
-        (self.computer_root() / "backupplan.json").write_text(
-            json.dumps(plan, indent=2)
+        self.backend.write_all(
+            self._cu_path("backupplan.json"),
+            json.dumps(plan, indent=2).encode("utf-8"),
         )
 
     # ------------------------------------------------------------------
@@ -403,6 +440,7 @@ class Backup:
                         self.dest_root,
                         max_pack_bytes=self.max_pack_bytes,
                         compression_type=COMPRESSION_LZ4,
+                        backend=self.backend,
                     )
                 loc = self._tree_pack.add(blob_id, arqo)
             else:
@@ -412,15 +450,14 @@ class Backup:
                         self.dest_root,
                         max_pack_bytes=self.max_pack_bytes,
                         compression_type=COMPRESSION_LZ4,
+                        backend=self.backend,
                     )
                 loc = self._blob_pack.add(blob_id, arqo)
         else:
-            path = _absolute(
-                self.dest_root,
-                _path_for_blob(self.computer_uuid, blob_id),
-            )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(arqo)
+            blob_rel = _path_for_blob(self.computer_uuid, blob_id)
+            parent = blob_rel.rsplit("/", 1)[0] or "/"
+            self.backend.mkdir(parent, parents=True, exist_ok=True)
+            self.backend.write_all(blob_rel, arqo)
             loc = _build_file_blobloc(
                 self.computer_uuid, blob_id, len(arqo),
             )
@@ -604,17 +641,16 @@ class Backup:
         folder_name = folder_name or source.name or "root"
 
         # Materialize the folder dirs.
-        bf_root = (
-            self.computer_root() / BACKUPFOLDERS_DIR / folder_uuid
-        )
-        bf_root.mkdir(parents=True, exist_ok=True)
+        bf_rel = self._cu_path(BACKUPFOLDERS_DIR, folder_uuid)
+        self.backend.mkdir(bf_rel, parents=True, exist_ok=True)
         bf_json = build_backupfolder_json(
             folder_uuid=folder_uuid, name=folder_name,
             local_path=str(source),
             local_mount_point=local_mount_point,
         )
-        (bf_root / "backupfolder.json").write_text(
-            json.dumps(bf_json, indent=2)
+        self.backend.write_all(
+            f"{bf_rel}/backupfolder.json",
+            json.dumps(bf_json, indent=2).encode("utf-8"),
         )
 
         # Update accumulated plan metadata before walking so the
@@ -638,6 +674,7 @@ class Backup:
                 self.encryption_key, self.hmac_key,
                 folder_uuid=folder_uuid,
                 openssl_path=self.openssl_path,
+                backend=self.backend,
             )
             self._prior_tree = idx if idx.is_usable else None
             if self._prior_tree is not None:
@@ -670,9 +707,11 @@ class Backup:
         creation_date = int(time.time())
         bucket = f"{creation_date // 100000:05d}"
         rec_num = creation_date % 100000
-        rec_dir = bf_root / BACKUPRECORDS_DIR / bucket
-        rec_dir.mkdir(parents=True, exist_ok=True)
-        rec_path = rec_dir / f"{rec_num}.backuprecord"
+        rec_dir_rel = (
+            f"{bf_rel}/{BACKUPRECORDS_DIR}/{bucket}"
+        )
+        self.backend.mkdir(rec_dir_rel, parents=True, exist_ok=True)
+        rec_rel = f"{rec_dir_rel}/{rec_num}.backuprecord"
         rec_relative = (
             f"/{self.computer_uuid}/{BACKUPFOLDERS_DIR}/{folder_uuid}/"
             f"{BACKUPRECORDS_DIR}/{bucket}/{rec_num}.backuprecord"
@@ -694,11 +733,21 @@ class Backup:
             hmac_key=self.hmac_key,
             openssl_path=self.openssl_path,
         )
-        rec_path.write_bytes(arqo)
+        self.backend.write_all(rec_rel, arqo)
         self.bytes_on_disk += len(arqo)
         _emit(self.callback, "backuprecord_written",
-              path=str(rec_path), size=len(arqo),
+              path=rec_rel, size=len(arqo),
               folder_uuid=folder_uuid)
+        # Compose a Path representation for the legacy return type.
+        # Callers using a non-LocalBackend should rely on rec_rel
+        # (the backend-relative path) instead.
+        if hasattr(self.backend, "root"):
+            try:
+                rec_path = Path(self.backend.root) / rec_rel.lstrip("/")
+            except TypeError:
+                rec_path = Path(rec_rel)
+        else:
+            rec_path = Path(rec_rel)
         return rec_path
 
 
