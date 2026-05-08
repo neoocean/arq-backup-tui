@@ -34,6 +34,10 @@ from .compatibility import (
     check_arq7_compatibility,
 )
 from .events import Event, EventKind, ProgressCallback
+from .fingerprint import (
+    compute_shape_fingerprint,
+    diff_fingerprints,
+)
 from .layout import Arq7ComputerLayout, discover_layout
 from .runner import ValidationReport, ValidationTier, validate
 from .sftp import SftpBackend, SftpConnectionError
@@ -54,6 +58,8 @@ __all__ = [
     "CheckResult",
     "ComplianceReport",
     "check_arq7_compatibility",
+    "compute_shape_fingerprint",
+    "diff_fingerprints",
     # Events
     "Event",
     "EventKind",

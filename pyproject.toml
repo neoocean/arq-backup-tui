@@ -40,6 +40,7 @@ tui-keyring = ["textual>=0.50", "keyring>=24"]
 
 [project.scripts]
 arq-validator = "arq_validator.cli:main"
+arq-fingerprint = "arq_validator.fingerprint_cli:main"
 arq-backup = "arq_writer.cli:main"
 arq-reader = "arq_reader.cli:main"
 arq-buzhash-find = "arq_writer.buzhash_re_cli:main"
