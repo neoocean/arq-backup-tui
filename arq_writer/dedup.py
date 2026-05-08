@@ -156,8 +156,9 @@ def _list_record_paths(
 def find_latest_backuprecord(
     dest_root: Path, computer_uuid: str,
 ) -> Optional[Path]:
-    """Return the most recently created backuprecord under
-    ``<dest>/<cu>/backupfolders/.../backuprecords/`` or ``None``.
+    """Return the most recently created backuprecord across every
+    folder under ``<dest>/<cu>/backupfolders/.../backuprecords/``,
+    or ``None`` if the destination has no records.
 
     "Most recent" = lexicographically largest ``bucket/num`` since
     the writer encodes creation_date into both. Falls back to
@@ -167,6 +168,64 @@ def find_latest_backuprecord(
     if not candidates:
         return None
     return max(candidates, key=lambda p: (p.parent.name, p.name))
+
+
+def find_latest_backuprecord_per_folder(
+    dest_root: Path, computer_uuid: str,
+) -> Dict[str, Path]:
+    """Return ``{folder_uuid: latest_backuprecord_path}`` for every
+    folder under the given computer.
+
+    Arq 7 stores blobs at the **computer** level (one shared
+    ``standardobjects/`` / ``treepacks/`` / ``blobpacks/`` /
+    ``largeblobpacks/`` tree under the computer UUID), so dedup
+    against existing pack-stored content needs to consider blobs
+    from every folder, not just the globally-newest one. This
+    helper drives the per-folder seed loop in
+    :func:`seed_existing_destination`.
+
+    Path layout: ``<dest>/<cu>/backupfolders/<folder_uuid>/backuprecords/<bucket>/<num>.backuprecord``.
+    The folder's "latest" record is the lexicographic max of
+    ``(bucket, num)``.
+    """
+    bf_root = Path(dest_root) / computer_uuid / BACKUPFOLDERS_DIR
+    if not bf_root.is_dir():
+        return {}
+    out: Dict[str, Path] = {}
+    try:
+        folder_entries = list(os.scandir(bf_root))
+    except OSError:
+        return {}
+    for folder_entry in folder_entries:
+        if not folder_entry.is_dir():
+            continue
+        folder_uuid = folder_entry.name
+        rec_root = Path(folder_entry.path) / BACKUPRECORDS_DIR
+        if not rec_root.is_dir():
+            continue
+        latest: Optional[Path] = None
+        try:
+            for bucket in os.scandir(rec_root):
+                if not bucket.is_dir():
+                    continue
+                for rec in os.scandir(bucket.path):
+                    if not (
+                        rec.is_file()
+                        and rec.name.endswith(".backuprecord")
+                    ):
+                        continue
+                    p = Path(rec.path)
+                    if (
+                        latest is None
+                        or (p.parent.name, p.name)
+                        > (latest.parent.name, latest.name)
+                    ):
+                        latest = p
+        except OSError:
+            continue
+        if latest is not None:
+            out[folder_uuid] = latest
+    return out
 
 
 def _harvest_bloblocs(
@@ -206,31 +265,124 @@ def _try_add_loc(d: Dict[str, Any], bag: Dict[str, BlobLoc]) -> None:
         pass
 
 
+def _fetch_tree_blob(
+    loc: BlobLoc,
+    dest_root: Path,
+    encryption_key: bytes,
+    hmac_key: bytes,
+    *,
+    openssl_path: str = "openssl",
+):
+    """Fetch + decrypt + (LZ4-unwrap) a tree blob at ``loc`` and
+    return a parsed ``Tree`` (or ``None`` on any failure)."""
+    try:
+        from arq_reader.decrypt import decrypt_encrypted_object
+        from arq_reader.parse import parse_tree
+        from .lz4_block import lz4_unwrap
+    except ImportError:  # pragma: no cover
+        return None
+    try:
+        if loc.isPacked:
+            with open(
+                Path(dest_root).joinpath(loc.relativePath.lstrip("/")),
+                "rb",
+            ) as f:
+                f.seek(loc.offset)
+                raw = f.read(loc.length)
+        else:
+            raw = Path(dest_root).joinpath(
+                loc.relativePath.lstrip("/")
+            ).read_bytes()
+        if raw[:4] == b"ARQO":
+            raw = decrypt_encrypted_object(
+                raw, encryption_key, hmac_key,
+                openssl_path=openssl_path,
+            )
+        if loc.compressionType == 2:
+            raw = lz4_unwrap(raw)
+        return parse_tree(raw)
+    except Exception:
+        return None
+
+
+def _harvest_tree_recursive(
+    tree_loc: BlobLoc,
+    dest_root: Path,
+    bag: Dict[str, BlobLoc],
+    encryption_key: bytes,
+    hmac_key: bytes,
+    *,
+    openssl_path: str = "openssl",
+    visited: Optional[set] = None,
+) -> None:
+    """Walk a Tree and every nested Tree, accumulating every
+    referenced BlobLoc into ``bag``.
+
+    Each Tree blob is decrypted at most once per call (``visited``
+    guards re-entry by ``blobIdentifier``).
+    """
+    if visited is None:
+        visited = set()
+    if tree_loc.blobIdentifier in visited:
+        return
+    visited.add(tree_loc.blobIdentifier)
+    bag.setdefault(tree_loc.blobIdentifier, tree_loc)
+    tree = _fetch_tree_blob(
+        tree_loc, dest_root, encryption_key, hmac_key,
+        openssl_path=openssl_path,
+    )
+    if tree is None:
+        return
+    # Local import to avoid module-import-time cycle.
+    from .types import FileNode, TreeNode
+    for child in tree.children:
+        node = child.node
+        if isinstance(node, TreeNode):
+            _harvest_tree_recursive(
+                node.treeBlobLoc, dest_root, bag,
+                encryption_key, hmac_key,
+                openssl_path=openssl_path,
+                visited=visited,
+            )
+        elif isinstance(node, FileNode):
+            for loc in node.dataBlobLocs:
+                bag.setdefault(loc.blobIdentifier, loc)
+            for loc in node.xattrsBlobLocs:
+                bag.setdefault(loc.blobIdentifier, loc)
+        # Some Node implementations (e.g. legacy ones) carry
+        # xattrsBlobLocs at the Node level; both branches above
+        # already cover that. ACL blob (if present) is exposed via
+        # node.aclBlobLoc; harvest it too.
+        acl = getattr(node, "aclBlobLoc", None)
+        if acl is not None:
+            bag.setdefault(acl.blobIdentifier, acl)
+
+
 def seed_from_backuprecord(
     rec_path: Path,
     cache: Dict[str, BlobLoc],
     *,
     encryption_key: bytes,
     hmac_key: bytes,
+    dest_root: Optional[Path] = None,
+    openssl_path: str = "openssl",
 ) -> int:
     """Decrypt the backuprecord at ``rec_path``, walk its embedded
-    Node, and seed ``cache`` with every referenced ``BlobLoc``.
+    Node and every reachable Tree blob, and seed ``cache`` with
+    every referenced ``BlobLoc``.
+
+    When ``dest_root`` is provided, the walk recursively fetches and
+    parses every Tree blob the record references — covering the
+    deep ``dataBlobLocs`` of files in subdirectories. Without it,
+    only top-level locations (the root ``treeBlobLoc`` and any
+    inlined data/xattrs locs) are harvested. Multi-folder packed-
+    mode dedup against the destination's existing pack files
+    requires the recursive form.
 
     Returns the count of entries added. Returns 0 silently on any
     decrypt / parse error — a corrupt prior backup must not block
     a fresh backup; it only loses the dedup boost.
-
-    Recursion through child trees requires reading the actual
-    ``treepacks`` / ``standardobjects`` content for those subtrees.
-    For the cheap MVP we deliberately walk only the top-level
-    ``node`` dict (which already lists its full ``dataBlobLocs`` /
-    ``xattrsBlobLocs``) and the immediate ``treeBlobLoc``. A deeper
-    recursion can be layered on later by following each
-    ``treeBlobLoc`` through the reader's blob-fetch path.
     """
-    # Local import to avoid an ``arq_writer → arq_reader`` cycle on
-    # module load. The decrypt path lives in the reader because the
-    # validator depends on the same primitives.
     try:
         from arq_reader.decrypt import decrypt_lz4_arqo
     except ImportError:  # pragma: no cover
@@ -240,12 +392,10 @@ def seed_from_backuprecord(
         arqo = Path(rec_path).read_bytes()
         plist_bytes = decrypt_lz4_arqo(
             arqo, encryption_key, hmac_key,
+            openssl_path=openssl_path,
         )
         record = plistlib.loads(plist_bytes)
     except Exception:
-        # Best-effort: any failure (corrupt blob, wrong keys,
-        # malformed plist) just loses the dedup boost rather than
-        # aborting the run.
         return 0
     if not isinstance(record, dict):
         return 0
@@ -254,6 +404,33 @@ def seed_from_backuprecord(
         return 0
     bag: Dict[str, BlobLoc] = {}
     _harvest_bloblocs(node, bag)
+    # Recursive walk for full coverage when dest_root is known.
+    if dest_root is not None and node.get("isTree"):
+        tloc_dict = node.get("treeBlobLoc")
+        if isinstance(tloc_dict, dict):
+            try:
+                root_loc = BlobLoc(
+                    blobIdentifier=str(tloc_dict["blobIdentifier"]),
+                    isPacked=bool(tloc_dict.get("isPacked", False)),
+                    relativePath=str(
+                        tloc_dict.get("relativePath", "")
+                    ),
+                    offset=int(tloc_dict.get("offset", 0)),
+                    length=int(tloc_dict.get("length", 0)),
+                    stretchEncryptionKey=bool(
+                        tloc_dict.get("stretchEncryptionKey", True)
+                    ),
+                    compressionType=int(
+                        tloc_dict.get("compressionType", 2)
+                    ),
+                )
+                _harvest_tree_recursive(
+                    root_loc, Path(dest_root), bag,
+                    encryption_key, hmac_key,
+                    openssl_path=openssl_path,
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
     added = 0
     for bid, loc in bag.items():
         if bid in cache:
@@ -275,28 +452,45 @@ def seed_existing_destination(
     *,
     encryption_key: Optional[bytes] = None,
     hmac_key: Optional[bytes] = None,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     """Best-effort full seed: standalone-scan + (if keys available)
-    walk the most recent backuprecord.
+    walk every folder's most recent backuprecord.
+
+    Multi-folder coverage matches Arq 7's computer-scoped blob
+    storage: ``<cu>/blobpacks`` / ``<cu>/treepacks`` are shared
+    across every folder, so a new backup of folder A should dedup
+    against pack-stored content from folder B. We therefore walk
+    one record per folder rather than the globally-latest one.
 
     Returns a small report dict so the caller can log how much
     dedup ground was reclaimed.
     """
-    out = {
+    out: Dict[str, Any] = {
         "standardobjects_added": 0,
+        "folders_walked": 0,
         "backuprecord_added": 0,
-        "backuprecord_path": "",
+        "backuprecord_paths": [],
     }
     out["standardobjects_added"] = seed_from_standardobjects(
         dest_root, computer_uuid, cache,
     )
-    if encryption_key is not None and hmac_key is not None:
-        rec = find_latest_backuprecord(dest_root, computer_uuid)
-        if rec is not None:
-            out["backuprecord_path"] = str(rec)
-            out["backuprecord_added"] = seed_from_backuprecord(
-                rec, cache,
-                encryption_key=encryption_key,
-                hmac_key=hmac_key,
-            )
+    if encryption_key is None or hmac_key is None:
+        return out
+    per_folder = find_latest_backuprecord_per_folder(
+        dest_root, computer_uuid,
+    )
+    paths_walked: list = []
+    total_added = 0
+    for _folder_uuid, rec in per_folder.items():
+        added = seed_from_backuprecord(
+            rec, cache,
+            encryption_key=encryption_key,
+            hmac_key=hmac_key,
+            dest_root=Path(dest_root),
+        )
+        total_added += added
+        paths_walked.append(str(rec))
+    out["folders_walked"] = len(per_folder)
+    out["backuprecord_paths"] = paths_walked
+    out["backuprecord_added"] = total_added
     return out

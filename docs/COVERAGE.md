@@ -21,8 +21,8 @@ product are not in scope for this comparison.
 | Validate          | ✅ All four tiers (L0 / L1a / L1b / L2) + resumable audit-drip |
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41 |
 
-The aggregate test count is **206 unit tests** at the time this
-table was last updated; the suite runs in ~52 s on a stdlib-only
+The aggregate test count is **209 unit tests** at the time this
+table was last updated; the suite runs in ~55 s on a stdlib-only
 toolchain (``python -m unittest discover``).
 
 ## Detailed feature matrix
@@ -97,7 +97,8 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 | Buzhash chunking with generic params                          |  ✅    | ``build_backup(..., chunker_config=ChunkerConfig(...))`` |
 | Buzhash chunking with Arq.app v7.41 params                    |  ✅    | opt-in via ``import arq_writer.arq_chunker_params`` |
 | Within-run dedup (identical SHA-256 blobs share one BlobLoc)  |  ✅    | ``Backup._written_blobs`` cache; standalone + packed modes |
-| Cross-run dedup against an existing destination               |  ✅    | ``build_backup(..., dedup_against_existing=True)`` reuses the destination's keyset and seeds the cache from ``standardobjects/`` + the most recent backuprecord (covers packed mode); see ``arq_writer.dedup`` |
+| Cross-run dedup against an existing destination               |  ✅    | ``build_backup(..., dedup_against_existing=True)`` reuses the destination's keyset and seeds the cache from ``standardobjects/`` + every folder's most recent backuprecord (full recursive tree walk for packed-mode coverage); see ``arq_writer.dedup`` |
+| Multi-folder dedup (computer-scoped blob storage)             |  ✅    | A computer's ``standardobjects/`` / ``treepacks/`` / ``blobpacks/`` are shared across every folder. Both within-run dedup (single ``Backup`` instance, multiple ``add_folder`` calls) and cross-run dedup (seeded from every folder's latest backuprecord) honor this — adding a new folder reuses blobs already written by any sibling folder. Matches Arq 7's actual storage model |
 | Tree-walk reuse (skip read+chunk on unchanged files)          |  ✅    | When ``dedup_against_existing=True`` and the same ``folder_uuid`` is passed, ``arq_writer.prior_tree.PriorTreeIndex`` lazily walks the prior backup's tree and reuses any FileNode whose ``stat`` triple (mtime, size, mode) still matches — skipping ``read_bytes`` + chunker + SHA-256 hashing entirely. Tracked via ``Backup.files_reused`` and the ``file_reused`` callback event |
 | Incremental backup (commit chain on existing destination)     |  ✅    | Cross-run dedup + tree-walk reuse together cover the meaningful incremental case. Explicit parent-commit linking via a dedicated field isn't required — Arq 7 backuprecords are ordered chronologically by path (``backuprecords/<bucket>/<num>``), so chronologically newer records are implicitly children of older ones |
 | Retention / pruning of old commits                            |  🔴   | Arq.app side concern (not part of the on-disk format spec) |

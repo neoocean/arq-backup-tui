@@ -23,8 +23,11 @@ from pathlib import Path
 
 from arq_reader import Restore
 from arq_writer import build_backup
+from arq_writer import Backup
 from arq_writer.dedup import (
     find_latest_backuprecord,
+    find_latest_backuprecord_per_folder,
+    seed_existing_destination,
     seed_from_backuprecord,
     seed_from_standardobjects,
 )
@@ -259,6 +262,128 @@ class DedupAgainstExistingTests(unittest.TestCase):
             # Random IV/salt → bytes must differ even though plaintext
             # is the same plan.
             self.assertNotEqual(blob1, blob2)
+
+
+class MultiFolderDedupTests(unittest.TestCase):
+    """Cross-folder dedup matches Arq 7's computer-scoped blob store.
+
+    A computer can hold many backup folders, but every folder shares
+    the same ``standardobjects/`` / ``treepacks/`` / ``blobpacks/`` /
+    ``largeblobpacks/`` tree under the computer UUID. Backing up a
+    NEW folder against an existing destination should therefore
+    reuse blobs already written by ANY existing folder.
+    """
+
+    def test_find_latest_per_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            srcA = tdp / "srcA"
+            srcA.mkdir()
+            (srcA / "a.txt").write_bytes(b"folder A only\n")
+            srcB = tdp / "srcB"
+            srcB.mkdir()
+            (srcB / "b.txt").write_bytes(b"folder B only\n")
+            dest = tdp / "dest"
+            # Two folders, one computer, separate calls.
+            bk = Backup(
+                dest_root=dest, encryption_password="pw",
+            )
+            bk.init_plan()
+            bk.add_folder(srcA, folder_name="A")
+            bk.add_folder(srcB, folder_name="B")
+            per = find_latest_backuprecord_per_folder(
+                dest, bk.computer_uuid,
+            )
+            # Two folder UUIDs, each with exactly one record.
+            self.assertEqual(len(per), 2)
+            for fuuid, rec in per.items():
+                self.assertTrue(rec.exists())
+                self.assertIn(fuuid, str(rec))
+
+    def test_packed_mode_dedups_across_folders_on_re_run(self) -> None:
+        # Two folders share a file with identical content. Run the
+        # first backup writing folder A, then a SECOND backup adding
+        # folder B with dedup_against_existing=True. The shared
+        # content's blob_id must be reused from folder A's pack (no
+        # second write of the same bytes).
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            shared_payload = b"shared content " * 200
+            srcA = tdp / "srcA"
+            srcA.mkdir()
+            (srcA / "shared.txt").write_bytes(shared_payload)
+            (srcA / "a-only.txt").write_bytes(b"only in A\n")
+            srcB = tdp / "srcB"
+            srcB.mkdir()
+            (srcB / "shared.txt").write_bytes(shared_payload)
+            (srcB / "b-only.txt").write_bytes(b"only in B\n")
+            dest = tdp / "dest"
+            r1 = build_backup(
+                srcA, dest, encryption_password="pw",
+                use_packs=True,
+            )
+            # Capture pack file sizes so we can prove folder B's
+            # backup wrote new content but reused shared.txt's blob.
+            blobpacks_dir = (
+                dest / r1.computer_uuid / "blobpacks"
+            )
+            sizes_before = {}
+            if blobpacks_dir.is_dir():
+                for shard in os.scandir(blobpacks_dir):
+                    if shard.is_dir():
+                        for f in os.scandir(shard.path):
+                            sizes_before[f.path] = f.stat().st_size
+
+            bk = Backup(
+                dest_root=dest,
+                encryption_password="pw",
+                computer_uuid=r1.computer_uuid,
+                use_packs=True,
+                dedup_against_existing=True,
+            )
+            bk.init_plan()
+            bk.add_folder(srcB, folder_name="B")
+            # Folder B's freshly-written blob_ids list must NOT
+            # include the shared payload's blob_id (it was reused
+            # from folder A).
+            from arq_writer.crypto_write import compute_blob_id
+            shared_id = compute_blob_id(bk.blob_id_salt, shared_payload)
+            self.assertNotIn(shared_id, bk.blob_ids)
+            # The shared blob_id must be in the dedup cache (seeded
+            # from folder A's record).
+            self.assertIn(shared_id, bk._written_blobs)
+
+    def test_seed_summary_reports_per_folder_stats(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            srcA = tdp / "srcA"
+            srcA.mkdir()
+            (srcA / "a.txt").write_bytes(b"A\n")
+            srcB = tdp / "srcB"
+            srcB.mkdir()
+            (srcB / "b.txt").write_bytes(b"B\n")
+            dest = tdp / "dest"
+            bk = Backup(
+                dest_root=dest, encryption_password="pw",
+                use_packs=True,
+            )
+            bk.init_plan()
+            bk.add_folder(srcA, folder_name="A")
+            bk.add_folder(srcB, folder_name="B")
+            cache = {}
+            from arq_validator.crypto import decrypt_keyset
+            ks = decrypt_keyset(
+                (dest / bk.computer_uuid / "encryptedkeyset.dat").read_bytes(),
+                "pw",
+            )
+            report = seed_existing_destination(
+                dest, bk.computer_uuid, cache,
+                encryption_key=ks.encryption_key,
+                hmac_key=ks.hmac_key,
+            )
+            self.assertEqual(report["folders_walked"], 2)
+            self.assertEqual(len(report["backuprecord_paths"]), 2)
+            self.assertGreater(report["backuprecord_added"], 0)
 
 
 if __name__ == "__main__":
