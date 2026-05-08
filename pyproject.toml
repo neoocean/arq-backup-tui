@@ -22,6 +22,12 @@ classifiers = [
     "Topic :: System :: Archiving :: Backup",
 ]
 
+[project.optional-dependencies]
+# Test suite uses only stdlib + the package itself, so this is empty
+# by design. The block exists so 'pip install -e ".[test]"' is a
+# valid no-op invocation that CI can rely on.
+test = []
+
 [project.scripts]
 arq-validator = "arq_validator.cli:main"
 arq-backup = "arq_writer.cli:main"
