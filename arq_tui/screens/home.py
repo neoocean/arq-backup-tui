@@ -43,6 +43,7 @@ class HomeScreen(Screen):
         Binding("r", "run_focused", "Run focused plan", show=True),
         Binding("b", "browse", "Browse backup sets", show=True),
         Binding("v", "validate", "Validate", show=True),
+        Binding("a", "activity", "Activity", show=True),
         Binding("q", "app.quit", "Quit", show=True),
     ]
 
@@ -152,6 +153,13 @@ class HomeScreen(Screen):
             "Validation runner ships in M5 — coming soon.",
             severity="information",
         )
+
+    def action_activity(self) -> None:
+        """Open the runs monitor — shows every backup / restore /
+        validate process running on this host (incl. cron-driven
+        ones the TUI didn't start). See docs/PLAN-cli-tui-split.md."""
+        from .runs_monitor import RunsMonitorScreen
+        self.app.push_screen(RunsMonitorScreen())
 
     def action_run_focused(self) -> None:
         plan = self._focused_plan()

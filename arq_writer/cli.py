@@ -172,6 +172,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "Requires sudo for tmutil + mount_apfs."
         ),
     )
+    create.add_argument(
+        "--state-file", type=Path, default=None,
+        help=(
+            "Path to a JSON state file the CLI updates as work "
+            "progresses. The file is overwritten atomically on "
+            "every flush so a TUI / monitoring process can poll it "
+            "safely. Filename stem is used as the run-id. When "
+            "omitted, no state file is written. See "
+            "docs/PLAN-cli-tui-split.md."
+        ),
+    )
     return p
 
 
@@ -283,33 +294,88 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 2
 
-    cb = _make_callback(args)
+    user_cb = _make_callback(args)
     chunker_config = _resolve_chunker(args.chunker)
     exclusions = _resolve_exclusions(args)
 
-    try:
-        result = build_backup(
-            args.source,
-            args.dest,
-            password,
-            backup_name=args.backup_name,
-            folder_name=args.folder_name,
-            callback=cb,
-            openssl_path=args.openssl_path,
-            computer_uuid=args.computer_uuid,
-            plan_uuid=args.plan_uuid,
-            folder_uuid=args.folder_uuid,
-            use_packs=args.use_packs,
-            chunker_config=chunker_config,
-            dedup_against_existing=args.dedup_against_existing,
-            max_file_bytes=args.max_file_bytes,
-            exclusions=exclusions,
-            use_apfs_snapshot=args.use_apfs_snapshot,
-        )
-    except Exception as exc:
-        print(f"error: backup failed: {type(exc).__name__}: {exc}",
-              file=sys.stderr)
-        return 4
+    # Run the backup with optional state-file IPC. The state writer
+    # wraps the whole call so any exception (incl. Ctrl-C) flips the
+    # file's status to FAILED / CANCELLED automatically; on clean
+    # exit it lands as COMPLETED. ``user_cb`` is the legacy
+    # stderr/--json-events stream; it's kept independent of the
+    # state file so existing scripted callers see the same output.
+    if args.state_file is not None:
+        # Local import keeps the writer module free of TUI deps.
+        from arq_tui.runs import RunKind, run_writer_context
+
+        try:
+            with run_writer_context(
+                kind=RunKind.BACKUP,
+                plan_id=args.plan_uuid or "",
+                plan_name=args.backup_name,
+                state_file=args.state_file,
+            ) as rw:
+                rw.set_destination(
+                    kind="local", label=str(args.dest),
+                    computer_uuid=args.computer_uuid or "",
+                )
+
+                def cb(kind: str, payload: dict) -> None:
+                    rw.event(kind, **payload)
+                    if user_cb is not None:
+                        user_cb(kind, payload)
+
+                result = build_backup(
+                    args.source, args.dest, password,
+                    backup_name=args.backup_name,
+                    folder_name=args.folder_name,
+                    callback=cb,
+                    openssl_path=args.openssl_path,
+                    computer_uuid=args.computer_uuid,
+                    plan_uuid=args.plan_uuid,
+                    folder_uuid=args.folder_uuid,
+                    use_packs=args.use_packs,
+                    chunker_config=chunker_config,
+                    dedup_against_existing=args.dedup_against_existing,
+                    max_file_bytes=args.max_file_bytes,
+                    exclusions=exclusions,
+                    use_apfs_snapshot=args.use_apfs_snapshot,
+                )
+                rw.set_result({
+                    "computer_uuid": result.computer_uuid,
+                    "files_written": result.files_written,
+                    "files_reused": getattr(result, "files_reused", 0),
+                    "bytes_plaintext": getattr(
+                        result, "bytes_plaintext", 0,
+                    ),
+                    "elapsed_sec": result.elapsed_sec,
+                })
+        except Exception as exc:
+            print(f"error: backup failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return 4
+    else:
+        try:
+            result = build_backup(
+                args.source, args.dest, password,
+                backup_name=args.backup_name,
+                folder_name=args.folder_name,
+                callback=user_cb,
+                openssl_path=args.openssl_path,
+                computer_uuid=args.computer_uuid,
+                plan_uuid=args.plan_uuid,
+                folder_uuid=args.folder_uuid,
+                use_packs=args.use_packs,
+                chunker_config=chunker_config,
+                dedup_against_existing=args.dedup_against_existing,
+                max_file_bytes=args.max_file_bytes,
+                exclusions=exclusions,
+                use_apfs_snapshot=args.use_apfs_snapshot,
+            )
+        except Exception as exc:
+            print(f"error: backup failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return 4
 
     out = asdict(result)
     out["dest_root"] = str(out["dest_root"])

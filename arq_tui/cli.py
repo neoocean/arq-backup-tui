@@ -65,6 +65,43 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip the confirmation prompt.",
     )
 
+    # Runs / activity sub-commands. These are headless equivalents
+    # of the RunsMonitorScreen and let cron / ops scripts read the
+    # state-file directory without spawning the TUI.
+    runs = sub.add_parser(
+        "runs",
+        help="Inspect / cancel / GC the runs state-file dir.",
+    )
+    runs_sub = runs.add_subparsers(dest="runs_command", required=True)
+    runs_sub.add_parser(
+        "ls", help="List active + recent runs.",
+    )
+    runs_show = runs_sub.add_parser(
+        "show", help="Print one run as JSON.",
+    )
+    runs_show.add_argument(
+        "run_id",
+        help="Run UUID (exact filename stem of the state file).",
+    )
+    runs_cancel = runs_sub.add_parser(
+        "cancel",
+        help="Send SIGTERM to a run's writer PID for graceful "
+             "cancellation.",
+    )
+    runs_cancel.add_argument(
+        "run_id",
+        help="Run UUID to cancel.",
+    )
+    runs_gc = runs_sub.add_parser(
+        "gc",
+        help="Remove state files for runs that finished more "
+             "than --older-than-days ago (default 30).",
+    )
+    runs_gc.add_argument(
+        "--older-than-days", type=int, default=30,
+        help="Age cutoff in days (default 30).",
+    )
+
     return p
 
 
@@ -174,4 +211,72 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             return 2
 
+    if parsed.command == "runs":
+        return _handle_runs_command(parsed)
+
+    return 2
+
+
+def _handle_runs_command(parsed) -> int:
+    """Dispatch ``arq-tui runs <subcommand>`` — the headless
+    equivalent of :class:`~arq_tui.screens.runs_monitor.RunsMonitorScreen`.
+    Designed for cron-driven monitoring scripts and the operator's
+    shell history.
+    """
+    from .runs import (
+        RunStatus,
+        enumerate_runs,
+        gc_finished_runs,
+        signal_cancel,
+        state_file_path,
+    )
+    sub = parsed.runs_command
+    if sub == "ls":
+        recs = enumerate_runs()
+        if not recs:
+            print("(no runs)")
+            return 0
+        for rec in recs:
+            tag = rec.status
+            name = rec.plan_name or rec.run_id[:12]
+            extra = ""
+            if rec.progress.bytes_total:
+                pct = (
+                    100.0 * rec.progress.bytes_done
+                    / max(rec.progress.bytes_total, 1)
+                )
+                extra = f"  {pct:5.1f}%"
+            print(
+                f"{rec.run_id}  {rec.kind:<8s}  {tag:<10s}  "
+                f"{name}{extra}"
+            )
+        return 0
+    if sub == "show":
+        path = state_file_path(parsed.run_id)
+        if not path.is_file():
+            print(f"error: no such run: {parsed.run_id}",
+                  file=sys.stderr)
+            return 2
+        print(path.read_text(encoding="utf-8"))
+        return 0
+    if sub == "cancel":
+        for rec in enumerate_runs():
+            if rec.run_id != parsed.run_id:
+                continue
+            if signal_cancel(rec):
+                print(f"signaled SIGTERM to pid {rec.pid}")
+                return 0
+            print(
+                f"error: pid {rec.pid} not alive (or no permission)",
+                file=sys.stderr,
+            )
+            return 4
+        print(f"error: no such run: {parsed.run_id}", file=sys.stderr)
+        return 2
+    if sub == "gc":
+        n = gc_finished_runs(
+            older_than_sec=parsed.older_than_days * 86400,
+        )
+        print(f"removed {n} state file(s)")
+        return 0
     return 2

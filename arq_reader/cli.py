@@ -53,6 +53,15 @@ def _build_parser() -> argparse.ArgumentParser:
     for sp in (p, *sub.choices.values()):
         sp.add_argument("--quiet", action="store_true")
         sp.add_argument("--json-events", action="store_true")
+        sp.add_argument(
+            "--state-file", type=Path, default=None,
+            help=(
+                "Path to a JSON state file the CLI updates as work "
+                "progresses (atomic writes; safe to poll). The "
+                "filename stem is used as the run-id. See "
+                "docs/PLAN-cli-tui-split.md."
+            ),
+        )
     return p
 
 
@@ -135,17 +144,58 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if args.command == "restore":
-        try:
-            result = restorer.restore(
-                folder_uuid=args.folder_uuid,
-                dest=args.dest,
-                computer_uuid=args.computer_uuid,
-                callback=cb,
-            )
-        except Exception as exc:
-            print(f"error: restore failed: {type(exc).__name__}: {exc}",
-                  file=sys.stderr)
-            return 4
+        # Wrap in optional state-file IPC so cron / TUI can monitor.
+        if getattr(args, "state_file", None) is not None:
+            from arq_tui.runs import RunKind, run_writer_context
+
+            try:
+                with run_writer_context(
+                    kind=RunKind.RESTORE,
+                    state_file=args.state_file,
+                ) as rw:
+                    rw.set_destination(
+                        kind="local", label=str(args.src),
+                        computer_uuid=args.computer_uuid or "",
+                    )
+
+                    def cb_with_state(kind: str, payload: dict) -> None:
+                        rw.event(kind, **payload)
+                        if cb is not None:
+                            cb(kind, payload)
+
+                    result = restorer.restore(
+                        folder_uuid=args.folder_uuid,
+                        dest=args.dest,
+                        computer_uuid=args.computer_uuid,
+                        callback=cb_with_state,
+                    )
+                    rw.set_result({
+                        "files_restored": result.files_restored,
+                        "dirs_restored": result.dirs_restored,
+                        "bytes_restored": result.bytes_restored,
+                        "blobs_fetched": result.blobs_fetched,
+                        "failures": len(result.failures),
+                    })
+            except Exception as exc:
+                print(
+                    f"error: restore failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                return 4
+        else:
+            try:
+                result = restorer.restore(
+                    folder_uuid=args.folder_uuid,
+                    dest=args.dest,
+                    computer_uuid=args.computer_uuid,
+                    callback=cb,
+                )
+            except Exception as exc:
+                print(
+                    f"error: restore failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                return 4
         out = asdict(result)
         out["src"] = str(out["src"])
         out["dest"] = str(out["dest"])
