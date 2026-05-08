@@ -174,13 +174,21 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 
 ### 8. Storage backends (where the destination lives)
 
+**Project scope**: Local filesystem, NAS (treated as local), and SFTP.
+Every other Arq 7 backend (S3, Wasabi, B2, Storj, GCS, Azure Blob,
+OneDrive, Dropbox, Box, Google Drive, pCloud, …) is **out of scope**
+— independent of how Arq.app supports them. Users who need a cloud
+destination can either use Arq.app for that backup or expose the
+destination through ``rclone mount`` and point our local backend at
+the FUSE mount.
+
 | Backend                                                       | Validator | Reader | Writer | Notes |
 |---------------------------------------------------------------|:---------:|:------:|:------:|-------|
-| Local filesystem / NAS                                        |    ✅     |  ✅    |  ✅    | Default; ``LocalBackend`` |
-| SFTP                                                          |    ✅     |  ❌    |  ❌    | ``SftpBackend`` is validator-only; reader/writer would need wrapping the same Backend Protocol |
-| S3 (Standard / IA / Glacier / Deep Archive)                   |    ❌     |  ❌    |  ❌    | None implemented |
-| Wasabi / Backblaze B2 / GCS / Azure Blob / OneDrive / Dropbox / Box / Storj | ❌ | ❌ | ❌ | None implemented |
-| Any cloud backend via ``rclone mount``                        |    ✅     |  ✅    |  ✅    | All three components work over a FUSE mount that exposes the destination locally |
+| Local filesystem                                              |    ✅     |  ✅    |  ✅    | Default; ``LocalBackend`` |
+| NAS (any local-mounted network filesystem)                    |    ✅     |  ✅    |  ✅    | Indistinguishable from local; same ``LocalBackend`` path |
+| SFTP                                                          |    ✅     |  ❌    |  ❌    | ``SftpBackend`` exists for the validator. Reader/writer don't yet thread the ``Backend`` abstraction through their I/O paths — both currently use ``Path.read_bytes`` / ``Path.write_bytes`` directly. Wiring the reader's ``Backend`` parameter through ``Restore`` and the writer's blob-writing path is the remaining work to fully meet the project's goal |
+| S3 (any class) / Wasabi / Backblaze B2 / Storj / Google Cloud / Azure Blob / OneDrive / Dropbox / Box / Google Drive / pCloud | 🔴 | 🔴 | 🔴 | **Out of scope.** Native cloud-API clients are not part of this project's goals. Arq.app is the supported tool for cloud destinations |
+| Any cloud backend via ``rclone mount``                        |    ✅     |  ✅    |  ✅    | Workaround, not a built-in feature: a FUSE mount makes the cloud destination look local to ``LocalBackend`` |
 
 ### 9. CLI / TUI
 
@@ -218,13 +226,16 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
   the restored bytes are correct; only the metadata around them
   needs a follow-up commit.
 
-- **Cloud storage backends (S3 / B2 / GCS / Azure / OneDrive /
-  Dropbox / Box / Storj)**: each backend is a separate auth +
-  transport stack. For now, ``rclone mount`` is the supported
-  path: any cloud Arq supports is reachable through a FUSE
-  mount that exposes the destination as a local filesystem.
-  Pure-Python implementations are deferred until a concrete user
-  need surfaces.
+- **Cloud storage backends (S3 / Wasabi / B2 / Storj / GCS /
+  Azure / OneDrive / Dropbox / Box / Google Drive / pCloud)**:
+  **deliberately out of scope.** This project's storage targets
+  are local filesystem, NAS, and SFTP — Arq.app is the tool for
+  cloud destinations, both because each backend is a separate
+  auth + transport stack and because the project's audience
+  (independent validation + restore + write of self-hosted
+  destinations) doesn't overlap meaningfully with cloud-only
+  users. The ``rclone mount`` workaround stays available for
+  anyone who wants a cloud target anyway.
 
 - **Schedule / throttling / notifications / wake-from-sleep**:
   these belong to Arq.app's policy layer, not the on-disk format.
