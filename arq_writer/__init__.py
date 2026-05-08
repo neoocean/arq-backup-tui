@@ -39,6 +39,14 @@ from .crypto_write import (
 )
 from .exclusions import ExclusionRules
 from .lz4_block import lz4_block_compress, lz4_block_decompress, lz4_wrap
+from .macos_snapshot import (
+    NotMacOSError,
+    SnapshotError,
+    SnapshotInfo,
+    is_macos,
+    is_macos_apfs,
+    with_apfs_snapshot,
+)
 from .types import BlobLoc, FileNode, Tree, TreeNode
 
 __all__ = [
@@ -48,8 +56,14 @@ __all__ = [
     "BlobLoc",
     "ExclusionRules",
     "FileNode",
+    "NotMacOSError",
+    "SnapshotError",
+    "SnapshotInfo",
     "Tree",
     "TreeNode",
+    "is_macos",
+    "is_macos_apfs",
+    "with_apfs_snapshot",
     "build_encrypted_keyset",
     "build_encrypted_object",
     "aes_256_cbc_encrypt",
