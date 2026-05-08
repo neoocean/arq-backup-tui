@@ -43,6 +43,7 @@ class BackupSetListScreen(Screen):
     BINDINGS = [
         Binding("a", "add_destination", "Add destination", show=True),
         Binding("v", "validate_destination", "Validate", show=True),
+        Binding("m", "maintenance", "Maintenance", show=True),
         Binding("escape", "app.pop_screen", "Back", show=True),
         Binding("q", "app.quit", "Quit", show=True),
     ]
@@ -289,6 +290,38 @@ class BackupSetListScreen(Screen):
             password=password,
             dest_label=self._opened_dest.display(),
             config_dir=self.app.destination_store.config_dir,
+        ))
+
+    def action_maintenance(self) -> None:
+        """Open the maintenance console (password rotation + retention)
+        for the currently-opened destination.
+
+        Requires both the backend and an already-cached encryption
+        password — the rotation step needs both the old keyset and
+        the cached password to be present, and the retention step
+        needs to decrypt every backuprecord. Surfaces a notification
+        if either is missing rather than re-prompting mid-flow.
+        """
+        if self._opened_backend is None or self._opened_dest is None:
+            self.notify(
+                "Open a destination first.", severity="warning",
+            )
+            return
+        password = self.app.credential_cache.get_encryption_password(
+            self._opened_dest,
+        )
+        if password is None:
+            self.notify(
+                "Encryption password not cached — open a record "
+                "first to enter it.",
+                severity="warning",
+            )
+            return
+        from .maintenance import MaintenanceScreen
+        self.app.push_screen(MaintenanceScreen(
+            backend=self._opened_backend,
+            dest=self._opened_dest,
+            password=password,
         ))
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:

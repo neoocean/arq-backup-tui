@@ -97,6 +97,7 @@ class BackupRunScreen(Screen):
             return
 
         chunker_config = self._resolve_chunker(self.plan.chunker)
+        exclusions = self._resolve_exclusions(self.plan)
         self.worker = BackupWorker(
             self,
             sources=self.plan.sources,
@@ -107,6 +108,9 @@ class BackupRunScreen(Screen):
             chunker_config=chunker_config,
             dedup_against_existing=self.plan.dedup_against_existing,
             backup_name=self.plan.name,
+            exclusions=exclusions,
+            max_file_bytes=self.plan.max_file_bytes,
+            use_apfs_snapshot=self.plan.use_apfs_snapshot,
         )
         self.worker.start()
 
@@ -188,3 +192,21 @@ class BackupRunScreen(Screen):
             return ChunkerConfig()
         # "none" or unrecognized -> no chunker (single blob per file).
         return None
+
+    @staticmethod
+    def _resolve_exclusions(plan: Plan):
+        """Build an :class:`arq_writer.ExclusionRules` from the
+        plan's three pattern lists. Empty lists → ``None`` so the
+        writer keeps its default-empty behaviour."""
+        if not (
+            plan.exclude_globs
+            or plan.exclude_regexes
+            or plan.exclude_gitignore_lines
+        ):
+            return None
+        from arq_writer import ExclusionRules
+        return ExclusionRules.of(
+            wildcard=tuple(plan.exclude_globs),
+            regex=tuple(plan.exclude_regexes),
+            gitignore_lines=tuple(plan.exclude_gitignore_lines),
+        )

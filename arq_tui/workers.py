@@ -153,6 +153,9 @@ class BackupWorker(_BaseWorker):
         chunker_config=None,
         dedup_against_existing: bool = True,
         backup_name: str = "TUI backup",
+        exclusions=None,
+        max_file_bytes: Optional[int] = None,
+        use_apfs_snapshot: bool = False,
     ) -> None:
         super().__init__(target)
         self.sources = list(sources)
@@ -166,6 +169,9 @@ class BackupWorker(_BaseWorker):
         self.chunker_config = chunker_config
         self.dedup_against_existing = dedup_against_existing
         self.backup_name = backup_name
+        self.exclusions = exclusions
+        self.max_file_bytes = max_file_bytes
+        self.use_apfs_snapshot = use_apfs_snapshot
         self._backup = None  # set by _run for cancel routing
 
     def cancel(self) -> None:
@@ -190,6 +196,8 @@ class BackupWorker(_BaseWorker):
             use_packs=self.use_packs,
             chunker_config=self.chunker_config,
             dedup_against_existing=self.dedup_against_existing,
+            exclusions=self.exclusions,
+            max_file_bytes=self.max_file_bytes,
             callback=self._emit,
         )
         self._backup = bk
@@ -197,9 +205,11 @@ class BackupWorker(_BaseWorker):
         results = []
         for src in self.sources:
             from pathlib import Path as _P
-            results.append(bk.add_folder(
-                _P(src),
-                folder_uuid=self.folder_uuid if len(self.sources) == 1 else None,
+            results.append(self._add_folder(
+                bk, _P(src),
+                folder_uuid=(
+                    self.folder_uuid if len(self.sources) == 1 else None
+                ),
                 folder_name=_P(src).name or "root",
             ))
         return {
@@ -213,6 +223,41 @@ class BackupWorker(_BaseWorker):
             "blob_count": len(bk.blob_ids),
             "backuprecords": [str(p) for p in results],
         }
+
+    def _add_folder(self, bk, src, *, folder_uuid, folder_name):
+        """Run ``bk.add_folder`` on ``src`` honouring
+        ``use_apfs_snapshot``.
+
+        On macOS APFS the writer is fed a frozen snapshot of the
+        source so file content can't shift mid-walk; on every other
+        platform :func:`arq_writer.with_apfs_snapshot` raises
+        :class:`NotMacOSError` and we fall back to the live walk
+        with an ``apfs_snapshot_skipped`` event for the panel.
+        """
+        if not self.use_apfs_snapshot:
+            return bk.add_folder(
+                src,
+                folder_uuid=folder_uuid,
+                folder_name=folder_name,
+            )
+        from arq_writer import NotMacOSError, with_apfs_snapshot
+        try:
+            with with_apfs_snapshot(src) as snap_path:
+                return bk.add_folder(
+                    snap_path,
+                    folder_uuid=folder_uuid,
+                    folder_name=folder_name,
+                )
+        except NotMacOSError:
+            self._emit(
+                "apfs_snapshot_skipped",
+                {"reason": "not_macos", "source": str(src)},
+            )
+            return bk.add_folder(
+                src,
+                folder_uuid=folder_uuid,
+                folder_name=folder_name,
+            )
 
 
 # ---------------------------------------------------------------------------

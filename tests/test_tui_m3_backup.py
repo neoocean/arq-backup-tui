@@ -125,7 +125,11 @@ class PlanWizardTests(unittest.IsolatedAsyncioTestCase):
                 # Step 4 — chunker (defaults are fine).
                 wizard._handle_next()
                 await pilot.pause()
-                # Step 5 — review + save.
+                # Step 5 — advanced (defaults are fine; all fields
+                # optional and default-empty equates to M3 behaviour).
+                wizard._handle_next()
+                await pilot.pause()
+                # Step 6 — review + save.
                 wizard.query_one("#plan-name", Input).value = "test-plan"
                 wizard._handle_next()
                 await pilot.pause()

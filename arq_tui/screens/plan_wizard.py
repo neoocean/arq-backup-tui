@@ -4,10 +4,13 @@ Single-screen, step-based flow:
 
 1. Sources    — multi-source picker
 2. Destination— local path or SFTP coordinates
-3. Encryption — password (M3 doesn't fall back to prompts mid-run;
-                the password is captured here and cached)
+3. Encryption — password (the password is captured here and cached;
+                M3 doesn't fall back to prompts mid-run)
 4. Chunker    — generic / Arq.app v7.41 / no chunking
-5. Review     — name + summary, save
+5. Advanced   — exclusion patterns (glob / regex / .gitignore lines),
+                max-file-bytes cap, APFS-snapshot toggle, retention
+                policy (keep_last_n + keep_daily/weekly/monthly/yearly)
+6. Review     — name + summary, save
 
 Each step is its own ``Vertical`` swapped in/out. ``Next`` /
 ``Back`` navigation only — the wizard validates per step before
@@ -36,6 +39,7 @@ from textual.widgets import (
     RadioButton,
     RadioSet,
     Static,
+    TextArea,
 )
 
 from ..state import Plan
@@ -53,13 +57,22 @@ class _Draft:
     chunker: str = "default"
     use_packs: bool = True
     dedup_against_existing: bool = True
+    exclude_globs: List[str] = field(default_factory=list)
+    exclude_regexes: List[str] = field(default_factory=list)
+    exclude_gitignore_lines: List[str] = field(default_factory=list)
+    max_file_bytes: object = None
+    use_apfs_snapshot: bool = False
+    retention: dict = field(default_factory=dict)
     name: str = ""
 
 
 class PlanWizardScreen(Screen):
     """Multi-step wizard for creating a backup plan."""
 
-    STEPS = ("sources", "destination", "encryption", "chunker", "review")
+    STEPS = (
+        "sources", "destination", "encryption", "chunker",
+        "advanced", "review",
+    )
 
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back to Home", show=True),
@@ -202,7 +215,61 @@ class PlanWizardScreen(Screen):
                     )
                     yield RadioButton("Off", id="dedup-off")
 
-            # Step 5 — review
+            # Step 5 — advanced (exclusions, size limit, snapshot,
+            # retention). All fields are optional; default-empty means
+            # "no exclusions, no size limit, no snapshot, keep
+            # everything" — i.e. M3 behavior is preserved.
+            with Vertical(id="pane-advanced", classes="step-pane"):
+                yield Label("Advanced (optional)", classes="step-title")
+                yield Label(
+                    "Exclude wildcards (one per line, fnmatch syntax: "
+                    "*.log, __pycache__, node_modules)",
+                    classes="field-label",
+                )
+                yield TextArea(id="adv-globs")
+                yield Label(
+                    "Exclude regexes (one Python regex per line, "
+                    "fullmatch against source-relative path)",
+                    classes="field-label",
+                )
+                yield TextArea(id="adv-regexes")
+                yield Label(
+                    ".gitignore-style lines (one per line, with "
+                    "leading-/, trailing-/, and ! negation)",
+                    classes="field-label",
+                )
+                yield TextArea(id="adv-gitignore")
+                yield Label(
+                    "Skip files larger than (bytes; blank = no limit)",
+                    classes="field-label",
+                )
+                yield Input(
+                    id="adv-max-file-bytes", placeholder="1073741824",
+                )
+                yield Label(
+                    "Use APFS snapshot (macOS only; falls back on "
+                    "non-APFS or non-macOS)",
+                    classes="field-label",
+                )
+                with RadioSet(id="adv-apfs-set"):
+                    yield RadioButton("Off", value=True, id="adv-apfs-off")
+                    yield RadioButton("On", id="adv-apfs-on")
+                yield Label(
+                    "Retention (blank = keep all backuprecords)",
+                    classes="field-label",
+                )
+                yield Label("keep_last_n", classes="field-label")
+                yield Input(id="adv-keep-last-n", placeholder="")
+                yield Label("keep_daily", classes="field-label")
+                yield Input(id="adv-keep-daily", placeholder="0")
+                yield Label("keep_weekly", classes="field-label")
+                yield Input(id="adv-keep-weekly", placeholder="0")
+                yield Label("keep_monthly", classes="field-label")
+                yield Input(id="adv-keep-monthly", placeholder="0")
+                yield Label("keep_yearly", classes="field-label")
+                yield Input(id="adv-keep-yearly", placeholder="0")
+
+            # Step 6 — review
             with Vertical(id="pane-review", classes="step-pane"):
                 yield Label("Plan name + review", classes="step-title")
                 yield Label("Plan name", classes="field-label")
@@ -356,6 +423,8 @@ class PlanWizardScreen(Screen):
                 "#dedup-on", RadioButton,
             ).value
             return True
+        if step == "advanced":
+            return self._capture_advanced()
         if step == "review":
             name = self.query_one("#plan-name", Input).value.strip()
             if not name:
@@ -365,6 +434,78 @@ class PlanWizardScreen(Screen):
                 return False
             self.draft.name = name
             return True
+        return True
+
+    @staticmethod
+    def _split_lines(text: str) -> List[str]:
+        """Split a TextArea blob into non-empty stripped lines.
+
+        Comment lines starting with ``#`` are kept (the writer's
+        gitignore parser strips them itself); blank lines are
+        dropped so the resulting tuple matches what
+        :class:`arq_writer.ExclusionRules` expects.
+        """
+        out: List[str] = []
+        for raw in (text or "").splitlines():
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            out.append(stripped)
+        return out
+
+    def _capture_advanced(self) -> bool:
+        self.draft.exclude_globs = self._split_lines(
+            self.query_one("#adv-globs", TextArea).text,
+        )
+        self.draft.exclude_regexes = self._split_lines(
+            self.query_one("#adv-regexes", TextArea).text,
+        )
+        self.draft.exclude_gitignore_lines = self._split_lines(
+            self.query_one("#adv-gitignore", TextArea).text,
+        )
+        mfb_text = self.query_one(
+            "#adv-max-file-bytes", Input,
+        ).value.strip()
+        if mfb_text:
+            try:
+                mfb = int(mfb_text)
+                if mfb <= 0:
+                    raise ValueError("non-positive")
+            except ValueError:
+                self.notify(
+                    "max-file-bytes must be a positive integer or blank.",
+                    severity="error",
+                )
+                return False
+            self.draft.max_file_bytes = mfb
+        else:
+            self.draft.max_file_bytes = None
+        self.draft.use_apfs_snapshot = self.query_one(
+            "#adv-apfs-on", RadioButton,
+        ).value
+        retention: dict = {}
+        for ret_field, widget_id in (
+            ("keep_last_n", "#adv-keep-last-n"),
+            ("keep_daily", "#adv-keep-daily"),
+            ("keep_weekly", "#adv-keep-weekly"),
+            ("keep_monthly", "#adv-keep-monthly"),
+            ("keep_yearly", "#adv-keep-yearly"),
+        ):
+            text = self.query_one(widget_id, Input).value.strip()
+            if not text:
+                continue
+            try:
+                value = int(text)
+                if value < 0:
+                    raise ValueError("negative")
+            except ValueError:
+                self.notify(
+                    f"{ret_field} must be a non-negative integer.",
+                    severity="error",
+                )
+                return False
+            retention[ret_field] = value
+        self.draft.retention = retention
         return True
 
     # ------------------------------------------------------------------
@@ -395,6 +536,22 @@ class PlanWizardScreen(Screen):
             f"Dedup against existing: "
             f"{'on' if d.dedup_against_existing else 'off'}"
         )
+        excl_count = (
+            len(d.exclude_globs)
+            + len(d.exclude_regexes)
+            + len(d.exclude_gitignore_lines)
+        )
+        if excl_count:
+            lines.append(f"Exclusions: {excl_count} pattern(s)")
+        if d.max_file_bytes:
+            lines.append(f"Max file bytes: {d.max_file_bytes}")
+        if d.use_apfs_snapshot:
+            lines.append("APFS snapshot: on (macOS only)")
+        if d.retention:
+            ret_summary = ", ".join(
+                f"{k}={v}" for k, v in sorted(d.retention.items())
+            )
+            lines.append(f"Retention: {ret_summary}")
         self.query_one("#review", Static).update("\n".join(lines))
 
     # ------------------------------------------------------------------
@@ -412,6 +569,12 @@ class PlanWizardScreen(Screen):
             chunker=d.chunker,
             use_packs=d.use_packs,
             dedup_against_existing=d.dedup_against_existing,
+            exclude_globs=list(d.exclude_globs),
+            exclude_regexes=list(d.exclude_regexes),
+            exclude_gitignore_lines=list(d.exclude_gitignore_lines),
+            max_file_bytes=d.max_file_bytes,
+            use_apfs_snapshot=d.use_apfs_snapshot,
+            retention=dict(d.retention),
         )
         try:
             self.app.plan_registry.save(plan)
