@@ -187,10 +187,18 @@ def list_backuprecords(
     ``backupfolders/<folder>/backuprecords/<bucket>/<num>.backuprecord``,
     sorted oldest-first.
 
-    The lexicographic ordering on ``(bucket, num)`` matches
-    chronological ordering because both encode ``creation_date``
-    (bucket = floor(creation_date / 100000), num = creation_date %
-    100000). Empty list when the folder has no records.
+    Arq.app picks ``(bucket, num)`` such that lexicographic ordering
+    matches ``creationDate`` order, so paths sorted as strings give
+    chronological order — which is what every caller of this
+    function actually relies on. The exact ``bucket`` formula is
+    Arq.app-internal; empirical evidence from real destinations
+    suggests it's closer to ``floor(creationDate / 10_000_000)``
+    than the ``/ 100000`` form earlier docs cited, and ``num`` is
+    a separate sequence that isn't a simple modulo of
+    ``creationDate``. We do not depend on the formula, only on
+    the resulting ordering.
+
+    Empty list when the folder has no records.
     """
     base = (
         f"{computer_root(root, computer_uuid)}/{C.BACKUPFOLDERS_DIR}/"

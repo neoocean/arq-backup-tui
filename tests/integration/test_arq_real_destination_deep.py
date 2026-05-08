@@ -156,15 +156,19 @@ class FolderAndHistoryParseTests(_RealDestinationBase):
                 rec = _parse_backuprecord(plain)
                 self.assertIn("node", rec)
 
-    def test_record_buckets_are_chronologically_ordered(self) -> None:
-        """``bucket = floor(creationDate / 100000)`` is the
-        documented mapping. Verify it holds against real records:
-        if true, sorting paths lexicographically gives chronological
-        order — which our reader relies on."""
+    def test_record_paths_sort_chronologically(self) -> None:
+        """``list_backuprecords`` returns paths in lexicographic
+        order; the reader relies on that being chronological order
+        of ``creationDate``. We deliberately don't assert the exact
+        ``bucket = f(creationDate)`` formula — empirical numbers
+        from a real Hetzner destination disagreed with the
+        ``floor(creationDate / 100000)`` form our spec doc claimed
+        (real ratio is closer to ``/ 10_000_000``, with ``num``
+        unrelated to ``creationDate`` modulo). The chronological
+        ordering invariant is what the reader actually consumes;
+        the bucket internals are Arq.app's to define.
+        """
         layout = self.layouts[0]
-        bucket_re = re.compile(
-            r"backuprecords/(\d+)/(\d+)\.backuprecord$",
-        )
         for fu in layout.backup_folder_uuids:
             recs = list_backuprecords(self.backend, "/", self.cu, fu)
             if len(recs) < 2:
@@ -172,12 +176,6 @@ class FolderAndHistoryParseTests(_RealDestinationBase):
             with self.subTest(folder=fu):
                 creation_dates = []
                 for path in recs[:5]:  # sample first 5 to bound time
-                    m = bucket_re.search(path)
-                    self.assertIsNotNone(
-                        m, f"unexpected record path shape: {path}",
-                    )
-                    bucket = int(m.group(1))
-                    num = int(m.group(2))
                     arqo = self.backend.read_all(path)
                     plain = decrypt_lz4_arqo(
                         arqo,
@@ -191,18 +189,11 @@ class FolderAndHistoryParseTests(_RealDestinationBase):
                         f"record {path} missing creationDate",
                     )
                     creation_dates.append(float(cdate))
-                    # Spec mapping: bucket = floor(creation_date / 100000)
-                    expected_bucket = int(float(cdate) // 100000)
-                    self.assertEqual(
-                        bucket, expected_bucket,
-                        f"path bucket {bucket} != "
-                        f"floor({cdate}/100000)={expected_bucket}",
-                    )
-                # Sample dates should already be sorted (oldest-first
-                # since list_backuprecords returns sorted paths).
                 self.assertEqual(
                     creation_dates, sorted(creation_dates),
-                    "list_backuprecords didn't return chronological order",
+                    "list_backuprecords didn't return chronological "
+                    "order — reader depends on this for "
+                    "find_latest_backuprecord",
                 )
 
 
