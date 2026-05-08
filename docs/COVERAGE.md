@@ -19,11 +19,26 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with tree-walk reuse |
 | Operate           | ⚠️ Library only — schedule, throttling, notifications, GUI/TUI all absent |
 
-The aggregate test count is **250 unit tests** at the time this
-table was last updated; the suite runs in ~80 s on a stdlib-only
+The aggregate test count is **265 unit tests** at the time this
+table was last updated; the suite runs in ~92 s on a stdlib-only
 toolchain (``python -m unittest discover``). 24 of those are TUI
 tests that require the optional ``textual`` dep — without it they
-auto-skip and the rest of the suite (library + RE) runs cleanly.
+auto-skip and the rest of the suite (library + RE +
+compatibility) runs cleanly.
+
+For a structured **format-conformance audit** of any destination
+this project produces (or any Arq 7 destination, regardless of
+origin), see ``docs/COMPATIBILITY.md`` and
+``arq_validator.check_arq7_compatibility``. The audit cross-checks
+every invariant in the published Arq 7 spec — layout shape, JSON
+sidecar fields, keyset format, ARQO envelope, blob_id derivation,
+pack-file naming, backuprecord plist keys, etc. — and returns a
+structured pass/fail report. 15 dedicated tests in
+``tests/test_arq7_compatibility.py`` exercise the audit across
+every backup scenario (standalone vs packed, single file, empty
+tree, multi-folder, Unicode filenames, multi-MiB chunked file)
+plus 5 negative tests that intentionally damage a correct
+destination and assert the right invariant fires.
 
 ## Detailed feature matrix
 
