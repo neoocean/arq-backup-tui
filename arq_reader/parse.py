@@ -71,6 +71,15 @@ class BinaryReader:
         self.pos += 8
         return v
 
+    def read_raw(self, n: int) -> bytes:
+        """Consume ``n`` raw bytes without interpreting them. Used
+        for opaque trailing fields whose precise structure isn't
+        known yet (e.g. Tree v4's per-node 38-byte extension)."""
+        self._need(n)
+        out = self.data[self.pos : self.pos + n]
+        self.pos += n
+        return out
+
     def read_string(self) -> Optional[str]:
         self._need(1)
         is_not_null = self.data[self.pos]
@@ -97,8 +106,23 @@ class BinaryReader:
 
 
 def parse_blobloc(reader: BinaryReader) -> BlobLoc:
+    """Parse one binary BlobLoc entry.
+
+    The actual on-disk Arq 7 BlobLoc layout (discovered by walking
+    real Arq.app-produced trees over a Hetzner Storage Box) carries
+    an extra ``isLargePack`` boolean between ``isPacked`` and
+    ``relativePath`` — the published spec / our earlier writer
+    omitted it. Without consuming this byte every downstream field
+    shifts by one and the parser explodes mid-string at the next
+    ``read_string``. ``isLargePack`` distinguishes
+    ``largeblobpacks/`` blobs from ordinary ``treepacks/`` /
+    ``blobpacks/`` ones; the reader currently surfaces it via the
+    ``BlobLoc.isLargePack`` attribute and downstream code routes
+    largeblobpack reads the same way as regular pack reads.
+    """
     blob_id = reader.read_string()
     is_packed = reader.read_bool()
+    is_large_pack = reader.read_bool()
     rel_path = reader.read_string()
     offset = reader.read_uint64()
     length = reader.read_uint64()
@@ -107,6 +131,7 @@ def parse_blobloc(reader: BinaryReader) -> BlobLoc:
     return BlobLoc(
         blobIdentifier=blob_id or "",
         isPacked=is_packed,
+        isLargePack=is_large_pack,
         relativePath=rel_path or "",
         offset=offset,
         length=length,
@@ -167,6 +192,17 @@ def parse_node(reader: BinaryReader, *, tree_version: int):
     if tree_version >= NODE_REPARSE_FIELDS_MIN_TREE_VERSION:
         win_reparse_tag = reader.read_uint32()
         win_reparse_is_dir = reader.read_bool()
+
+    # Tree v4 added a 38-byte trailing block per node whose internal
+    # structure isn't documented in the public spec. Empirical
+    # observation against Arq.app v8 trees on a real Hetzner
+    # destination: every byte of this block is zero for typical
+    # files, and consuming it as opaque bytes makes the parser
+    # re-align with the next child. The exact field decomposition
+    # (likely some combination of new timestamps / flags / a null
+    # BlobLoc) can be filled in once Arq.app source can be RE'd.
+    if tree_version >= 4:
+        reader.read_raw(38)
 
     common = dict(
         itemSize=item_size,

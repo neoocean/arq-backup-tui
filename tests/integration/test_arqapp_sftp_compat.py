@@ -84,7 +84,7 @@ class SftpRealArq7Tests(unittest.TestCase):
     def test_layout_discovers_computer(self) -> None:
         backend = self._open_backend()
         try:
-            layouts = discover_layout(backend, "/")
+            layouts = discover_layout(backend, "/", enumerate_objects=False)
             self.assertGreaterEqual(
                 len(layouts), 1,
                 msg="no computer UUIDs found at SFTP root",
@@ -100,7 +100,7 @@ class SftpRealArq7Tests(unittest.TestCase):
     def test_keyset_decrypts(self) -> None:
         backend = self._open_backend()
         try:
-            layouts = discover_layout(backend, "/")
+            layouts = discover_layout(backend, "/", enumerate_objects=False)
             cu = layouts[0].computer_uuid
             blob = backend.read_all(f"/{cu}/encryptedkeyset.dat")
             keyset = decrypt_keyset(blob, self.creds.dest_password)
@@ -114,7 +114,7 @@ class SftpRealArq7Tests(unittest.TestCase):
     def test_compatibility_audit_passes(self) -> None:
         backend = self._open_backend()
         try:
-            layouts = discover_layout(backend, "/")
+            layouts = discover_layout(backend, "/", enumerate_objects=False)
             cu = layouts[0].computer_uuid
             report = check_arq7_compatibility(
                 backend, "/",
@@ -151,16 +151,19 @@ class SftpRealArq7Tests(unittest.TestCase):
                         f"{report.error}",
                 )
                 # Per-tier details: L1a sample + L1b record verifs
-                # must report no failures.
-                if report.l1a is not None:
+                # must report no failures. The dataclass field names
+                # are `magic_check` (L1a) and `backuprecord` (L1b).
+                if report.magic_check is not None:
                     self.assertEqual(
-                        report.l1a.fail, 0,
-                        msg=f"L1a saw failures: {report.l1a}",
+                        report.magic_check.fail, 0,
+                        msg=f"L1a saw failures: "
+                            f"{report.magic_check.failures[:3]}",
                     )
-                if report.l1b is not None:
+                if report.backuprecord is not None:
                     self.assertEqual(
-                        report.l1b.fail, 0,
-                        msg=f"L1b saw failures: {report.l1b}",
+                        report.backuprecord.fail, 0,
+                        msg=f"L1b saw failures: "
+                            f"{report.backuprecord.failures[:3]}",
                     )
         finally:
             backend.close()
@@ -168,7 +171,7 @@ class SftpRealArq7Tests(unittest.TestCase):
     def test_fingerprint_is_well_formed_json(self) -> None:
         backend = self._open_backend()
         try:
-            layouts = discover_layout(backend, "/")
+            layouts = discover_layout(backend, "/", enumerate_objects=False)
             cu = layouts[0].computer_uuid
             fp = compute_shape_fingerprint(
                 backend,
@@ -190,7 +193,7 @@ class SftpRealArq7Tests(unittest.TestCase):
     def test_records_list_at_least_one(self) -> None:
         backend = self._open_backend()
         try:
-            layouts = discover_layout(backend, "/")
+            layouts = discover_layout(backend, "/", enumerate_objects=False)
             cu = layouts[0].computer_uuid
             seen_any = False
             for fu in layouts[0].backup_folder_uuids:
@@ -216,7 +219,7 @@ class SftpRealArq7Tests(unittest.TestCase):
 
         backend = self._open_backend()
         try:
-            layouts = discover_layout(backend, "/")
+            layouts = discover_layout(backend, "/", enumerate_objects=False)
             cu = layouts[0].computer_uuid
             keyset = decrypt_keyset(
                 backend.read_all(f"/{cu}/encryptedkeyset.dat"),

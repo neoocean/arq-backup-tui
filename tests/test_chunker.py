@@ -231,7 +231,8 @@ class ChunkerWriterIntegrationTests(unittest.TestCase):
             rec_plain = decrypt_lz4_arqo(
                 rec_arqo, keyset.encryption_key, keyset.hmac_key,
             )
-            rec = plistlib.loads(rec_plain)
+            from arq_reader.restore import _parse_backuprecord
+            rec = _parse_backuprecord(rec_plain)
             # Walk to the file node.
             tree_loc = rec["node"]["treeBlobLoc"]
             from arq_writer.types import BlobLoc as _BL

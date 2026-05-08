@@ -65,6 +65,66 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip the confirmation prompt.",
     )
 
+    # Runs / activity sub-commands. These are headless equivalents
+    # of the RunsMonitorScreen and let cron / ops scripts read the
+    # state-file directory without spawning the TUI.
+    runs = sub.add_parser(
+        "runs",
+        help="Inspect / cancel / GC the runs state-file dir.",
+    )
+    runs_sub = runs.add_subparsers(dest="runs_command", required=True)
+    runs_sub.add_parser(
+        "ls", help="List active + recent runs.",
+    )
+    runs_show = runs_sub.add_parser(
+        "show", help="Print one run as JSON.",
+    )
+    runs_show.add_argument(
+        "run_id",
+        help="Run UUID (exact filename stem of the state file).",
+    )
+    runs_cancel = runs_sub.add_parser(
+        "cancel",
+        help="Send SIGTERM to a run's writer PID for graceful "
+             "cancellation.",
+    )
+    runs_cancel.add_argument(
+        "run_id",
+        help="Run UUID to cancel.",
+    )
+    runs_gc = runs_sub.add_parser(
+        "gc",
+        help="Remove state files for runs that finished more "
+             "than --older-than-days ago (default 30).",
+    )
+    runs_gc.add_argument(
+        "--older-than-days", type=int, default=30,
+        help="Age cutoff in days (default 30).",
+    )
+
+    # ``arq-tui machine-info <root>`` — given just the destination
+    # path, surface every metadata field Arq.app records about the
+    # source machine, plus a comparison against the current host.
+    # Useful when re-installing a Mac and asking "does this backup
+    # actually match this machine?" without any local Arq settings.
+    machine = sub.add_parser(
+        "machine-info",
+        help="Show source-machine metadata for a destination "
+             "and (optionally) compare with this host.",
+    )
+    machine.add_argument(
+        "root",
+        type=Path,
+        help="Path to the destination root (the directory that "
+             "directly contains the <COMPUTER-UUID>/ subdir).",
+    )
+    machine.add_argument(
+        "--no-compare",
+        action="store_true",
+        help="Skip the host-vs-source comparison; just dump the "
+             "source-side metadata.",
+    )
+
     return p
 
 
@@ -174,4 +234,139 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             return 2
 
+    if parsed.command == "runs":
+        return _handle_runs_command(parsed)
+
+    if parsed.command == "machine-info":
+        return _handle_machine_info_command(parsed)
+
+    return 2
+
+
+def _handle_machine_info_command(parsed) -> int:
+    """Dispatch ``arq-tui machine-info <root>`` — print every
+    source-machine metadata field Arq.app recorded into the
+    destination, plus a comparison with the current host (unless
+    ``--no-compare``)."""
+    from arq_validator.backend import LocalBackend
+    from arq_validator.machine_info import (
+        compare, read_host_info, read_source_info,
+    )
+
+    root: Path = parsed.root
+    if not root.is_dir():
+        print(f"error: root is not a directory: {root}",
+              file=sys.stderr)
+        return 2
+    backend = LocalBackend(root)
+    sources = read_source_info(backend, "/")
+    if not sources:
+        print(
+            f"error: no Arq 7 computer subtrees under {root}",
+            file=sys.stderr,
+        )
+        return 2
+    host = None if parsed.no_compare else read_host_info()
+    out = {
+        "destination_root": str(root),
+        "host": (
+            None if host is None
+            else {
+                "hostname": host.hostname,
+                "computer_name": host.computer_name,
+                "username": host.username,
+                "os_name": host.os_name,
+                "os_version": host.os_version,
+            }
+        ),
+        "computers": [],
+    }
+    for src in sources:
+        comp = {
+            "computer_uuid": src.computer_uuid,
+            "computer_name": src.computer_name,
+            "os_type": src.os_type,
+            "os_version": src.os_version,
+            "arq_version": src.arq_version,
+            "plan_name": src.plan_name,
+            "folder_count": src.folder_count,
+        }
+        if host is not None:
+            m = compare(src, host)
+            comp["match"] = {
+                "computer_name": m.computer_name,
+                "os_type": m.os_type,
+                "os_version": m.os_version,
+                "verdict": (
+                    "strong" if m.is_strong_match()
+                    else "weak-or-mixed"
+                ),
+            }
+        out["computers"].append(comp)
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _handle_runs_command(parsed) -> int:
+    """Dispatch ``arq-tui runs <subcommand>`` — the headless
+    equivalent of :class:`~arq_tui.screens.runs_monitor.RunsMonitorScreen`.
+    Designed for cron-driven monitoring scripts and the operator's
+    shell history.
+    """
+    from .runs import (
+        RunStatus,
+        enumerate_runs,
+        gc_finished_runs,
+        signal_cancel,
+        state_file_path,
+    )
+    sub = parsed.runs_command
+    if sub == "ls":
+        recs = enumerate_runs()
+        if not recs:
+            print("(no runs)")
+            return 0
+        for rec in recs:
+            tag = rec.status
+            name = rec.plan_name or rec.run_id[:12]
+            extra = ""
+            if rec.progress.bytes_total:
+                pct = (
+                    100.0 * rec.progress.bytes_done
+                    / max(rec.progress.bytes_total, 1)
+                )
+                extra = f"  {pct:5.1f}%"
+            print(
+                f"{rec.run_id}  {rec.kind:<8s}  {tag:<10s}  "
+                f"{name}{extra}"
+            )
+        return 0
+    if sub == "show":
+        path = state_file_path(parsed.run_id)
+        if not path.is_file():
+            print(f"error: no such run: {parsed.run_id}",
+                  file=sys.stderr)
+            return 2
+        print(path.read_text(encoding="utf-8"))
+        return 0
+    if sub == "cancel":
+        for rec in enumerate_runs():
+            if rec.run_id != parsed.run_id:
+                continue
+            if signal_cancel(rec):
+                print(f"signaled SIGTERM to pid {rec.pid}")
+                return 0
+            print(
+                f"error: pid {rec.pid} not alive (or no permission)",
+                file=sys.stderr,
+            )
+            return 4
+        print(f"error: no such run: {parsed.run_id}", file=sys.stderr)
+        return 2
+    if sub == "gc":
+        n = gc_finished_runs(
+            older_than_sec=parsed.older_than_days * 86400,
+        )
+        print(f"removed {n} state file(s)")
+        return 0
     return 2

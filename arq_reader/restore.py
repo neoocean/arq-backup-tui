@@ -25,6 +25,7 @@ that try to escape the backup root are rejected before any I/O.
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 from dataclasses import dataclass, field
@@ -142,6 +143,44 @@ def _build_path_filter(paths: Optional[List[str]]) -> Optional[_PathFilter]:
     if paths is None:
         return None
     return _PathFilter.from_paths(paths)
+
+
+def _parse_backuprecord(plain: bytes) -> Dict[str, Any]:
+    """Parse the decrypted backuprecord payload, accepting either
+    Apple's binary plist (what our writer produces) or UTF-8 JSON
+    (what Arq.app produces in practice on real destinations —
+    discovered against a Hetzner Storage Box where the operator's
+    record bytes started with ``{"backupFolderUUID":"…"}`` rather
+    than the ``bplist00`` magic).
+
+    Both formats decode into a dict with the same shape (``node``
+    + sidecar metadata), so callers don't need to know which one
+    they got. We try plist first since our own round-trip tests
+    rely on it; if that raises ``InvalidFileException`` we fall
+    back to JSON.
+    """
+    try:
+        record = plistlib.loads(plain)
+        if isinstance(record, dict):
+            return record
+    except plistlib.InvalidFileException:
+        pass
+    # Try JSON. Arq.app emits UTF-8 with no BOM, so plain decode is
+    # enough; bytes that aren't valid UTF-8 will raise here and the
+    # caller's traceback points back at the source bytes for
+    # diagnosis.
+    try:
+        record = json.loads(plain.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"backuprecord is neither binary plist nor UTF-8 JSON: "
+            f"{exc}; first 32 bytes = {plain[:32]!r}"
+        ) from exc
+    if not isinstance(record, dict):
+        raise ValueError(
+            f"backuprecord JSON is not an object: type={type(record).__name__}"
+        )
+    return record
 
 
 def _emit(cb: Optional[ProgressCb], kind: str, **payload: object) -> None:
@@ -276,6 +315,7 @@ class Restore:
         return BlobLoc(
             blobIdentifier=d.get("blobIdentifier", "") or "",
             isPacked=bool(d.get("isPacked", False)),
+            isLargePack=bool(d.get("isLargePack", False)),
             relativePath=d.get("relativePath", "") or "",
             offset=int(d.get("offset", 0)),
             length=int(d.get("length", 0)),
@@ -623,7 +663,7 @@ class Restore:
             record_arqo, keyset.encryption_key, keyset.hmac_key,
             openssl_path=self.openssl_path,
         )
-        record = plistlib.loads(record_plain)
+        record = _parse_backuprecord(record_plain)
         node_dict = record.get("node")
         if not isinstance(node_dict, dict):
             raise ValueError("backuprecord missing or malformed `node` field")

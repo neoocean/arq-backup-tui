@@ -131,6 +131,14 @@ async def _cmd_browse(app: "ArqTuiApp", arg: str) -> str:
     return ""
 
 
+async def _cmd_activity(app: "ArqTuiApp", arg: str) -> str:
+    from .screens.runs_monitor import RunsMonitorScreen
+    if app.console_widget is not None:
+        app.console_widget.close()
+    app.push_screen(RunsMonitorScreen())
+    return ""
+
+
 async def _cmd_validate(app: "ArqTuiApp", arg: str) -> str:
     # Validation runs against an opened destination, which is
     # owned by BackupSetListScreen. Mirror what HomeScreen's [v]
@@ -255,6 +263,10 @@ _COMMANDS: List[_Command] = [
     _Command(
         "browse", "open the backup-set browser",
         _cmd_browse, aliases=("b",),
+    ),
+    _Command(
+        "activity", "open the runs / activity monitor",
+        _cmd_activity, aliases=("a", "runs"),
     ),
     _Command(
         "validate", "validate an opened destination",

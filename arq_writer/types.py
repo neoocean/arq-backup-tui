@@ -25,6 +25,12 @@ class BlobLoc:
 
     blobIdentifier: str            # SHA-256 hex (lowercase)
     isPacked: bool = False
+    # Distinguishes ``largeblobpacks/`` blobs from ``treepacks/`` /
+    # ``blobpacks/`` ones. The on-disk binary layout puts this flag
+    # immediately after ``isPacked``; mirrored on the JSON side as
+    # ``isLargePack``. Defaults to False so writers that don't route
+    # to largeblobpacks produce the same byte sequence as before.
+    isLargePack: bool = False
     relativePath: str = ""
     offset: int = 0
     length: int = 0
