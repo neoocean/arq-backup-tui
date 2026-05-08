@@ -981,6 +981,7 @@ def build_backup(
     dedup_against_existing: bool = False,
     max_file_bytes: Optional[int] = None,
     exclusions=None,
+    use_apfs_snapshot: bool = False,
 ) -> BackupResult:
     """One-shot convenience wrapper: full plan init + single folder.
 
@@ -1020,9 +1021,40 @@ def build_backup(
         exclusions=exclusions,
     )
     bk.init_plan()
-    rec_path = bk.add_folder(
-        Path(source), folder_uuid=folder_uuid, folder_name=folder_name,
-    )
+
+    # Optional: walk an APFS snapshot of the source instead of the
+    # live filesystem, so file content can't shift mid-walk. macOS
+    # only — falls through to live source on Linux / non-APFS.
+    if use_apfs_snapshot:
+        from .macos_snapshot import (
+            NotMacOSError, with_apfs_snapshot,
+        )
+        try:
+            with with_apfs_snapshot(Path(source)) as snap_path:
+                rec_path = bk.add_folder(
+                    snap_path,
+                    folder_uuid=folder_uuid,
+                    folder_name=(
+                        folder_name or Path(source).name
+                    ),
+                )
+        except NotMacOSError:
+            # Fall back to the live walk — opt-in only enables the
+            # snapshot when supported, doesn't fail otherwise.
+            _emit(callback, "apfs_snapshot_skipped",
+                  reason="not_macos",
+                  source=str(source))
+            rec_path = bk.add_folder(
+                Path(source),
+                folder_uuid=folder_uuid,
+                folder_name=folder_name,
+            )
+    else:
+        rec_path = bk.add_folder(
+            Path(source),
+            folder_uuid=folder_uuid,
+            folder_name=folder_name,
+        )
     finished = time.time()
     return BackupResult(
         dest_root=Path(dest_root).resolve(),
