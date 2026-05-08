@@ -61,13 +61,24 @@ class ProgressPanel(Widget):
     finished: reactive[bool] = reactive(False)
     failed: reactive[bool] = reactive(False)
     error_message: reactive[str] = reactive("")
+    # Optional total budget — set when the worker can plan ahead
+    # (e.g. Restore.restore(plan_totals=True) emits restore_planned).
+    # Zero means "no plan", in which case the ETA line stays blank.
+    total_bytes: reactive[int] = reactive(0)
+    total_files: reactive[int] = reactive(0)
 
     LOG_TAIL = 50
+    # Sliding window for throughput / ETA. Each sample is
+    # (monotonic_t, bytes_seen). 30 s of history smooths out
+    # bursty single-file drops without lagging too far behind a
+    # real slowdown.
+    _RATE_WINDOW_SEC = 30.0
 
     def __init__(self) -> None:
         super().__init__()
         self._log: Deque[str] = collections.deque(maxlen=self.LOG_TAIL)
         self._t_start = time.monotonic()
+        self._rate_samples: Deque[tuple] = collections.deque()
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -77,6 +88,7 @@ class ProgressPanel(Widget):
             yield Static("Bytes plaintext:  0 B", id="line-bytes-plain", classes="stat-line")
             yield Static("Bytes on disk:    0 B", id="line-bytes-disk", classes="stat-line")
             yield Static("Throughput:       0 B/s", id="line-throughput", classes="stat-line")
+            yield Static("", id="line-eta", classes="stat-line")
             yield Static("", id="current")
             yield Static("", id="log-tail")
             yield Static("", id="status")
@@ -130,11 +142,69 @@ class ProgressPanel(Widget):
             )
 
     def _update_throughput(self) -> None:
-        elapsed = max(time.monotonic() - self._t_start, 0.001)
-        rate = self.bytes_plaintext / elapsed
+        now = time.monotonic()
+        # Drop samples older than the window and append the current
+        # observation so the rate reflects the recent past, not the
+        # whole run. A bursty start no longer makes the ETA wildly
+        # optimistic five minutes in.
+        self._rate_samples.append((now, self.bytes_plaintext))
+        cutoff = now - self._RATE_WINDOW_SEC
+        while (
+            self._rate_samples and self._rate_samples[0][0] < cutoff
+        ):
+            self._rate_samples.popleft()
+        if len(self._rate_samples) >= 2:
+            t0, b0 = self._rate_samples[0]
+            t1, b1 = self._rate_samples[-1]
+            rate = max((b1 - b0), 0) / max((t1 - t0), 0.001)
+        else:
+            elapsed = max(now - self._t_start, 0.001)
+            rate = self.bytes_plaintext / elapsed
         self.query_one("#line-throughput", Static).update(
             f"Throughput:      {_human_bytes(int(rate))}/s"
         )
+        self._update_eta(rate)
+
+    def _update_eta(self, rate: float) -> None:
+        """Render the ETA line.
+
+        Hidden when no plan has been emitted (``total_bytes == 0``)
+        or when the rate is too small to give a sensible estimate.
+        Otherwise show ``H:MM:SS`` of remaining wall time.
+        """
+        line = self.query_one("#line-eta", Static)
+        if self.total_bytes <= 0 or rate <= 0:
+            line.update("")
+            return
+        remaining = max(self.total_bytes - self.bytes_plaintext, 0)
+        seconds = remaining / rate
+        # Cap absurdly large ETAs (huge file, tiny initial rate)
+        # so the output stays readable.
+        if seconds > 99 * 3600:
+            line.update(
+                f"ETA:             >99h "
+                f"({_human_bytes(remaining)} left)"
+            )
+            return
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        pct = 100.0 * self.bytes_plaintext / self.total_bytes
+        line.update(
+            f"ETA:             {h:d}:{m:02d}:{s:02d} "
+            f"(progress {pct:5.1f}%, "
+            f"{_human_bytes(remaining)} left)"
+        )
+
+    def watch_total_bytes(self, value: int) -> None:
+        # Re-render the ETA line as soon as a plan lands so the user
+        # gets feedback before bytes start ticking in.
+        if value > 0:
+            line = self.query_one("#line-eta", Static)
+            line.update(
+                f"ETA:             — "
+                f"(0.0%, {_human_bytes(value)} planned)"
+            )
 
     # ------------------------------------------------------------------
     # External event sink
@@ -157,6 +227,13 @@ class ProgressPanel(Widget):
         - ``file_restored`` / ``tree_restored`` (reader)
         - ``audit_progress`` etc. (validator) — log-only by default
         """
+        if kind == "restore_planned":
+            # Pre-walk emitted by Restore.restore(plan_totals=True).
+            # Sets the budget the ETA uses; further ticks update the
+            # remaining estimate.
+            self.total_files = int(payload.get("total_files") or 0)
+            self.total_bytes = int(payload.get("total_bytes") or 0)
+            return
         if kind == "file_written":
             self.files_written += 1
             self.bytes_plaintext += int(payload.get("size") or 0)

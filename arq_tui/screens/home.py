@@ -39,6 +39,7 @@ class HomeScreen(Screen):
 
     BINDINGS = [
         Binding("n", "new_plan", "New plan", show=True),
+        Binding("e", "edit_focused", "Edit focused plan", show=True),
         Binding("r", "run_focused", "Run focused plan", show=True),
         Binding("b", "browse", "Browse backup sets", show=True),
         Binding("v", "validate", "Validate", show=True),
@@ -153,15 +154,30 @@ class HomeScreen(Screen):
         )
 
     def action_run_focused(self) -> None:
+        plan = self._focused_plan()
+        if plan is None:
+            return
+        self._run_plan(plan)
+
+    def action_edit_focused(self) -> None:
+        plan = self._focused_plan()
+        if plan is None:
+            return
+        from .plan_wizard import PlanWizardScreen
+        self.app.push_screen(
+            PlanWizardScreen(plan=plan), self._after_wizard,
+        )
+
+    def _focused_plan(self):
+        """Resolve the currently-focused plan, or surface a hint
+        if there are none. Used by both [r] and [e]."""
         plans = self._load_plans()
         if not plans:
             self.notify(
                 "No plans yet — press [n] to create one.",
                 severity="warning",
             )
-            return
-        # ListView has the focused index; use its `.index` if a list
-        # rendered, otherwise default to the first plan.
+            return None
         idx = 0
         try:
             list_view = self.query_one("#plans-list")
@@ -169,8 +185,7 @@ class HomeScreen(Screen):
                 idx = int(list_view.index)
         except Exception:
             pass
-        plan = plans[max(0, min(idx, len(plans) - 1))]
-        self._run_plan(plan)
+        return plans[max(0, min(idx, len(plans) - 1))]
 
     def _refresh_plans(self) -> None:
         # Refresh by recomposing the plans-section from scratch:
