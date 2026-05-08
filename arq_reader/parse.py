@@ -71,6 +71,15 @@ class BinaryReader:
         self.pos += 8
         return v
 
+    def read_raw(self, n: int) -> bytes:
+        """Consume ``n`` raw bytes without interpreting them. Used
+        for opaque trailing fields whose precise structure isn't
+        known yet (e.g. Tree v4's per-node 38-byte extension)."""
+        self._need(n)
+        out = self.data[self.pos : self.pos + n]
+        self.pos += n
+        return out
+
     def read_string(self) -> Optional[str]:
         self._need(1)
         is_not_null = self.data[self.pos]
@@ -183,6 +192,17 @@ def parse_node(reader: BinaryReader, *, tree_version: int):
     if tree_version >= NODE_REPARSE_FIELDS_MIN_TREE_VERSION:
         win_reparse_tag = reader.read_uint32()
         win_reparse_is_dir = reader.read_bool()
+
+    # Tree v4 added a 38-byte trailing block per node whose internal
+    # structure isn't documented in the public spec. Empirical
+    # observation against Arq.app v8 trees on a real Hetzner
+    # destination: every byte of this block is zero for typical
+    # files, and consuming it as opaque bytes makes the parser
+    # re-align with the next child. The exact field decomposition
+    # (likely some combination of new timestamps / flags / a null
+    # BlobLoc) can be filled in once Arq.app source can be RE'd.
+    if tree_version >= 4:
+        reader.read_raw(38)
 
     common = dict(
         itemSize=item_size,
