@@ -72,6 +72,15 @@ class Backend(Protocol):
         ``sftp put``."""
         ...
 
+    def unlink(self, path: str) -> None:
+        """Delete a single file at ``path``.
+
+        Required by retention / blob GC. Missing-target should
+        be silent (``rm -f`` semantics) so a re-run after a
+        partial GC is idempotent.
+        """
+        ...
+
 
 class LocalBackend:
     """Local filesystem backend rooted at a directory.
@@ -139,6 +148,17 @@ class LocalBackend:
             return self._resolve(path).is_dir()
         except (PermissionError, OSError):
             return False
+
+    def unlink(self, path: str) -> None:
+        """Delete a file. Missing-target = silent OK (mirror unix
+        ``rm -f`` semantics so a re-run after a partial GC doesn't
+        explode)."""
+        rel = path.lstrip("/")
+        full = self.root / rel
+        try:
+            full.unlink()
+        except FileNotFoundError:
+            pass
 
     def mkdir(
         self, path: str, *,

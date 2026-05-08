@@ -47,6 +47,15 @@ from .macos_snapshot import (
     is_macos_apfs,
     with_apfs_snapshot,
 )
+from .retention import (
+    GcResult,
+    PruneRecordsResult,
+    RetentionPolicy,
+    RetentionResult,
+    apply_retention,
+    gc_orphan_blobs,
+    prune_records,
+)
 from .types import BlobLoc, FileNode, Tree, TreeNode
 
 __all__ = [
@@ -56,13 +65,20 @@ __all__ = [
     "BlobLoc",
     "ExclusionRules",
     "FileNode",
+    "GcResult",
     "NotMacOSError",
+    "PruneRecordsResult",
+    "RetentionPolicy",
+    "RetentionResult",
     "SnapshotError",
     "SnapshotInfo",
     "Tree",
     "TreeNode",
+    "apply_retention",
+    "gc_orphan_blobs",
     "is_macos",
     "is_macos_apfs",
+    "prune_records",
     "with_apfs_snapshot",
     "build_encrypted_keyset",
     "build_encrypted_object",
