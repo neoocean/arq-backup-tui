@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import os
 import plistlib
-from arq_writer.backuprecord import parse_backuprecord as _parse_record
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -47,6 +46,14 @@ from .constants import (
 from .types import BlobLoc
 
 BLOB_ID_HEX_LEN = 64
+
+
+
+def _parse_record(plain):
+    # Lazy import — backuprecord lives in the same package so a top-
+    # level import would close the cycle through arq_writer/__init__.
+    from arq_writer.backuprecord import parse_backuprecord
+    return parse_backuprecord(plain)
 
 
 def _is_blob_id_path(shard: str, rest: str) -> bool:

@@ -33,7 +33,6 @@ import hashlib
 import hmac as _hmac
 import json
 import plistlib
-from arq_writer.backuprecord import parse_backuprecord as _parse_record
 import re
 import struct
 from dataclasses import dataclass, field
@@ -47,6 +46,14 @@ from .crypto import decrypt_keyset
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
+
+
+def _parse_record(plain):
+    # Lazy import to avoid arq_validator/__init__ → arq_writer/__init__
+    # circular import.
+    from arq_writer.backuprecord import parse_backuprecord
+    return parse_backuprecord(plain)
+
 
 
 @dataclass
