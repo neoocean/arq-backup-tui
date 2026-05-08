@@ -29,6 +29,7 @@ from arq_validator import (
     check_arq7_compatibility,
 )
 from arq_writer import Backup, build_backup
+from arq_writer.backuprecord import parse_backuprecord as _parse_record
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +423,7 @@ class SpecLevelFieldValues(unittest.TestCase):
                 "pw",
             )
             arqo = Path(r.backuprecord_path).read_bytes()
-            plist = plistlib.loads(decrypt_lz4_arqo(
+            plist = _parse_record(decrypt_lz4_arqo(
                 arqo, keyset.encryption_key, keyset.hmac_key,
             ))
             self.assertEqual(plist["version"], 100)

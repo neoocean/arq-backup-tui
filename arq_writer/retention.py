@@ -46,6 +46,7 @@ from arq_validator import constants as C
 from arq_validator.backend import Backend
 from arq_validator.crypto import decrypt_keyset
 from arq_validator.layout import discover_layout, list_backuprecords
+from arq_writer.backuprecord import parse_backuprecord as _parse_record
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +172,7 @@ def _record_creation_date(
             arqo, keyset.encryption_key, keyset.hmac_key,
             openssl_path=openssl_path,
         )
-        record = plistlib.loads(plain)
+        record = _parse_record(plain)
     except Exception:
         return 0
     if isinstance(record, dict):
@@ -325,7 +326,7 @@ def _collect_referenced_blobs(
                     keyset.encryption_key, keyset.hmac_key,
                     openssl_path=openssl_path,
                 )
-                rec = plistlib.loads(plain)
+                rec = _parse_record(plain)
             except Exception:
                 # Don't lose blobs on a single corrupt record —
                 # skip it and assume its blobs are still live.
@@ -616,7 +617,7 @@ def _collect_live_pack_paths(
                     keyset.encryption_key, keyset.hmac_key,
                     openssl_path=openssl_path,
                 )
-                rec = plistlib.loads(plain)
+                rec = _parse_record(plain)
             except Exception:
                 continue
             if not isinstance(rec, dict):
