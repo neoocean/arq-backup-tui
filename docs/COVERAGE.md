@@ -19,9 +19,11 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with tree-walk reuse |
 | Operate           | ⚠️ Library only — schedule, throttling, notifications, GUI/TUI all absent |
 
-The aggregate test count is **213 unit tests** at the time this
-table was last updated; the suite runs in ~32 s on a stdlib-only
-toolchain (``python -m unittest discover``).
+The aggregate test count is **250 unit tests** at the time this
+table was last updated; the suite runs in ~80 s on a stdlib-only
+toolchain (``python -m unittest discover``). 24 of those are TUI
+tests that require the optional ``textual`` dep — without it they
+auto-skip and the rest of the suite (library + RE) runs cleanly.
 
 ## Detailed feature matrix
 
@@ -198,7 +200,7 @@ the FUSE mount.
 | ``arq-backup`` CLI (one-shot backup)                          |  ✅    | ``arq_writer.cli`` |
 | ``arq-reader`` CLI (one-shot restore + listing)               |  ✅    | ``arq_reader.cli`` |
 | ``arq-buzhash-find`` CLI (RE toolkit subcommands)             |  ✅    | ``arq_writer.buzhash_re_cli`` |
-| TUI (interactive frontend)                                    |  ❌    | Mentioned in DESIGN.md, not yet implemented |
+| TUI (interactive frontend)                                    |  ✅    | Full M1–M6 stack landed: ``arq_tui`` package + Textual ``ArqTuiApp``. Screens: Home (plan list + quick actions) / PlanWizard (multi-source create) / BackupSetList (local + SFTP browser) / RecordBrowser (lazy tree walk + per-file metadata + mark/restore) / BackupRun + RestoreRun + ValidateRun (live progress via the ``WorkerEvent`` bridge). Activated via ``pip install -e ".[tui]"`` then ``arq-tui`` |
 | Progress callback hooks (suitable for any frontend)           |  ✅    | All three components emit ``ProgressCb(kind, payload)`` events |
 
 ### 10. Reverse-engineering tooling

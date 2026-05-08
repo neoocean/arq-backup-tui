@@ -21,8 +21,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Install package (stdlib-only, no deps to install)
-        run: pip install -e ".[test]"
+      - name: Install package + TUI extras
+        # Library code is stdlib-only; the [tui] extra brings
+        # textual so the M1+ TUI smoke tests run too. Tests for the
+        # core libraries auto-skip the textual-dependent cases when
+        # the extra is missing -- see tests/test_tui_m1_smoke.py.
+        run: pip install -e ".[test,tui]"
       - name: Run unittest discover (topdir = repo root)
         run: python -m unittest discover
       - name: Run unittest discover (topdir = tests dir)

@@ -28,14 +28,29 @@ classifiers = [
 # valid no-op invocation that CI can rely on.
 test = []
 
+# TUI frontend. Only the arq_tui/ package depends on textual; the
+# library packages stay stdlib-only so embedders aren't pulled into
+# the rich + textual dep tree.
+tui = ["textual>=0.50"]
+
+# Optional keyring integration for SFTP / encryption-password
+# storage. Off by default; users opt in if they prefer
+# OS-keyring-backed credentials over the in-memory session cache.
+tui-keyring = ["textual>=0.50", "keyring>=24"]
+
 [project.scripts]
 arq-validator = "arq_validator.cli:main"
 arq-backup = "arq_writer.cli:main"
 arq-reader = "arq_reader.cli:main"
 arq-buzhash-find = "arq_writer.buzhash_re_cli:main"
+arq-tui = "arq_tui.__main__:main"
 
 [tool.setuptools]
-packages = ["arq_validator", "arq_writer", "arq_reader"]
+packages = [
+    "arq_validator", "arq_writer", "arq_reader",
+    "arq_tui", "arq_tui.screens", "arq_tui.widgets",
+]
 
 [tool.setuptools.package-data]
 arq_validator = ["py.typed"]
+arq_tui = ["theming.css"]
