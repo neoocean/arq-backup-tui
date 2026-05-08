@@ -468,3 +468,16 @@ class SftpBackend:
                 os.unlink(tmp_local)
             except OSError:
                 pass
+
+    def unlink(self, path: str) -> None:
+        """``rm -f <path>`` over the SSH master. Missing target =
+        silent OK (matches ``rm -f`` semantics so a re-run is
+        idempotent)."""
+        self._require_open()
+        path = self._resolve(path)
+        cp = self._run_ssh(f"rm -f {shlex.quote(path)}")
+        if cp.returncode != 0:
+            err = (cp.stderr.decode(errors="replace") or "").strip()[:300]
+            raise RuntimeError(
+                f"sftp unlink {path}: rc={cp.returncode} err={err}"
+            )
