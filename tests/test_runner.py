@@ -21,7 +21,7 @@ from arq_validator import (
     validate,
 )
 
-from .fixtures import write_synthetic_backup
+from tests.fixtures import write_synthetic_backup
 
 
 class RunnerHappyPathTests(unittest.TestCase):

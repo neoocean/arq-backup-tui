@@ -17,7 +17,7 @@ from arq_validator.crypto import (
     verify_multi_object_arqos,
 )
 
-from .fixtures import (
+from tests.fixtures import (
     aes_256_cbc_encrypt,
     make_arqo,
     make_encrypted_keyset,

@@ -15,7 +15,7 @@ from arq_validator.layout import (
     object_path,
 )
 
-from .fixtures import write_synthetic_backup
+from tests.fixtures import write_synthetic_backup
 
 
 class LayoutDiscoveryTests(unittest.TestCase):

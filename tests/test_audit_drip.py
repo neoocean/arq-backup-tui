@@ -19,7 +19,7 @@ from arq_validator.audit_drip import (
 )
 from arq_validator.layout import discover_layout
 
-from .fixtures import write_synthetic_backup
+from tests.fixtures import write_synthetic_backup
 
 
 class WalkAndCursorTests(unittest.TestCase):
