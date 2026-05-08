@@ -1,5 +1,10 @@
 # 실제 SFTP destination 기반 호환성 테스트
 
+> **Status (2026-05-08)**: ✅ PR #9 에서 구현됨. 본 문서는 harness
+> (`tests/integration/test_arqapp_sftp_compat.py`, `tests/integration/_creds.py`,
+> `.env.example`) 의 운영자 워크플로 사양입니다. 7 개의 통합 테스트가 기본 환경에서는
+> skip 되고, `.env` 자격증명을 제공한 운영자에게만 실행됩니다.
+
 본 문서는 운영자가 **실제 운영 중인 Arq 7 SFTP destination**을
 sandbox에서 사용하여 reader / validator / fingerprint의 호환성을
 자동 검증하는 절차를 정의합니다. `docs/COMPAT-VERIFICATION.md`

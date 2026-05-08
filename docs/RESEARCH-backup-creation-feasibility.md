@@ -1,5 +1,12 @@
 # Arq Backup Creation Feasibility — Research Notes
 
+> **Status (2026-05-08)**: ✅ Implemented. The capabilities investigated below
+> all shipped — see `arq_writer/` for the v0 unpacked + v7.41-matched packed
+> implementations. Pack containers + the Buzhash chunker were RE'd successfully
+> (Mach-O scan in `macho_buzhash_finder.py` + behavioural inference). Retention
+> + blob GC landed in PR #11. This document is preserved as the original
+> feasibility research; current state lives in `DESIGN.md` §9 + `COVERAGE.md`.
+
 ## Executive summary
 
 Building an Arq-7-format backup *writer* is realistic for a constrained

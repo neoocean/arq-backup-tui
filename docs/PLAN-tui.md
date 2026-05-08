@@ -83,29 +83,35 @@ Install: `pip install -e ".[tui]"` 만 추가. CLI / 라이브러리는
 
 ```
 arq_tui/
-├── __init__.py              # 진입점 + Textual App 클래스
+├── __init__.py              # ArqTuiApp 노출
 ├── __main__.py              # python -m arq_tui
 ├── app.py                   # ArqTuiApp(textual.App) 정의
+├── backend_open.py          # LocalBackend / SftpBackend open/close
+├── cli.py                   # plans list/show/delete 헤드리스 서브커맨드
 ├── screens/
 │   ├── __init__.py
 │   ├── home.py              # 대시보드
-│   ├── plan_wizard.py       # 새 백업 플랜 작성 흐름
+│   ├── plan_wizard.py       # 새 백업 플랜 작성 흐름 (6 단계, Advanced 포함)
 │   ├── backup_run.py        # 백업 실행 + 진행
-│   ├── backup_set_list.py   # 로컬/원격 destination 목록
+│   ├── backup_sets.py       # 로컬/원격 destination 목록 + [m] maintenance 진입
 │   ├── record_browser.py    # 한 record 내부 트리 walk
 │   ├── restore_run.py       # 복원 실행 + 진행
-│   └── validate_run.py      # 4-tier 검증 + audit-drip
+│   ├── validate_run.py      # 4-tier 검증 + audit-drip
+│   ├── maintenance.py       # 비밀번호 회전 + retention 적용 (PR #12)
+│   └── help.py
 ├── widgets/
 │   ├── __init__.py
 │   ├── progress_panel.py    # backup/restore/validate 공용
-│   ├── tree_view.py         # tree blob walk 시각화
 │   ├── source_picker.py     # 소스 폴더 다중 선택
-│   ├── destination_picker.py# local path / SFTP 입력
-│   └── log_pane.py          # 이벤트 스트림 표시
-├── state.py                 # 영속 상태 (plan registry, 최근 사용 정보)
-├── credentials.py           # 비밀번호 관리 (prompt or keyring)
-├── workers.py               # asyncio 스레드 작업 + ProgressCb 브리지
-└── theming.css              # 색상, 키 바인딩, 레이아웃
+│   ├── destination_modal.py # local path / SFTP 입력 모달
+│   ├── password_modal.py    # 비밀번호 prompt 모달
+│   └── restore_target_modal.py
+├── state.py                 # Plan / Destination / PlanRegistry / DestinationStore / CredentialCache
+├── workers.py               # 스레드 작업 + ProgressCb 브리지 (BackupWorker / RestoreWorker / ValidateWorker)
+└── theming.css              # 색상, 여백 등 CSS
+
+# 추가로 repo 루트에:
+arq-tui.py                   # 루트 진입점 (./arq-tui.py 로 즉시 실행 가능)
 ```
 
 `arq_tui/` 는 `arq_validator` / `arq_reader` / `arq_writer` 를 import
@@ -146,23 +152,27 @@ destination 의 가장 최근 backuprecord 의 mtime 으로 결정 (프롬프트
 
 ### 4.2 Plan wizard (`plan_wizard.py`)
 
-`ModalScreen` 으로 5 단계:
+`Screen` 으로 6 단계 (PR #12 에서 5 → 6 단계로 확장):
 
-1. **Sources** — `SourcePicker` 위젯. 트리 뷰에서 다중 선택, gitignore-
-   style 필터는 v1 에서는 미구현 (전체 폴더). 사용자가 선택한
+1. **Sources** — `SourcePicker` 위젯. 트리 뷰에서 다중 선택. 사용자가 선택한
    absolute path 들을 누적.
 2. **Destination** — `DestinationPicker`:
    - 로컬: 디렉터리 선택기
    - SFTP: host / port / user / 인증 방식 (password / identity_file) /
      remote root path
-3. **Encryption** — 비밀번호 입력 (확인 포함, masked). 처음 생성하는
-   destination 이면 새 keyset, 기존 destination 이면 prompt 후
-   `_try_load_existing_keyset` 로 기존 keyset 사용.
+3. **Encryption** — 비밀번호 입력 (확인 포함, masked). 세션 동안
+   `CredentialCache` 에 캐시되어 mid-run prompt 가 발생하지 않음.
 4. **Chunker** — 라디오:
    - "Generic Buzhash (default)" — `ChunkerConfig()` 기본값
    - "Match Arq.app v7.41" — `arq_writer.arq_chunker_params` import
    - "No chunking (single blob per file)" — `chunker_config=None`
-5. **Review + Save** — 요약 표시, 플랜 이름 입력, 저장.
+   + Storage layout (packs vs standalone) + Cross-run dedup (on/off) 라디오.
+5. **Advanced** (PR #12) — 모두 optional:
+   - Exclude wildcards / regexes / .gitignore lines (각 TextArea, 한 줄당 한 패턴)
+   - Skip files larger than (bytes; 빈칸 = 무제한)
+   - Use APFS snapshot (macOS only; non-macOS 면 자동 fallback)
+   - Retention 정책: keep_last_n / keep_daily / keep_weekly / keep_monthly / keep_yearly
+6. **Review + Save** — 요약 표시, 플랜 이름 입력, 저장.
 
 저장 위치: `~/.config/arq-backup-tui/plans/<plan-id>.json` (비밀번호
 미저장; SFTP 자격증명은 §2.3 정책에 따름).
@@ -205,7 +215,7 @@ destination 의 가장 최근 backuprecord 의 mtime 으로 결정 (프롬프트
 - 취소: `Esc` → worker 에 cancel 이벤트 → 현재 진행 중 chunk 종료 후
   pack flush + 부분 backuprecord 작성 안 함 (안전한 abort).
 
-### 4.4 Backup set list (`backup_set_list.py`)
+### 4.4 Backup set list (`backup_sets.py`)
 
 소스: 등록된 destination 목록 (플랜에서 추출) + 최근 직접 입력
 destination.
@@ -224,9 +234,12 @@ computer_uuid → folder_uuid → backuprecord 트리.
 │                        │     ◦ 2026-05-06 03:14            │
 │                        │   ▶ Folder 2: docs-to-...         │
 │                        │ ▶ B832-... (workstation)          │
-│ [Esc] back  [Enter] open record                            │
+│ [a] add  [v] validate  [m] maintenance  [Esc] back         │
 └────────────────────────────────────────────────────────────┘
 ```
+
+키 바인딩 `[m]` (PR #12): 현재 destination 의 캐시된 비밀번호로
+`MaintenanceScreen` (§4.8) 진입.
 
 라이브러리 사용:
 
@@ -296,6 +309,28 @@ audit-drip 모드일 때 추가:
 - state file 경로
 - throttle (max bytes/s, max wall-clock)
 - pause / resume 버튼
+
+### 4.8 Maintenance (`maintenance.py`, PR #12)
+
+진입: backup-set browser 에서 destination 선택 후 `[m]`. 두 가지
+운영 작업을 한 화면에서 제공합니다 — 모두 destination 의 캐시된 비밀번호와
+이미 열린 백엔드를 재사용하므로 mid-flow 자격증명 재입력 없음.
+
+1. **Rotate keyset password** — 현재/새 비밀번호 입력 후 "Rotate password"
+   버튼. 내부적으로 `arq_writer.rotate_keyset_password(blob, old_password,
+   new_password)` 가 `<computer-uuid>/encryptedkeyset.dat` 만 재암호화
+   ((encryption_key, hmac_key, blob_id_salt) 는 보존). 기존 backuprecord /
+   blob 은 그대로 복호화 가능. 작업 후 `CredentialCache` 의 새 비밀번호로
+   갱신.
+2. **Apply retention** — keep_last_n / keep_daily / keep_weekly /
+   keep_monthly / keep_yearly 입력 + "Dry run / Real run" 라디오 +
+   "Run blob GC after pruning" 토글. `apply_retention(backend,
+   encryption_password=..., policy=RetentionPolicy(...), run_gc=...,
+   dry_run=...)` 호출. 콜백 이벤트 (`record_deleted`, `blob_deleted`,
+   `pack_deleted`) 가 화면 하단 로그 패널에 스트림.
+
+두 작업 모두 sibling 스레드에서 실행되며 결과는 `call_from_thread` 로
+이벤트 루프에 marshal — UI 가 응답성을 잃지 않습니다.
 
 ## 5. 진행 콜백 통합
 
@@ -370,33 +405,51 @@ ProgressPanel 이 deque(60) 윈도우로 EMA 계산.
 
 ### 6.2 Plan JSON 스키마
 
+PR #12 에서 Advanced 단계 필드를 추가한 후의 최종 형태:
+
 ```json
 {
   "plan_id": "UUID",
   "name": "home-laptop-to-nas",
   "sources": ["/home/me/Documents", "/home/me/Pictures"],
+  "destination_kind": "local",      // "local" | "sftp"
   "destination": {
-    "kind": "local",
     "path": "/Volumes/arqbackup1"
   },
-  "computer_uuid": "...",          // 첫 실행 후 채워짐
-  "chunker": "arq_v7_41",          // "default" | "arq_v7_41" | "none"
+  "chunker": "arq_v7_41",           // "default" | "arq_v7_41" | "none"
+  "per_source_chunkers": {},        // optional: source path → chunker name
   "use_packs": true,
   "dedup_against_existing": true,
+  "exclude_globs": ["*.log", "__pycache__"],
+  "exclude_regexes": [],
+  "exclude_gitignore_lines": ["build/", "!build/keep.txt"],
+  "max_file_bytes": null,           // null = no limit; integer = cutoff
+  "use_apfs_snapshot": false,        // macOS only; non-macOS 면 자동 fallback
+  "retention": {                    // 빈 dict = 전부 보존
+    "keep_last_n": 10,
+    "keep_daily": 7,
+    "keep_weekly": 0,
+    "keep_monthly": 0,
+    "keep_yearly": 0
+  },
   "last_run_iso": "2026-05-08T03:14:22Z"
 }
 ```
 
+기존 (M3) 플랜 JSON 은 advanced 필드가 빠져 있어도 default-empty 값으로
+하위호환 로딩 (PR #12 에서 추가된 `test_legacy_plan_loads_with_default_advanced_fields`
+회귀 테스트가 보증).
+
 SFTP destination 의 경우:
 
 ```json
+"destination_kind": "sftp",
 "destination": {
-  "kind": "sftp",
   "host": "u123.your-storagebox.de",
   "port": 23,
   "user": "u123",
   "identity_file": "~/.ssh/id_ed25519",
-  "remote_root": "/home/u123/arq"
+  "path": "/home/u123/arq"          // remote root (필드명 통일)
 }
 ```
 
@@ -503,36 +556,29 @@ SFTP destination 의 경우:
 Textual `pilot.snapshot()` 으로 주요 화면의 ASCII 스냅샷을 저장,
 회귀 방지.
 
-## 10. 라이브러리 측 보강 사항
+## 10. 라이브러리 측 보강 사항 (모두 구현 완료)
 
-TUI 가 임베드하면서 발견될 작은 라이브러리 갭들. 본 단계에서
-같이 처리:
+TUI 가 임베드하면서 발견된 작은 라이브러리 갭들 — 모두 구현됨:
 
-1. **`Restore.list_records(folder_uuid) -> List[RecordInfo]`** —
-   현재는 latest 한 개만 반환. M2 에서 history 를 보여주려면
-   필요. 라이브러리 1 메서드 추가.
-2. **`Restore.restore(*, backuprecord_path=...)` 옵션** — 특정
-   historical record 복원. M4 에서 필요.
-3. **`Restore.restore(*, paths=[...])` 옵션** — 단일 경로 또는
-   path 패턴 복원. M4.
-4. **`Backup.cancel()`** — graceful cancel. M3.
+1. **`Restore.list_records(folder_uuid) -> List[RecordInfo]`** ✅
+2. **`Restore.restore(*, backuprecord_path=...)` 옵션** ✅
+3. **`Restore.restore(*, paths=[...])` 옵션** ✅
+4. **`Backup.cancel()`** ✅
+5. **PR #12 추가**: `MaintenanceScreen` 통합을 위해 다음도 추가됨:
+   - `arq_writer.rotate_keyset_password(blob, old_password, new_password)`
+   - `arq_writer.apply_retention(...)` + `RetentionPolicy`
+   - `Backend.unlink()` (LocalBackend + SftpBackend)
+   - `arq_writer.with_apfs_snapshot()` + `NotMacOSError` (PR #8)
+   - `arq_writer.ExclusionRules` + `Backup(exclusions=..., max_file_bytes=...)`
 
-이 4 가지는 본 plan 에 포함된 별도 작업으로, TUI 작업 시작 전
-선행 PR 로 처리 권장.
+## 11. 해결된 결정 사항
 
-## 11. 미해결 질문
-
-- **로컬 alongside 한국어 UI?** 모든 라벨을 i18n-ready 하게 만들기
-  vs. 한국어 hard-code. 권장: 한국어 hard-code 로 시작, i18n 은
-  별도 단계.
-- **mtime / mode 복원 추가?** COVERAGE.md 에서 ⚠️ 로 마크된 항목.
-  TUI 가 restore progress 에서 표시한다면 노출 필요. M4 에서
-  같이 구현 권장.
-- **여러 source 다중 폴더 plan?** 현재 `Backup.add_folder` 는 plan
-  당 multi-folder 가능. wizard 가 다중 source 입력 받게 v1 부터
-  지원할지 결정 필요.
-- **Plan 편집 / 삭제 UI?** v1 에서는 plan 파일 직접 편집으로 충분.
-  v1.x 에서 추가.
+- **로컬 alongside 한국어 UI?** → 한국어 라벨 + 영어 키바인딩 텍스트 hard-code.
+- **mtime / mode 복원?** → 둘 다 ✅ 구현됨 (`os.utime` + `os.chmod`).
+- **여러 source 다중 폴더 plan?** → ✅ M3 부터 multi-source 지원
+  (`Backup.add_folder` 는 plan 당 multi-folder, wizard 도 다중 source 입력 받음).
+- **Plan 편집 / 삭제 UI?** → 삭제는 ✅ (`arq-tui plans delete`), 편집은
+  v1.x 로 deferred (recreate via wizard + delete 권장; 직접 JSON 편집 가능).
 
 ## 12. 보안 / 개인정보 노트
 
