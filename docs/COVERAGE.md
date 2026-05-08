@@ -229,12 +229,15 @@ the FUSE mount.
 | Component                                                     | Status | Notes |
 |---------------------------------------------------------------|:------:|-------|
 | ``arq-validator`` CLI (run validation tiers)                  |  ✅    | ``arq_validator.cli`` |
-| ``arq-backup`` CLI (one-shot backup)                          |  ✅    | ``arq_writer.cli``. Flags: ``--use-packs`` / ``--chunker {none,default,arq_v7_41}`` / ``--dedup-against-existing`` / ``--max-file-bytes`` / ``--exclude-glob`` / ``--exclude-regex`` / ``--exclude-from`` / ``--use-apfs-snapshot`` (PR #10) |
-| ``arq-reader`` CLI (one-shot restore + listing)               |  ✅    | ``arq_reader.cli`` |
+| ``arq-backup`` CLI (one-shot backup)                          |  ✅    | ``arq_writer.cli``. Flags: ``--use-packs`` / ``--chunker {none,default,arq_v7_41}`` / ``--dedup-against-existing`` / ``--max-file-bytes`` / ``--exclude-glob`` / ``--exclude-regex`` / ``--exclude-from`` / ``--use-apfs-snapshot`` / ``--state-file`` (state-file IPC for TUI / cron monitoring) |
+| ``arq-reader`` CLI (one-shot restore + listing)               |  ✅    | ``arq_reader.cli``; ``--state-file`` for restore-side monitoring |
 | ``arq-buzhash-find`` CLI (RE toolkit subcommands)             |  ✅    | ``arq_writer.buzhash_re_cli`` |
-| TUI (interactive frontend)                                    |  ✅    | Full M1–M6 stack landed: ``arq_tui`` package + Textual ``ArqTuiApp``. Screens: Home / PlanWizard (6 steps incl. Advanced — exclusions / max-file-bytes / APFS / retention) / BackupSetList ([m] for maintenance) / RecordBrowser / BackupRun / RestoreRun / ValidateRun / **MaintenanceScreen (password rotation + retention apply, PR #12)**. Launchers: ``arq-tui`` (pyproject script), ``python -m arq_tui``, or root ``./arq-tui.py`` |
+| ``arq-tui machine-info <root>``                               |  ✅    | Source-machine identification: print backupconfig.json/backupplan.json metadata + compare against current host (hostname / scutil / sw_vers). JSON output |
+| ``arq-tui runs ls/show/cancel/gc``                            |  ✅    | Headless equivalent of the Activity monitor screen — list active+recent runs, send SIGTERM, GC old terminal records |
+| TUI (interactive frontend)                                    |  ✅    | Full M1–M6 stack landed plus the slide-down quake-style command console (slash-commands), MaintenanceScreen, **and the new RunsMonitorScreen** ([a]ctivity / `:activity`) — passively watches state files written by CLI / cron processes. Plan editing on [e]. Launchers: ``arq-tui``, ``python -m arq_tui``, or root ``./arq-tui.py`` |
 | Progress callback hooks (suitable for any frontend)           |  ✅    | All three components emit ``ProgressCb(kind, payload)`` events |
-| Real-Arq.app SFTP destination compat tests                    |  ✅    | ``tests/integration/test_arqapp_sftp_compat.py`` (PR #9) — 7 tests, env-var-gated; ``docs/COMPAT-SFTP-TESTING.md`` for operator runbook |
+| State-file IPC (``arq_tui.runs``)                             |  ✅    | Atomic-write JSON state files under ``$XDG_STATE_HOME/arq-backup-tui/runs/``; producer side ``RunWriter`` context manager, consumer side ``enumerate_runs`` + ``mark_stale`` + ``signal_cancel`` + ``gc_finished_runs``. Schema in ``docs/PLAN-cli-tui-split.md`` |
+| Real-Arq.app SFTP destination compat tests                    |  ✅    | ``tests/integration/test_arqapp_sftp_compat.py`` + ``test_arq_real_destination.py`` + ``test_arq_real_destination_deep.py``. Triggered the discoveries documented in ``docs/REAL-DATA-DISCOVERIES.md`` (Hetzner SFTP-only compat, JSON backuprecord, BlobLoc isLargePack, Node userName/groupName, Tree v4 trailing block) |
 
 ### 10. Reverse-engineering tooling
 

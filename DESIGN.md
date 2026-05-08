@@ -55,6 +55,7 @@ arq-backup-tui/
 │   ├── events.py                 # ProgressCallback + Event 정의
 │   ├── tiers.py                  # L0/L1a/L1b/L2 검증 함수
 │   ├── audit_drip.py             # 재개형 야간 감사 (cursor + throttle)
+│   ├── machine_info.py           # source 머신 식별 (backupconfig.json + backupplan.json + 호스트 비교)
 │   ├── runner.py                 # ValidationTier enum + validate() 오케스트레이터
 │   └── cli.py                    # argparse CLI
 ├── arq_writer/                   # 백업 생성 라이브러리 (Arq.app 호환)
@@ -96,9 +97,11 @@ arq-backup-tui/
 │   ├── __main__.py               # `python -m arq_tui` 진입점
 │   ├── app.py                    # 최상위 앱 (PlanRegistry, CredentialCache, DestinationStore)
 │   ├── state.py                  # Plan / Destination 데이터클래스 + 영속 저장소
-│   ├── workers.py                # BackupWorker / RestoreWorker / ValidateWorker
+│   ├── workers.py                # BackupWorker / RestoreWorker / ValidateWorker (in-process worker thread bridge)
+│   ├── runs.py                   # State-file IPC: RunWriter / enumerate_runs / signal_cancel / gc
+│   ├── console_commands.py       # Slash-command dispatch for the quake-style console
 │   ├── backend_open.py           # 백엔드 open/close (LocalBackend / SftpBackend)
-│   ├── cli.py                    # `plans list/show/delete` 헤드리스 서브커맨드
+│   ├── cli.py                    # `plans` / `runs` / `machine-info` 헤드리스 서브커맨드
 │   ├── theming.css               # 색상·여백 등 CSS
 │   ├── screens/
 │   │   ├── home.py               # 랜딩 (플랜 목록 + 빠른 액션)
@@ -109,10 +112,12 @@ arq-backup-tui/
 │   │   ├── restore_run.py        # 복원 실행 + ProgressPanel
 │   │   ├── validate_run.py       # 검증 실행 + ProgressPanel
 │   │   ├── maintenance.py        # 비밀번호 회전 + retention 적용
+│   │   ├── runs_monitor.py       # Activity 화면 — 외부 프로세스의 state file 을 1Hz polling
 │   │   └── help.py
 │   └── widgets/
 │       ├── source_picker.py / destination_modal.py
 │       ├── password_modal.py / restore_target_modal.py
+│       ├── console.py            # Quake-style slash-command console (slide-down)
 │       └── progress_panel.py
 ├── tests/                        # 합성/round-trip 단위·통합 테스트 (355건, ~140초; 7건 skip = SFTP 자격증명 의존)
 │   ├── fixtures.py               # 검증기 테스트용 Arq 7 트리 빌더
