@@ -77,6 +77,16 @@ from .types import BlobLoc, FileNode, Node, Tree, TreeChild, TreeNode
 ProgressCb = Callable[[str, dict], None]
 
 
+class BackupCancelled(RuntimeError):
+    """Raised inside the writer when ``Backup.cancel()`` is invoked.
+
+    Caught by ``add_folder`` so the partial walk doesn't produce a
+    half-written backuprecord. Pack files that already flushed in
+    full pack-bytes batches stay on disk (they're a strict subset
+    of valid blobs); the in-memory pack buffer is dropped.
+    """
+
+
 @dataclass
 class BackupResult:
     """Outcome of a single ``build_backup`` run."""
@@ -302,6 +312,32 @@ class Backup:
         # for this folder, walk normally".
         self._prior_tree = None
 
+        # Cooperative cancellation. When set, _walk and _walk_dir
+        # check the flag at every directory boundary and bail out
+        # by raising BackupCancelled. add_folder catches that to
+        # produce a partial result (no backuprecord written) so the
+        # destination's prior state is unchanged.
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Request graceful cancellation of an in-flight backup.
+
+        Thread-safe: meant to be invoked from a different thread
+        than the one running ``add_folder`` / ``build_backup``.
+        The cancellation is checked at every directory boundary
+        and at the start of each file walk; once observed the
+        backup raises :class:`BackupCancelled`, ``add_folder``
+        skips writing the backuprecord, and pack files are
+        flushed only if some content was already buffered.
+        """
+        self._cancelled = True
+
+    def _check_cancel(self) -> None:
+        if self._cancelled:
+            raise BackupCancelled(
+                "backup cancelled by Backup.cancel()"
+            )
+
     # ------------------------------------------------------------------
     # Plan-level setup
     # ------------------------------------------------------------------
@@ -497,6 +533,7 @@ class Backup:
         whose content is the link target — pragmatic, matches Arq's
         own conservatism).
         """
+        self._check_cancel()
         if source.is_dir() and not source.is_symlink():
             return self._walk_dir(source, rel_path=rel_path)
         return self._walk_file(source, rel_path=rel_path)
@@ -683,8 +720,17 @@ class Backup:
         else:
             self._prior_tree = None
 
-        # Walk + write blobs.
-        root_node, _size, _count = self._walk(source)
+        # Walk + write blobs. A cooperative cancel raised mid-walk
+        # short-circuits to "no backuprecord written"; the partial
+        # state we leave behind is just orphan blobs / packs, all
+        # of which the next dedup-against-existing run will pick up
+        # again.
+        try:
+            root_node, _size, _count = self._walk(source)
+        except BackupCancelled:
+            _emit(self.callback, "backup_cancelled",
+                  folder_uuid=folder_uuid)
+            raise
 
         # Flush any in-flight packs BEFORE building the backuprecord.
         # The record embeds BlobLocs whose offsets must point at

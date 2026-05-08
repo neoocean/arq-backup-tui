@@ -169,6 +169,48 @@ def discover_layout(
     return layouts
 
 
+def list_backuprecords(
+    backend: Backend, root: str, computer_uuid: str, folder_uuid: str,
+) -> List[str]:
+    """Return every backuprecord path under
+    ``backupfolders/<folder>/backuprecords/<bucket>/<num>.backuprecord``,
+    sorted oldest-first.
+
+    The lexicographic ordering on ``(bucket, num)`` matches
+    chronological ordering because both encode ``creation_date``
+    (bucket = floor(creation_date / 100000), num = creation_date %
+    100000). Empty list when the folder has no records.
+    """
+    base = (
+        f"{computer_root(root, computer_uuid)}/{C.BACKUPFOLDERS_DIR}/"
+        f"{folder_uuid}/{C.BACKUPRECORDS_DIR}"
+    )
+    if not backend.is_dir(base):
+        return []
+    try:
+        outer_dirs = backend.list_dir(base)
+    except (OSError, RuntimeError):
+        return []
+    out: List[Tuple[Tuple[str, int], str]] = []
+    for outer in outer_dirs:
+        if not (outer.isdigit() and len(outer) == 5):
+            continue
+        outer_path = f"{base}/{outer}"
+        try:
+            inner = backend.list_dir(outer_path)
+        except (OSError, RuntimeError):
+            continue
+        for n in inner:
+            if not n.endswith(".backuprecord"):
+                continue
+            stem = n[: -len(".backuprecord")]
+            if not stem.isdigit():
+                continue
+            out.append(((outer, int(stem)), f"{outer_path}/{n}"))
+    out.sort()
+    return [p for _, p in out]
+
+
 def find_latest_backuprecord(
     backend: Backend, root: str, computer_uuid: str, folder_uuid: str,
 ) -> Optional[str]:
