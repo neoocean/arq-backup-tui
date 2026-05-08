@@ -45,6 +45,9 @@ class RecordBrowserScreen(Screen):
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back", show=True),
         Binding("q", "app.quit", "Quit", show=True),
+        Binding("space", "toggle_mark", "Mark / unmark", show=True),
+        Binding("R", "restore_full", "Restore full record", show=True),
+        Binding("r", "restore_selected", "Restore marked", show=True),
     ]
 
     DEFAULT_CSS = """
@@ -92,6 +95,10 @@ class RecordBrowserScreen(Screen):
         # is free.
         self._tree_cache: Dict[str, Any] = {}
         self._keyset = None
+        # Set of source-relative paths the user marked for selective
+        # restore. Iteration order doesn't matter — Restore takes
+        # an unordered list and the path filter normalizes it.
+        self._marked_paths: set = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -249,6 +256,89 @@ class RecordBrowserScreen(Screen):
             meta.update("(no selection)")
             return
         meta.update(self._format_meta(event.node, state))
+
+    # ------------------------------------------------------------------
+    # Mark / restore
+    # ------------------------------------------------------------------
+
+    def action_toggle_mark(self) -> None:
+        tree = self.query_one("#record-tree", Tree)
+        node = tree.cursor_node
+        if node is None:
+            return
+        state = node.data
+        if not isinstance(state, _NodeState):
+            return
+        if not state.rel_path:
+            self.notify(
+                "Select a child node to mark; root is always full.",
+                severity="warning",
+            )
+            return
+        if state.rel_path in self._marked_paths:
+            self._marked_paths.discard(state.rel_path)
+            node.label = self._strip_mark(node.label)
+        else:
+            self._marked_paths.add(state.rel_path)
+            node.label = self._add_mark(node.label)
+
+    def action_restore_full(self) -> None:
+        self._launch_restore(paths=None)
+
+    def action_restore_selected(self) -> None:
+        if not self._marked_paths:
+            self.notify(
+                "No items marked. Use Space to mark first.",
+                severity="warning",
+            )
+            return
+        self._launch_restore(paths=sorted(self._marked_paths))
+
+    def _launch_restore(self, *, paths) -> None:
+        from ..widgets.restore_target_modal import RestoreTargetModal
+        from .restore_run import RestoreRunScreen
+
+        if paths is None:
+            summary = f"Restoring full record from {self.dest_label}"
+        else:
+            summary = (
+                f"Restoring {len(paths)} marked path"
+                f"{'s' if len(paths) != 1 else ''} from "
+                f"{self.dest_label}"
+            )
+
+        def _go(target):
+            if not target:
+                return
+            from pathlib import Path as _P
+            self.app.push_screen(RestoreRunScreen(
+                backend=self.backend,
+                encryption_password=self.password,
+                computer_uuid=self.computer_uuid,
+                folder_uuid=self.folder_uuid,
+                backuprecord_path=self.backuprecord_path,
+                target=_P(target),
+                paths=paths,
+                record_label=self._title(),
+            ))
+
+        self.app.push_screen(
+            RestoreTargetModal(summary=summary), _go,
+        )
+
+    @staticmethod
+    def _add_mark(label) -> str:
+        s = str(label)
+        if s.startswith("[★] "):
+            return s
+        return f"[★] {s}"
+
+    @staticmethod
+    def _strip_mark(label) -> str:
+        s = str(label)
+        if s.startswith("[★] "):
+            return s[len("[★] "):]
+        return s
 
     def _format_meta(self, node, state: _NodeState) -> str:
         lines = [
