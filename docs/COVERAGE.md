@@ -19,9 +19,11 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with tree-walk reuse |
 | Operate           | ⚠️ Library only — schedule, throttling, notifications, GUI/TUI all absent |
 
-The aggregate test count is **213 unit tests** at the time this
-table was last updated; the suite runs in ~32 s on a stdlib-only
-toolchain (``python -m unittest discover``).
+The aggregate test count is **232 unit tests** at the time this
+table was last updated; the suite runs in ~65 s on a stdlib-only
+toolchain (``python -m unittest discover``). Six of those are
+TUI smoke tests that require the optional ``textual`` dep —
+without it they auto-skip.
 
 ## Detailed feature matrix
 
@@ -198,7 +200,7 @@ the FUSE mount.
 | ``arq-backup`` CLI (one-shot backup)                          |  ✅    | ``arq_writer.cli`` |
 | ``arq-reader`` CLI (one-shot restore + listing)               |  ✅    | ``arq_reader.cli`` |
 | ``arq-buzhash-find`` CLI (RE toolkit subcommands)             |  ✅    | ``arq_writer.buzhash_re_cli`` |
-| TUI (interactive frontend)                                    |  ❌    | Mentioned in DESIGN.md, not yet implemented |
+| TUI (interactive frontend)                                    |  ⚠️    | M1 skeleton landed: ``arq_tui`` package + Textual ``ArqTuiApp`` + Home screen + ``arq-tui`` console script. Backup execution / browse / restore / validate flows are M2–M5; see ``docs/PLAN-tui.md`` for the milestone breakdown |
 | Progress callback hooks (suitable for any frontend)           |  ✅    | All three components emit ``ProgressCb(kind, payload)`` events |
 
 ### 10. Reverse-engineering tooling

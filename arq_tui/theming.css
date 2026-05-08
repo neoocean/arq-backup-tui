@@ -1,0 +1,22 @@
+/* Base theme for arq-backup-tui.
+ *
+ * The `App.CSS_PATH = "theming.css"` setting in app.py loads this
+ * file. Per-screen styling lives inside each Screen's
+ * DEFAULT_CSS for locality; this file is for cross-screen rules
+ * only.
+ */
+
+Screen {
+    background: $surface;
+}
+
+/* Header / footer remain Textual defaults (mode-aware). */
+
+/* Notifications surface as toasts; slightly darker variant for
+ * informational hints so they don't look like errors. */
+Toast {
+    border: round $primary;
+}
+Toast.-information {
+    border: round $accent;
+}
