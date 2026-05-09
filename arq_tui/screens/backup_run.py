@@ -1,19 +1,30 @@
 """Backup execution screen.
 
-Spawns a :class:`BackupWorker`, displays a live
-:class:`ProgressPanel`, and handles the worker's
-``WorkerEvent`` / ``WorkerFinished`` / ``WorkerFailed`` messages.
+Default path: spawn ``arq-backup create`` as a subprocess and
+watch its state file via :class:`SubprocessBackupWorker`. The
+state file is the same JSON the cron / systemd path produces, so
+the TUI's progress display works identically whether the operator
+launched the backup from the menu or it was kicked off
+out-of-band by a scheduler.
 
-The ``Esc`` key requests cooperative cancellation; the worker
-flips ``Backup.cancel()`` and the writer aborts at the next
-directory boundary, raising ``BackupCancelled`` (which we display
-as a "Cancelled" status).
+Fallback path: if the plan can't be expressed in CLI args (SFTP
+destination, multi-source plan) or the operator forces the
+escape hatch (``ARQ_TUI_IN_PROCESS=1``), drop back to the
+in-process :class:`BackupWorker`. Both code paths post the same
+``WorkerEvent`` / ``WorkerFinished`` / ``WorkerFailed`` messages
+so the screen handlers don't need to know which one is active.
+
+The ``Esc`` key requests cooperative cancellation. For
+in-process mode that flips ``Backup.cancel()``; for subprocess
+mode it sends SIGTERM to the child PID, which the writer's
+``RunWriter`` context handles as ``status=cancelled``.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -23,6 +34,10 @@ from textual.widgets import Button, Footer, Header, Static
 
 from ..backend_open import close_backend, open_backend
 from ..state import Destination, Plan
+from ..subprocess_workers import (
+    SubprocessBackupWorker,
+    subprocess_eligible,
+)
 from ..widgets.progress_panel import ProgressPanel
 from ..workers import BackupWorker, WorkerEvent, WorkerFailed, WorkerFinished
 
@@ -61,9 +76,17 @@ class BackupRunScreen(Screen):
         super().__init__()
         self.plan = plan
         self.password = password
-        self.worker: Optional[BackupWorker] = None
+        # Either an in-process BackupWorker or a SubprocessBackupWorker;
+        # both expose ``start`` / ``cancel``. The subprocess variant
+        # also writes its progress to a state file under the user's
+        # XDG_STATE_HOME so a separate ``arq-tui runs`` invocation
+        # could observe the same run.
+        self.worker: Optional[Union[
+            BackupWorker, SubprocessBackupWorker,
+        ]] = None
         self._backend: Any = None
         self._dest: Optional[Destination] = None
+        self._mode: str = "subprocess"   # set in on_mount
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -74,6 +97,61 @@ class BackupRunScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Decide which worker mode applies first: subprocess (the
+        # default — same code path as cron / systemd) or in-process
+        # (legacy + fallback when CLI args can't express the plan).
+        force_in_process = bool(os.environ.get("ARQ_TUI_IN_PROCESS"))
+        eligible = subprocess_eligible(
+            self.plan, self.plan.destination_kind,
+        )
+        self._mode = (
+            "in_process"
+            if force_in_process or not eligible
+            else "subprocess"
+        )
+
+        if self._mode == "subprocess":
+            self._start_subprocess_worker()
+        else:
+            self._start_in_process_worker()
+
+    def _start_subprocess_worker(self) -> None:
+        """Spawn ``arq-backup create --state-file …`` as a child
+        process and start polling its state file.
+
+        We deliberately don't open the backend on this side: the
+        child process opens its own (local-only for now), so we
+        avoid double-opening and the race of the parent holding a
+        backend the child also writes to.
+        """
+        panel = self.query_one(ProgressPanel)
+        panel.append_log(
+            f"Spawning arq-backup CLI subprocess "
+            f"(plan={self.plan.name!r})…"
+        )
+        self.worker = SubprocessBackupWorker(
+            self,
+            plan=self.plan,
+            password=self.password,
+        )
+        try:
+            self.worker.start()
+        except Exception as exc:
+            self.notify(
+                f"Could not spawn backup CLI: {exc}",
+                severity="error",
+            )
+            self.app.pop_screen()
+            return
+        panel.append_log(
+            f"Subprocess running, state file: "
+            f"{self.worker.state_file}"
+        )
+
+    def _start_in_process_worker(self) -> None:
+        """Legacy path: open the backend in the parent and run the
+        backup on a sibling Python thread. Required for SFTP
+        destinations + multi-source plans the CLI can't express."""
         # Resolve the destination + open the backend on the main
         # thread so any setup error surfaces immediately.
         self._dest = self._plan_destination()

@@ -286,21 +286,55 @@ Spec 의 bucket 공식은 Arq.app 내부 implementation detail 로 격하. Calle
 4개가 Tree v4 로 기록되어 있어, 이 폴더들의 root tree 부터 walk 자체가
 `bad [String] isNotNull byte: 55 at pos=680` 같은 형태로 즉시 폭발했습니다.
 
-### After (commit `60496a1`)
+### After (commit `60496a1` + 본 PR)
 
 Hex diff 분석으로 v4 가 **모든 Node 끝에 38바이트 trailing block** 을
-추가한다는 점을 발견. 이 블록은 typical 파일 (`.DS_Store` 등) 에 대해
-**모두 zero** 였습니다 (정확한 field 분해는 Mach-O RE 가 필요하지만, 모두
-zero 라는 점이 "선택적 field들의 default 값" 임을 시사 — 추정: extras
-blob_loc count=0 + 빈 placeholder 들).
+추가한다는 점을 발견. 초기 sampling 에서는 모두 zero 였지만, 더 넓은 walk
+(`scripts/probe_tree_v4_block.py`, 30 nodes 샘플) 에서 **non-zero 패턴이
+드러났습니다**.
+
+#### 38-byte block 의 추정 구조 (실측 30 nodes 기준)
+
+```
+바이트 0..7   int64 BE  scanned-at sec   (≈ 백업 pass 시각, 노드별로
+                                          ~7분 창 안에 분포 — 파일 자체의
+                                          mtime/ctime/create 와 무관)
+바이트 8..15  int64 BE  scanned-at nsec
+바이트 16..23 int64 BE  0x00000000_01000000 (모든 non-zero block 에서
+                                          동일 — present-flag 또는
+                                          version marker 로 추정)
+바이트 24..37 14 bytes  reserved (모두 zero)
+```
+
+특이 사항:
+- 30개 nodes 중 3개 (모두 `.DS_Store`) 는 38 bytes 가 **모두 zero**.
+  이 3 노드는 mtime == ctime == create_sec (동일 시각) — 가장 최근
+  백업 pass 에서 새로 추가된 파일들이라는 공통점.
+- 나머지 27개 nodes 는 위 구조 패턴 — scanned-at timestamp 가 모두
+  2025-07-23 18:33-18:40 UTC 사이 (해당 백업 pass 시각).
+
+#### 결론
+
+reader 는 그대로 38 bytes 를 opaque skip — 양쪽 shape 모두 다음 child
+와 정확히 align 됨을 `tests/test_tree_v4_trailing_block.py` 가 핀.
+정확한 field 의미 (lastVerifiedAt? scannedAt? reverifiedAt?) 확정은
+Arq.app Mach-O RE 후속 작업으로 deferred — 우리 구현이 Arq.app 와
+binary-perfect 한 backup 을 생성하려면 writer 에 같은 38 bytes 를 emit
+해야 하지만, 현재 writer 는 v3 트리만 emit 하므로 영향 없음.
 
 Fix:
-- `arq_reader/parse.py:parse_node`: `if tree_version >= 4:
+- (PR #18) `arq_reader/parse.py:parse_node`: `if tree_version >= 4:
   reader.read_raw(38)`
-- 새 `BinaryReader.read_raw(n)` 메서드 — 미해석 바이트 N개 consume
+- (PR #18) 새 `BinaryReader.read_raw(n)` 메서드 — 미해석 바이트 N개
+  consume
+- (이 PR) parse_node 의 inline comment 에 추정 구조 기록
+- (이 PR) `tests/test_tree_v4_trailing_block.py` — all-zero shape +
+  structured shape + v3 binary-compat regression 4 tests
+- (이 PR) `scripts/probe_tree_v4_block.py` — 운영자 destination 에서
+  실측 sample 추가 수집 도구
 
 검증: 운영자의 5개 폴더 모두 (v3 1개 + v4 4개) `parse_tree` 통과.
-v4 tree 의 정확한 38-byte block 분해는 follow-up RE 작업으로 deferred.
+38-byte block 의 정확한 field semantics 는 Arq.app Mach-O RE 후속 작업.
 
 ## 영향도 매트릭스
 
