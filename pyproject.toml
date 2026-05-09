@@ -55,3 +55,27 @@ packages = [
 [tool.setuptools.package-data]
 arq_validator = ["py.typed"]
 arq_tui = ["theming.css"]
+
+[tool.pyright]
+# pyright runs on CI in basic mode — strict mode would chase
+# every `# type: ignore[attr-defined]` we sprinkle for cross-
+# module dynamic attribute access. Basic catches the high-value
+# bugs (wrong return shapes, undefined names, missing imports)
+# without forcing every callable to carry a complete signature.
+include = [
+    "arq_writer", "arq_reader", "arq_validator", "arq_tui",
+]
+exclude = [
+    "**/__pycache__", "tests", "scripts", "docs",
+    # Legacy compatibility module — keeps Arq 5 binary parser +
+    # restorer working alongside the Arq 7 path.
+    "arq_reader/arq5_*.py",
+]
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
+reportMissingTypeStubs = "none"
+# Allow `**payload` callbacks + dataclasses with optional fields
+# without forcing exhaustive Optional handling on every access.
+reportOptionalMemberAccess = "none"
+reportOptionalSubscript = "none"
+reportGeneralTypeIssues = "warning"

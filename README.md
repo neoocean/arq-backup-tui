@@ -128,6 +128,68 @@ A Textual TUI that lets you handle the three above on a single screen. Backup
 / restore / verification / scouting / backup-set browser / retention policy
 application / password rotation / plan editing / console (slash-command), etc.
 
+## 3.5 Quick start (5 minutes from clone to first restore)
+
+Goal: prove the round-trip on your own data without leaving your
+machine. No SFTP, no cloud, no Arq.app interaction.
+
+```sh
+# 1. Clone + check the runtime is sane
+git clone https://github.com/neoocean/arq-backup-tui.git
+cd arq-backup-tui
+python3 --version          # need ≥ 3.9
+openssl version            # need any modern OpenSSL on PATH
+python3 -m unittest discover tests   # 200+ tests should pass
+
+# 2. Pick a small source folder + a fresh destination
+SRC=~/Documents/sample-folder
+DST=/tmp/arq-test-dst
+mkdir -p "$DST"
+
+# 3. Make your first backup
+export ARQ_PW="hunter2"
+python3 -m arq_writer create "$SRC" --dest "$DST" \
+    --password-env ARQ_PW \
+    --backup-name "first-backup" \
+    --use-packs --dedup-against-existing
+
+# 4. Validate it (HMAC the latest record + sample objects)
+python3 -m arq_validator deep "$DST" --password-env ARQ_PW
+
+# 5. Restore it elsewhere
+mkdir -p /tmp/arq-restored
+python3 -m arq_reader restore "$DST" \
+    --password-env ARQ_PW \
+    --dest /tmp/arq-restored
+
+# 6. Compare bytes
+diff -r "$SRC" /tmp/arq-restored
+```
+
+If step 6 prints nothing, the round-trip succeeded — your bytes
+came back byte-identical through every layer.
+
+For the **TUI** experience instead of CLI:
+
+```sh
+pip install -e ".[tui]"     # adds the textual dependency
+python3 -m arq_tui          # launches the TUI; press [n] to make a plan
+```
+
+Inside the TUI:
+- `[n]` create a backup plan
+- `[r]` run the focused plan
+- `[b]` browse a destination's history
+- `[v]` validate a destination
+- `[a]` watch every running backup / restore (cron-launched ones too)
+- `[s]` manage cron / launchd schedules for plans
+- `[p]` (inside a backup run) pause / resume
+
+Operators with an existing Arq.app destination on Hetzner / NAS
+SFTP: see `docs/COMPAT-SFTP-TESTING.md` for the `.secrets/`
+credential setup; once configured, the same commands work
+against the remote destination via `--sftp-host` etc.
+
 ## 4. Dependencies and Runtime Environment
 
 - **Runtime**: Python ≥ 3.9 + system `openssl` (on PATH or via

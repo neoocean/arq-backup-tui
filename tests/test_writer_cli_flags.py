@@ -245,6 +245,13 @@ class CliBackupNewFlagsTests(unittest.TestCase):
                 "keyset bytes changed despite --dedup-against-existing",
             )
 
+    @unittest.skipIf(
+        sys.platform == "darwin",
+        "macOS dev machines without passwordless sudo error out "
+        "of with_apfs_snapshot before the apfs_snapshot_skipped "
+        "fallback can fire — the test pins the LINUX behaviour. "
+        "CI's Ubuntu legs always exercise it.",
+    )
     def test_use_apfs_snapshot_falls_back_on_linux(self) -> None:
         # On Linux the flag must be a no-op (skip event), and the
         # backup still completes successfully.

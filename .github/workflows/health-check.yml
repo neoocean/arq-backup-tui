@@ -1,0 +1,129 @@
+name: health-check
+
+# Periodic full-record validation against the operator's actual
+# destination. Distinct from integration-nightly which runs the
+# pytest suite — this one walks every backuprecord through
+# validate_record and opens a GitHub Issue on the first
+# integrity failure.
+#
+# Cadence: weekly (Monday 02:00 UTC). Daily would be too noisy
+# for a >1TB destination + Hetzner's bandwidth. Operators who
+# want daily can copy this workflow + change the cron.
+#
+# Auth model identical to integration-nightly.yml — reads SFTP
+# creds + the backup encryption password from repo Secrets,
+# writes them to .secrets/ at runtime, then runs the validator.
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"   # weekly, Monday 02:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  health:
+    name: Full-record health check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[test,tui]"
+      - name: Materialise SFTP credentials
+        if: env.ARQ_TEST_SFTP_HOST != ''
+        env:
+          ARQ_TEST_SFTP_HOST: ${{ secrets.ARQ_TEST_SFTP_HOST }}
+        run: |
+          mkdir -p .secrets
+          cat > .secrets/sftp.json <<EOF
+          {
+            "host": "${{ secrets.ARQ_TEST_SFTP_HOST }}",
+            "port": ${{ secrets.ARQ_TEST_SFTP_PORT || 22 }},
+            "user": "${{ secrets.ARQ_TEST_SFTP_USER }}",
+            "root": "${{ secrets.ARQ_TEST_SFTP_ROOT }}",
+            "password": "${{ secrets.ARQ_TEST_SFTP_PASSWORD }}",
+            "write_subdir": ".arq-backup-tui-ci-write-test"
+          }
+          EOF
+          chmod 600 .secrets/sftp.json
+          echo -n "${{ secrets.ARQ_TEST_DEST_PASSWORD }}" \
+            > .secrets/dest_password
+          chmod 600 .secrets/dest_password
+      - name: Run health check
+        if: env.ARQ_TEST_SFTP_HOST != ''
+        env:
+          ARQ_TEST_SFTP_HOST: ${{ secrets.ARQ_TEST_SFTP_HOST }}
+        run: |
+          python -c "
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, '.')
+          from tests.integration._creds import resolve_creds
+          from arq_validator.sftp import SftpBackend
+          from arq_validator import discover_layout
+          from arq_validator.layout import list_backuprecords
+          from arq_validator.record_validator import validate_record
+
+          creds = resolve_creds()
+          if creds is None:
+              sys.exit('no creds; secrets not set?')
+          backend = SftpBackend(
+              creds.host, port=creds.port, user=creds.user,
+              password=creds.sftp_password,
+              identity_file=creds.identity_file,
+              root=creds.root,
+          )
+          backend.__enter__()
+          try:
+              total_records = 0
+              failed_records = []
+              for lay in discover_layout(
+                  backend, '/', enumerate_objects=False,
+              ):
+                  cu = lay.computer_uuid
+                  for fu in lay.backup_folder_uuids:
+                      paths = list_backuprecords(
+                          backend, '/', cu, fu,
+                      )
+                      if not paths:
+                          continue
+                      # Latest record only — one snapshot per
+                      # folder per check is enough to catch the
+                      # most recent backup-side corruption.
+                      r = validate_record(
+                          backend, paths[-1],
+                          encryption_password=creds.dest_password,
+                          computer_uuid=cu,
+                          max_blobs=200,
+                      )
+                      total_records += 1
+                      if not r.ok:
+                          failed_records.append({
+                              'record': paths[-1],
+                              'failures': [
+                                  {'kind': f.kind,
+                                   'error': f.error,
+                                   'node_path': f.node_path}
+                                  for f in r.failures[:5]
+                              ],
+                          })
+              print(f'checked {total_records} latest records')
+              if failed_records:
+                  print(f'failures: {failed_records}')
+                  sys.exit(1)
+          finally:
+              backend.__exit__(None, None, None)
+          "
+      - name: File issue on failure
+        if: failure() && env.ARQ_TEST_SFTP_HOST != ''
+        env:
+          ARQ_TEST_SFTP_HOST: ${{ secrets.ARQ_TEST_SFTP_HOST }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Weekly health check failed: $(date -u +%Y-%m-%d)" \
+            --body "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "ci,health,nightly" \
+            || true

@@ -44,6 +44,7 @@ class HomeScreen(Screen):
         Binding("b", "browse", "Browse backup sets", show=True),
         Binding("v", "validate", "Validate", show=True),
         Binding("a", "activity", "Activity", show=True),
+        Binding("s", "scheduling", "Scheduling", show=True),
         Binding("q", "app.quit", "Quit", show=True),
     ]
 
@@ -88,30 +89,52 @@ class HomeScreen(Screen):
         yield Header(show_clock=True)
 
         plans = self._load_plans()
-        with Vertical(id="plans-section"):
-            yield Static("Plans", classes="section-title")
-            if plans:
-                yield ListView(
-                    *[
-                        ListItem(Static(self._render_plan_row(p)))
-                        for p in plans
-                    ],
-                    id="plans-list",
-                )
-            else:
-                yield Static(
-                    "No plans yet — press [n] to create one.",
-                    classes="empty-hint",
-                    id="plans-empty",
-                )
+        # Top-level Horizontal: sidebar on the left, primary
+        # content on the right. The Sidebar shows section
+        # navigation in Arq-7-macOS style; HomeScreen's "active"
+        # section is "plans" (the operator is here to manage
+        # plans). Other sections route to their respective
+        # screens via the screen-level action handlers above.
+        from ..widgets.sidebar import Sidebar
+        with Horizontal(id="home-root"):
+            yield Sidebar(active="plans")
+            with Vertical(id="home-main"):
+                with Vertical(id="plans-section"):
+                    yield Static("Plans", classes="section-title")
+                    if plans:
+                        yield ListView(
+                            *[
+                                ListItem(
+                                    Static(self._render_plan_row(p)),
+                                )
+                                for p in plans
+                            ],
+                            id="plans-list",
+                        )
+                    else:
+                        yield Static(
+                            "No plans yet — press [n] to create one.",
+                            classes="empty-hint",
+                            id="plans-empty",
+                        )
 
-        with Vertical(id="actions-section"):
-            yield Static("Quick actions", classes="section-title")
-            with Horizontal(classes="action-row"):
-                yield Button("New plan [n]", id="action-new", variant="primary")
-                yield Button("Browse [b]", id="action-browse")
-                yield Button("Validate [v]", id="action-validate")
-                yield Button("Quit [q]", id="action-quit", variant="error")
+                with Vertical(id="actions-section"):
+                    yield Static(
+                        "Quick actions", classes="section-title",
+                    )
+                    with Horizontal(classes="action-row"):
+                        yield Button(
+                            "New plan [n]", id="action-new",
+                            variant="primary",
+                        )
+                        yield Button("Browse [b]", id="action-browse")
+                        yield Button(
+                            "Validate [v]", id="action-validate",
+                        )
+                        yield Button(
+                            "Quit [q]", id="action-quit",
+                            variant="error",
+                        )
 
         yield Footer()
 
@@ -160,6 +183,12 @@ class HomeScreen(Screen):
         ones the TUI didn't start). See docs/PLAN-cli-tui-split.md."""
         from .runs_monitor import RunsMonitorScreen
         self.app.push_screen(RunsMonitorScreen())
+
+    def action_scheduling(self) -> None:
+        """Open the scheduling screen — list / install / remove
+        cron + launchd schedules for plans."""
+        from .scheduling import SchedulingScreen
+        self.app.push_screen(SchedulingScreen())
 
     def action_run_focused(self) -> None:
         plan = self._focused_plan()

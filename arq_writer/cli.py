@@ -224,6 +224,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     create.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Walk source(s) + apply exclusion / size rules + print "
+            "what would be backed up — without encrypting or "
+            "writing any blob. Skips destination + password "
+            "validation. Useful for confirming exclusion rules "
+            "and estimating destination disk usage before kicking "
+            "off a real backup."
+        ),
+    )
+    create.add_argument(
         "--tree-version",
         type=int, choices=(3, 4), default=3,
         help=(
@@ -490,20 +502,98 @@ def _run_backup_call(
                 pass
 
 
+def _run_dry_run(args: argparse.Namespace) -> int:
+    """Drive a --dry-run: walk source(s), apply exclusion + size
+    rules, print what WOULD be backed up. JSON when --json-events
+    is set, else a human summary on stdout."""
+    from .dry_run import dry_run_source
+    exclusions = _resolve_exclusions(args)
+    aggregate_files = 0
+    aggregate_bytes = 0
+    aggregate_skipped_size = 0
+    aggregate_skipped_excl = 0
+    aggregate_unread = 0
+    largest = []
+    summaries = []
+    for src in args.source:
+        s = dry_run_source(
+            src,
+            exclusions=exclusions,
+            max_file_bytes=args.max_file_bytes,
+        )
+        aggregate_files += s.files_in_scope
+        aggregate_bytes += s.bytes_in_scope
+        aggregate_skipped_size += s.files_skipped_size
+        aggregate_skipped_excl += s.files_skipped_excluded
+        aggregate_unread += s.files_unreadable
+        largest.extend(s.largest_in_scope)
+        summaries.append({
+            "source": str(src),
+            "files_in_scope": s.files_in_scope,
+            "bytes_in_scope": s.bytes_in_scope,
+            "dirs_walked": s.dirs_walked,
+            "files_skipped_size": s.files_skipped_size,
+            "files_skipped_excluded": s.files_skipped_excluded,
+            "files_unreadable": s.files_unreadable,
+            "elapsed_sec": s.elapsed_sec,
+        })
+    largest.sort(key=lambda e: e.size, reverse=True)
+    largest_top = [
+        {"path": e.path, "size": e.size}
+        for e in largest[:10]
+    ]
+    if args.json_events:
+        out = {
+            "dry_run": True,
+            "totals": {
+                "files_in_scope": aggregate_files,
+                "bytes_in_scope": aggregate_bytes,
+                "files_skipped_size": aggregate_skipped_size,
+                "files_skipped_excluded": aggregate_skipped_excl,
+                "files_unreadable": aggregate_unread,
+            },
+            "per_source": summaries,
+            "largest_in_scope_top10": largest_top,
+        }
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+    else:
+        print(f"DRY RUN — no blobs written, no destination touched")
+        print(f"")
+        print(f"sources:                {len(args.source)}")
+        print(f"files in scope:         {aggregate_files:,}")
+        print(f"bytes in scope:         {aggregate_bytes:,}")
+        if aggregate_skipped_size:
+            print(
+                f"skipped (size limit):   "
+                f"{aggregate_skipped_size:,}",
+            )
+        if aggregate_skipped_excl:
+            print(
+                f"skipped (excluded):     "
+                f"{aggregate_skipped_excl:,}",
+            )
+        if aggregate_unread:
+            print(
+                f"unreadable:             {aggregate_unread:,}",
+            )
+        if largest_top:
+            print()
+            print(f"largest in-scope files (top 10):")
+            for e in largest_top:
+                print(f"  {e['size']:>14,}  {e['path']}")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command != "create":
         print(f"error: unknown command {args.command!r}", file=sys.stderr)
         return 2
 
-    err = _validate_destination_args(args)
-    if err is not None:
-        print(f"error: {err}", file=sys.stderr)
-        return 2
-
     # Validate every source is a directory before we open any
     # backend or prompt for passwords; better to fail fast than
-    # to leak an SSH connection / askpass tempfile.
+    # to leak an SSH connection / askpass tempfile. We do this
+    # BEFORE the destination check so --dry-run also benefits.
     for src in args.source:
         if not src.exists():
             print(
@@ -517,6 +607,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 2
+
+    if args.dry_run:
+        # Skip every step that touches a destination — no backend,
+        # no password, no openssl. Just walk the source(s) +
+        # apply the exclusion / size rules + report.
+        return _run_dry_run(args)
+
+    err = _validate_destination_args(args)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
 
     password = _resolve_password(args)
     if password is None and sys.stdin.isatty():

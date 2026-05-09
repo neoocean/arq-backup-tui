@@ -47,18 +47,18 @@ arq-backup create ~/Documents \
 
 ## 2. Process model
 
-```
-┌──────────────────┐                ┌──────────────────────────────┐
-│ TUI (process A)  │                │ Backup CLI (process B)        │
-│ ── monitor only  │←─ poll fs ─────│ writes state file every event │
-│ display + cancel │  (1s)          │ exit code reflects outcome    │
-└──────────────────┘                └──────────────────────────────┘
-        │                                       │
-        ↓                                       ↓
-        ┌──────────────────────────────────────────────┐
-        │ $XDG_STATE_HOME/arq-backup-tui/runs/<id>.json │
-        │ (atomic write: write tmp + rename)            │
-        └──────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph A["TUI (process A)"]
+        TUI[monitor only<br/>display + cancel]
+    end
+    subgraph B["Backup CLI (process B)"]
+        CLI[writes state file every event<br/>exit code reflects outcome]
+    end
+    State["$XDG_STATE_HOME/arq-backup-tui/runs/&lt;id&gt;.json<br/>(atomic write: tmp + rename)"]
+    CLI -->|writes| State
+    State -.->|polls every 1s| TUI
+    TUI -->|SIGTERM on cancel| CLI
 ```
 
 Core principles:
@@ -76,13 +76,42 @@ Core principles:
 
 ## 3. State file format
 
+### 3.1 Status state machine
+
+A run transitions through these states. Producers set status
+forward only; the reader sets ``stale`` retroactively when it
+detects a dead PID with status still ``running`` (or
+``paused``). Terminal states (``completed`` / ``failed`` /
+``cancelled`` / ``stale``) never transition out.
+
+```mermaid
+stateDiagram-v2
+    [*] --> starting
+    starting --> running: init complete
+    starting --> failed: setup error
+    running --> paused: Backup.pause()
+    paused --> running: Backup.resume()
+    running --> completed: success
+    running --> failed: exception
+    running --> cancelled: SIGTERM
+    paused --> cancelled: SIGTERM
+    running --> stale: PID dead (set by reader)
+    paused --> stale: PID dead (set by reader)
+    completed --> [*]
+    failed --> [*]
+    cancelled --> [*]
+    stale --> [*]
+```
+
+### 3.2 JSON schema
+
 ```jsonc
 // ~/.local/state/arq-backup-tui/runs/<run-id>.json
 {
   "schema_version": 1,
   "run_id": "01J…UUID",                 // ULID or UUIDv7
   "kind": "backup|restore|validate",
-  "status": "starting|running|completed|failed|cancelled|stale",
+  "status": "starting|running|paused|completed|failed|cancelled|stale",
   "started_at": 1771678551,             // unix epoch sec
   "finished_at": null,                  // null while running
   "pid": 12345,
@@ -133,17 +162,21 @@ Update policy:
 
 ### 5.1 New screen: `RunsMonitorScreen`
 
+Layout sketch — the screen has an "Active" section (running
+backups with progress + ETA + cancel) and a "Recent" section
+(last 24h, completed + failed):
+
 ```
-┌─ Activity ─────────────────────────────────────────────────────┐
-│ Active                                                          │
-│   ▶ home-laptop-to-nas    [████░░░░░░] 41%  3:21 ETA  [c]ancel  │
-│   ▶ docs-to-sftp          [██░░░░░░░░] 18%  9:12 ETA  [c]ancel  │
-│ Recent (last 24h)                                               │
-│   ✓ home-laptop-to-nas    completed 02:14 → 03:08 (54m)         │
-│   ✗ pictures-to-nas       failed    01:30 → 01:31 (network)     │
-│                                                                  │
-│ [n]ew run  [r]efresh  [g]c old  [Enter] details  [Esc] back     │
-└──────────────────────────────────────────────────────────────────┘
+Activity
+========
+Active
+  ▶ home-laptop-to-nas    [████░░░░░░] 41%  3:21 ETA  [c]ancel
+  ▶ docs-to-sftp          [██░░░░░░░░] 18%  9:12 ETA  [c]ancel
+Recent (last 24h)
+  ✓ home-laptop-to-nas    completed 02:14 → 03:08 (54m)
+  ✗ pictures-to-nas       failed    01:30 → 01:31 (network)
+
+[n]ew run  [r]efresh  [g]c old  [Enter] details  [Esc] back
 ```
 
 - Polling at 1Hz; state-file changes are detected by mtime comparison
@@ -162,17 +195,16 @@ from cron, the IPC is identical.
 
 ### 5.3 Sidebar (Arq 7 GUI mimicry)
 
-```
-┌────────┬─────────────────────────────────────────────────┐
-│Backup  │                                                  │
-│Sets    │  (current screen)                                │
-│        │                                                  │
-│Activity│                                                  │
-│        │                                                  │
-│Plans   │                                                  │
-│        │                                                  │
-│Settings│                                                  │
-└────────┴─────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Sidebar[Left sidebar — 10-12 cols]
+        BS[Backup Sets]
+        AC[Activity]
+        PL[Plans]
+        ST[Settings]
+    end
+    Main[Current screen content]
+    Sidebar --> Main
 ```
 
 - Left sidebar (10–12 cols wide) with 4 sections

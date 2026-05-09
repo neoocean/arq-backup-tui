@@ -206,6 +206,14 @@ class Restore:
             self.backend = LocalBackend(Path(src).resolve())
         self._layouts = None
         self._keyset_by_computer: Dict[str, Keyset] = {}
+        # Per-instance plaintext cache for tree blobs. The pre-walk
+        # phase (_count_tree) and the restore phase
+        # (_restore_dir_node) each fetch every reachable tree
+        # blob — without this cache we round-trip every tree
+        # twice over SFTP. Trees are small (<<1MB each) so the
+        # in-memory cost is negligible compared to the network
+        # savings on large remote backups. Keyed by blobIdentifier.
+        self._tree_plain_cache: Dict[str, bytes] = {}
         # Hardlink restore: maps the original source inode (as
         # stored in the FileNode's mac_st_ino) to the first path
         # we materialised for that inode. Subsequent FileNodes
@@ -243,6 +251,27 @@ class Restore:
     # ------------------------------------------------------------------
     # Single-restore helpers
     # ------------------------------------------------------------------
+
+    def _fetch_tree_blob_cached(
+        self, loc: BlobLoc, keyset: Keyset,
+    ) -> bytes:
+        """Cached version of :meth:`_fetch_blob` specialised for
+        tree blobs. The pre-walk + restore phase both fetch the
+        same trees; this halves the round-trip count without
+        risking memory blow-up the way caching every blob would
+        (file blobs can be GBs each — only tree blobs, which
+        are <<1MB, get cached).
+
+        Keyed by blob_id (== plaintext SHA-256), so two different
+        BlobLocs that point at the same content (cross-snapshot
+        dedup) also share the cache entry."""
+        blob_id = getattr(loc, "blobIdentifier", "") or ""
+        if blob_id and blob_id in self._tree_plain_cache:
+            return self._tree_plain_cache[blob_id]
+        plain = self._fetch_blob(loc, keyset)
+        if blob_id:
+            self._tree_plain_cache[blob_id] = plain
+        return plain
 
     def _fetch_blob(self, loc: BlobLoc, keyset: Keyset) -> bytes:
         """Fetch + decrypt + (LZ4-unwrap if needed) a referenced blob.
@@ -376,7 +405,9 @@ class Restore:
         out_dir.mkdir(parents=True, exist_ok=True)
         result.dirs_restored += 1
         try:
-            tree_bytes = self._fetch_blob(tree_blob_loc, keyset)
+            tree_bytes = self._fetch_tree_blob_cached(
+                tree_blob_loc, keyset,
+            )
             result.blobs_fetched += 1
         except (DecryptError, OSError, NotImplementedError) as exc:
             result.failures.append({
@@ -606,7 +637,9 @@ class Restore:
         if path_filter is not None and not path_filter.descend(rel_path):
             return (0, 0)
         try:
-            tree_bytes = self._fetch_blob(tree_blob_loc, keyset)
+            tree_bytes = self._fetch_tree_blob_cached(
+                tree_blob_loc, keyset,
+            )
         except (DecryptError, OSError, NotImplementedError):
             return (0, 0)
         tree = parse_tree(tree_bytes)
