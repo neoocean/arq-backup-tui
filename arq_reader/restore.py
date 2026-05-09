@@ -546,6 +546,23 @@ class Restore:
                 )
         except OSError:
             pass
+        # uid / gid restore — best-effort. os.chown only succeeds
+        # when running as root (or when the target uid/gid match
+        # the caller's already). For non-root operators the
+        # numeric uid/gid stays whatever the OS assigned at
+        # write_bytes(); the metadata is preserved on the Node
+        # regardless so a future root-mode restore could pick
+        # them up. Errors are silently absorbed — there's nothing
+        # the per-file walker can do about EPERM.
+        uid = int(getattr(node, "mac_st_uid", 0) or 0)
+        gid = int(getattr(node, "mac_st_gid", 0) or 0)
+        if uid or gid:
+            try:
+                os.chown(out_path, uid, gid)
+            except OSError as exc:
+                _emit(callback, "chown_failed",
+                      path=str(out_path),
+                      uid=uid, gid=gid, error=str(exc))
         # Re-apply xattrs the writer captured. Per-attr failures
         # surface via the callback (xattr_apply_error) but don't
         # abort the file — same policy as the chmod above.

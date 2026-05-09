@@ -4,13 +4,70 @@
  * file. Per-screen styling lives inside each Screen's
  * DEFAULT_CSS for locality; this file is for cross-screen rules
  * only.
+ *
+ * Color palette is Arq 7 macOS-style — deep blue accent on a
+ * neutral gray surface, with a slightly warmer success green
+ * + amber warnings. Picked to match the look operators see
+ * in the Arq.app GUI so transitioning between the two doesn't
+ * feel like switching tools.
  */
 
 Screen {
     background: $surface;
 }
 
-/* Header / footer remain Textual defaults (mode-aware). */
+/* Sidebar — left-rail navigation between sections. Used by the
+ * Arq-7-styled HomeScreen variant + the activity / browse
+ * screens that opt in by including a Sidebar widget at the
+ * left of their compose(). The fixed width matches Arq.app's
+ * own sidebar; it stays out of the way of the main content
+ * but is wide enough for a 12-character section label.
+ */
+.sidebar {
+    width: 24;
+    background: $boost;
+    border-right: solid $primary;
+    padding: 1 1;
+}
+.sidebar > .sidebar-title {
+    color: $primary;
+    text-style: bold;
+    padding: 0 1 1 0;
+}
+.sidebar > .sidebar-section {
+    color: $text;
+    padding: 0 1;
+    margin-top: 1;
+}
+.sidebar > .sidebar-section.-active {
+    background: $primary 30%;
+    color: $primary;
+    text-style: bold;
+}
+
+/* Status pills — colored chips operators see next to runs in
+ * the Activity screen and next to plans in HomeScreen. Mirrors
+ * Arq.app's status badges. */
+.status-pill {
+    padding: 0 1;
+    background: $boost;
+    border: tall $primary;
+}
+.status-pill.-running { border: tall $accent; }
+.status-pill.-paused { border: tall $warning; }
+.status-pill.-completed { border: tall $success; }
+.status-pill.-failed { border: tall $error; }
+.status-pill.-cancelled { border: tall $warning; }
+
+/* Section headers — replace the default H1/H2 widgets with
+ * Arq-7-style underlined-bold headings. */
+.section-header {
+    text-style: bold;
+    color: $primary;
+    border-bottom: heavy $primary;
+    padding-bottom: 0;
+    margin-top: 1;
+}
 
 /* Notifications surface as toasts; slightly darker variant for
  * informational hints so they don't look like errors. */
