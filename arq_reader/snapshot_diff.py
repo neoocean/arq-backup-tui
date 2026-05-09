@@ -269,6 +269,218 @@ def diff_snapshots(
     return result
 
 
+@dataclass
+class DedupReport:
+    """Output of :func:`measure_dedup_ratio`.
+
+    Operators want to know "how much disk did dedup actually
+    save me?" The numerator is the count + bytes of blobs that
+    appear in BOTH snapshots; the denominator is the union
+    (every distinct blob across the pair). High shared_ratio
+    means most of B was already in A — typical for incremental
+    daily backups of a stable source.
+    """
+
+    snapshot_a: str = ""        # record_path or label
+    snapshot_b: str = ""
+    a_blob_count: int = 0       # distinct blobs reachable from A
+    b_blob_count: int = 0       # distinct blobs reachable from B
+    shared_blob_count: int = 0  # blobs in BOTH
+    a_unique_count: int = 0     # blobs only in A (= deleted/superseded)
+    b_unique_count: int = 0     # blobs only in B (= newly added)
+    a_blob_bytes: int = 0       # sum of lengths in A
+    b_blob_bytes: int = 0
+    shared_blob_bytes: int = 0
+
+    @property
+    def shared_ratio(self) -> float:
+        """Fraction of B that was already in A. Range 0..1.
+        At 0.95+ the operator's incremental backups are
+        ~90%+ dedup'd; at 0.5 something significant changed
+        between the two snapshots."""
+        if self.b_blob_count == 0:
+            return 0.0
+        return self.shared_blob_count / self.b_blob_count
+
+    @property
+    def bytes_saved_by_dedup(self) -> int:
+        """How many bytes B would have written if there was
+        NO dedup against A. Same as shared_blob_bytes; surfaced
+        as a named property for operator-readable output."""
+        return self.shared_blob_bytes
+
+
+def measure_dedup_ratio(
+    restore,
+    *,
+    record_path_a: str,
+    record_path_b: str,
+    computer_uuid: Optional[str] = None,
+) -> DedupReport:
+    """Walk both snapshots' trees + report the shared/unique
+    blob breakdown.
+
+    Same backend assumption as :func:`diff_snapshots` — pass
+    an open :class:`arq_reader.Restore` instance + two
+    backuprecord paths.
+
+    Implementation note: this collects the FULL set of
+    blob_ids reachable from each snapshot (data blobs +
+    tree blobs + xattr blobs + ACL blob). Memory use is
+    proportional to total distinct blobs across both
+    snapshots; on a typical destination this is a few MB
+    of Python set overhead — well within budget for the
+    operator-on-laptop scenario.
+    """
+    from arq_reader.decrypt import decrypt_lz4_arqo
+    from arq_reader.parse import parse_tree
+    from arq_writer.backuprecord import parse_backuprecord
+    from arq_writer.types import FileNode, TreeNode
+
+    if computer_uuid is None:
+        parts = [p for p in record_path_a.split("/") if p]
+        if not parts:
+            raise ValueError(
+                "cannot infer computer_uuid from "
+                f"{record_path_a!r}"
+            )
+        computer_uuid = parts[0]
+    keyset = restore.keyset(computer_uuid)
+    backend = restore.backend
+
+    def _collect(record_path: str) -> Dict[str, int]:
+        """Walk the snapshot rooted at ``record_path`` + return
+        ``{blob_id: blob_byte_length}`` for every reachable blob.
+        Tree blobs are fetched + parsed; data/xattr/acl blobs
+        are NOT fetched (we use the BlobLoc.length field for
+        size). This keeps the cost down on remote backends."""
+        rec_arqo = backend.read_all(record_path)
+        rec = parse_backuprecord(decrypt_lz4_arqo(
+            rec_arqo, keyset.encryption_key, keyset.hmac_key,
+        ))
+        node = rec.get("node") or {}
+        out: Dict[str, int] = {}
+
+        def _add_loc(loc):
+            """Accept either dict (JSON) or BlobLoc (dataclass)."""
+            blob_id = (
+                loc.get("blobIdentifier")
+                if isinstance(loc, dict)
+                else getattr(loc, "blobIdentifier", "")
+            ) or ""
+            length = int(
+                loc.get("length")
+                if isinstance(loc, dict)
+                else getattr(loc, "length", 0) or 0
+            )
+            if blob_id:
+                # Same blob_id may appear twice with different
+                # 'length' (rare — same content stored unpacked
+                # vs packed). Keep the first observation.
+                out.setdefault(blob_id, length)
+
+        # Root xattrs + ACL.
+        for xloc in node.get("xattrsBlobLocs") or []:
+            _add_loc(xloc)
+        if node.get("aclBlobLoc"):
+            _add_loc(node["aclBlobLoc"])
+
+        if not node.get("isTree"):
+            for loc in node.get("dataBlobLocs") or []:
+                _add_loc(loc)
+            return out
+
+        # Tree-rooted: BFS over the tree blob graph.
+        from collections import deque
+        stack = deque(
+            [node["treeBlobLoc"]] if node.get("treeBlobLoc")
+            else []
+        )
+        seen_trees: set = set()
+        while stack:
+            loc = stack.popleft()
+            blob_id = (
+                loc.get("blobIdentifier")
+                if isinstance(loc, dict)
+                else getattr(loc, "blobIdentifier", "")
+            ) or ""
+            if blob_id in seen_trees:
+                continue
+            seen_trees.add(blob_id)
+            _add_loc(loc)
+            # Fetch + parse the tree.
+            try:
+                if loc.get("isPacked", False) if isinstance(loc, dict) else getattr(loc, "isPacked", False):
+                    rel = (
+                        loc["relativePath"]
+                        if isinstance(loc, dict)
+                        else loc.relativePath
+                    )
+                    off = int(
+                        loc["offset"] if isinstance(loc, dict)
+                        else loc.offset
+                    )
+                    ln = int(
+                        loc["length"] if isinstance(loc, dict)
+                        else loc.length
+                    )
+                    raw = backend.read_range(rel, off, ln)
+                else:
+                    rel = (
+                        loc["relativePath"]
+                        if isinstance(loc, dict)
+                        else loc.relativePath
+                    )
+                    raw = backend.read_all(rel)
+                tree = parse_tree(decrypt_lz4_arqo(
+                    raw,
+                    keyset.encryption_key, keyset.hmac_key,
+                ))
+            except Exception:
+                continue
+            for child in tree.children:
+                cn = child.node
+                # ACL + xattrs on every child.
+                for xloc in (
+                    getattr(cn, "xattrsBlobLocs", []) or []
+                ):
+                    _add_loc(xloc)
+                acl = getattr(cn, "aclBlobLoc", None)
+                if acl:
+                    _add_loc(acl)
+                if isinstance(cn, TreeNode):
+                    stack.append(cn.treeBlobLoc)
+                elif isinstance(cn, FileNode):
+                    for loc in cn.dataBlobLocs or []:
+                        _add_loc(loc)
+        return out
+
+    blobs_a = _collect(record_path_a)
+    blobs_b = _collect(record_path_b)
+    set_a = set(blobs_a.keys())
+    set_b = set(blobs_b.keys())
+    shared = set_a & set_b
+
+    report = DedupReport(
+        snapshot_a=record_path_a,
+        snapshot_b=record_path_b,
+        a_blob_count=len(set_a),
+        b_blob_count=len(set_b),
+        shared_blob_count=len(shared),
+        a_unique_count=len(set_a - set_b),
+        b_unique_count=len(set_b - set_a),
+        a_blob_bytes=sum(blobs_a.values()),
+        b_blob_bytes=sum(blobs_b.values()),
+        # For shared blobs we can pick either side's recorded
+        # length — they should match (same content → same
+        # blob_id → same byte size). Use A's value.
+        shared_blob_bytes=sum(
+            blobs_a.get(b, 0) for b in shared
+        ),
+    )
+    return report
+
+
 def _size_of(node) -> int:
     return int(getattr(node, "itemSize", 0) or 0)
 
