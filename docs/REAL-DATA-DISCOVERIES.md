@@ -1,36 +1,39 @@
-# Real-SFTP-data 검증으로 발견·개선한 호환성 사항
+# Compatibility Items Discovered and Improved Through Real-SFTP-data Verification
 
-> **요약**: 합성 (synthetic) 단위 테스트만으로는 통과하던 reader / writer /
-> validator 가, 실 Arq.app v8 destination (Hetzner Storage Box) 을 대상으로
-> 검증을 시작하자 **4개의 비호환 영역과 1개의 성능 병목**을 즉시 노출시켰습니다.
-> 모두 부분 fix 가 아닌 양방향 호환 fix 로 처리해 향후 Arq.app round-trip
-> 가능성을 확보했습니다.
+> **Summary**: A reader / writer / validator that passed every synthetic
+> unit test immediately exposed **four incompatibility areas and one
+> performance bottleneck** the moment we started verifying against a real
+> Arq.app v8 destination (Hetzner Storage Box). Every issue was treated as
+> a bidirectional compatibility fix rather than a partial one, securing
+> the possibility of future round-trips with Arq.app.
 
-이 문서는 **Before / After** 형식으로 각 차이점과 그 영향, 그리고 fix 의
-근거를 기록합니다. `.secrets/` 자격증명을 통해 실 destination 에 연결한
-순간부터의 발견 사항이며, 동일한 fix 가 없으면 `arq_restore` (BSD 참조 구현)
-나 Arq.app GUI 가 우리 writer 의 출력을 read 하지 못합니다.
+This document records each difference, its impact, and the rationale for
+the fix in **Before / After** form. These are the discoveries made from
+the moment we connected to a real destination via `.secrets/` credentials;
+without these fixes, neither `arq_restore` (the BSD reference
+implementation) nor the Arq.app GUI can read our writer's output.
 
-## 0. 검증 환경
+## 0. Verification environment
 
-- 운영자 실 destination: Hetzner Storage Box (chrooted SFTP-only 서버)
-- Arq.app 기록자: v8.x (destination 의 `arqVersion` 필드 기준)
-- Computer UUID: 1개, Backup folders: 5개
-- Sharded 디렉토리: standardobjects/treepacks/blobpacks/largeblobpacks 각 256 shards
-- 자격증명 채널: `.secrets/sftp.json` (identity_file 또는 password) +
-  `.secrets/dest_password` (Arq 암호화 비밀번호)
+- Operator's real destination: Hetzner Storage Box (chrooted SFTP-only server)
+- Arq.app writer: v8.x (based on the `arqVersion` field in the destination)
+- Computer UUIDs: 1, Backup folders: 5
+- Sharded directories: standardobjects/treepacks/blobpacks/largeblobpacks, 256 shards each
+- Credential channel: `.secrets/sftp.json` (identity_file or password) +
+  `.secrets/dest_password` (Arq encryption password)
 
-테스트 진입점:
-- `tests/integration/test_arqapp_sftp_compat.py` — 형식·형상 검증 (PR #9)
-- `tests/integration/test_arq_real_destination.py` — 런타임 reader/validator/writer (PR #16)
-- `tests/integration/test_arq_real_destination_deep.py` — 포맷 invariant 자동 발견 (이번 작업)
+Test entry points:
+- `tests/integration/test_arqapp_sftp_compat.py` — format / shape verification (PR #9)
+- `tests/integration/test_arq_real_destination.py` — runtime reader/validator/writer (PR #16)
+- `tests/integration/test_arq_real_destination_deep.py` — automatic discovery of format invariants (this work)
 
-## 1. SftpBackend 가 chrooted SFTP-only 서버에서 모두 실패
+## 1. SftpBackend fails entirely on chrooted SFTP-only servers
 
 ### Before
 
-`SftpBackend` 의 7개 메서드 (`is_dir`, `exists`, `stat_size`, `read_range`,
-`mkdir`, `unlink`, `write_all` 의 partial cleanup) 가 SSH 임의 명령에 의존:
+Seven methods of `SftpBackend` (`is_dir`, `exists`, `stat_size`, `read_range`,
+`mkdir`, `unlink`, the partial cleanup in `write_all`) depended on arbitrary
+SSH commands:
 
 ```python
 def is_dir(self, path):
@@ -38,8 +41,9 @@ def is_dir(self, path):
     return cp.returncode == 0 and cp.stdout.decode().strip() == "Y"
 ```
 
-합성 (LocalBackend mock) 테스트만 보면 정상이었지만, Hetzner Storage Box 처럼
-chrooted SFTP-only 서버에서는 **모든 SSH 명령이 거부**됩니다:
+Looking only at synthetic (LocalBackend mock) tests, this looked fine, but
+on chrooted SFTP-only servers like Hetzner Storage Box **every SSH command
+is rejected**:
 
 ```
 ssh ... -- test -d /home/...
@@ -47,33 +51,33 @@ ssh ... -- test -d /home/...
 → stderr: "Command not found. Use 'help' to get a list of available commands."
 ```
 
-이 한 줄로 layout discovery, restore, validate, writer 의 destination 초기화
-모두 실패. 합성 테스트는 LocalBackend 만 사용해 이 경로를 한 번도 타지 않았기
-때문에 잡히지 않음.
+This single line broke layout discovery, restore, validate, and writer
+destination initialization. Synthetic tests only used LocalBackend, so they
+never exercised this code path and the bug was never caught.
 
 ### After (commit `792e521`)
 
-모든 7개 메서드를 sftp 프로토콜로 재작성:
+Rewrote all seven methods using the sftp protocol:
 
-| 메서드 | 새 구현 |
+| Method | New implementation |
 |---|---|
 | `is_dir(path)` | `sftp cd <path>` (rc=0 ⇒ dir, rc=1 ⇒ file/missing) |
-| `exists(path)` | `sftp cd <path>` 또는 `sftp ls -l <path>` 중 하나라도 성공 |
-| `stat_size(path)` | `sftp ls -l <path>` 의 5번째 컬럼 |
-| `read_range(path, off, len)` | ssh `head -c`/`dd` 시도 → rc≠0 이면 sftp `get` 전체 다운로드 후 메모리 슬라이스 |
-| `mkdir(path, parents)` | sftp `mkdir` 으로 ancestor 단계별 생성, `cd` probe 로 이미 존재 여부 검사 |
-| `unlink(path)` | sftp `rm`, "No such file" stderr 는 silent OK (rm -f 시맨틱) |
+| `exists(path)` | `sftp cd <path>` or `sftp ls -l <path>` succeeds |
+| `stat_size(path)` | the 5th column of `sftp ls -l <path>` |
+| `read_range(path, off, len)` | try ssh `head -c`/`dd` → on rc≠0 fall back to sftp `get` (full download) and slice in memory |
+| `mkdir(path, parents)` | create ancestors step by step with sftp `mkdir`, probe existence with `cd` |
+| `unlink(path)` | sftp `rm`; "No such file" stderr is silently OK (rm -f semantics) |
 | `write_all` partial cleanup | `_run_sftp_batch("rm <partial>\nbye\n")` |
 
-검증: `test_layout_discovers_computer`, `test_keyset_decrypts` 등 운영자
-destination 전부 `OK`.
+Verification: `test_layout_discovers_computer`, `test_keyset_decrypts`, etc.
+all return `OK` against the operator's destination.
 
-## 2. Backuprecord 는 binary plist 가 아닌 UTF-8 JSON
+## 2. Backuprecord is UTF-8 JSON, not a binary plist
 
 ### Before
 
-우리 writer 와 reader 는 spec 의 "binary plist" 표현을 따라 다음 라인을
-사용했습니다:
+Following the spec's "binary plist" representation, our writer and reader
+used these lines:
 
 ```python
 # writer
@@ -83,80 +87,83 @@ return plistlib.dumps(record, fmt=plistlib.FMT_BINARY)
 record = plistlib.loads(record_plain)
 ```
 
-자체 round-trip 단위 테스트는 양방향 모두 binary plist 라 통과.
+The self round-trip unit test passed because both sides used binary plist.
 
 ### After (commit `399480a`)
 
-운영자 record 의 첫 80바이트를 디코드하면:
+Decoding the first 80 bytes of the operator's record:
 
 ```
 b'{"backupFolderUUID":"0830DA4E-3EB6-4342-A3F3-33E99E19D005","diskIdentifier":"5F2...
 ```
 
-Arq.app v8 은 backuprecord 를 **UTF-8 JSON 한 줄** (BOM 없음) 로 기록.
-`plistlib.loads` 가 즉시 `InvalidFileException` 으로 실패.
+Arq.app v8 records the backuprecord as **a single line of UTF-8 JSON**
+(no BOM). `plistlib.loads` immediately fails with `InvalidFileException`.
 
 Fix:
-- **reader** (`arq_reader/restore.py`): 새 `_parse_backuprecord(plain)` 헬퍼
-  — plist 시도 후 fail 시 `json.loads(plain.decode("utf-8"))`. 두 형식 모두
-  허용해 우리가 만든 (legacy) plist 백업과 Arq.app JSON 백업 모두 read.
-- **writer** (`arq_writer/backuprecord.py`): `serialize_backuprecord(fmt='json')`
-  를 새 default 로 설정. `fmt='binary-plist'` 는 하위 호환을 위해 유지.
+- **reader** (`arq_reader/restore.py`): a new `_parse_backuprecord(plain)`
+  helper — try plist first, on failure fall back to
+  `json.loads(plain.decode("utf-8"))`. Accepting both formats lets us read
+  both our (legacy) plist backups and Arq.app JSON backups.
+- **writer** (`arq_writer/backuprecord.py`): set
+  `serialize_backuprecord(fmt='json')` as the new default. `fmt='binary-plist'`
+  is retained for backward compatibility.
 
-## 3. BlobLoc 바이너리 레이아웃에 `isLargePack` 필드가 빠져 있었음
+## 3. The BlobLoc binary layout was missing the `isLargePack` field
 
 ### Before
 
-우리 `parse_blobloc` 와 `write_blobloc` 의 필드 순서:
+The field order in our `parse_blobloc` and `write_blobloc`:
 
 ```python
-# 우리 reader
+# our reader
 def parse_blobloc(reader):
     blob_id    = reader.read_string()
-    is_packed  = reader.read_bool()       # 7바이트 후 다음 필드
+    is_packed  = reader.read_bool()       # next field after 7 bytes
     rel_path   = reader.read_string()
     ...
 ```
 
-자체 round-trip 에서는 양방향 동일해 통과.
+Self round-trip passed because both sides agreed.
 
 ### After (commit `399480a`)
 
-운영자 destination 의 첫 tree blob 을 hex dump 해서 확인:
+Confirmed by hex-dumping the first tree blob from the operator's destination:
 
 ```
 ... 31 31 62 | 01 | 00 | 01 00 00 00 00 00 00 00 5a 2f 45 31 42 44 ...
               ^    ^    ^                                    ^
-              |    |    isNotNull=1                          rel_path 시작 "/E1BD..."
-              |    is_large_pack=False  ← 우리가 빠뜨린 바이트
+              |    |    isNotNull=1                          rel_path begins "/E1BD..."
+              |    is_large_pack=False  ← the byte we missed
               is_packed=True
 ```
 
-실제 Arq.app 의 BlobLoc 레이아웃:
+Arq.app's actual BlobLoc layout:
 ```
 blob_id, isPacked, isLargePack, rel_path, offset, length, stretch, compression
                   ^^^^^^^^^^^
-                  spec 에 누락; 실 데이터에서 발견
+                  missing from the spec; discovered in real data
 ```
 
-이 한 바이트 누락 때문에 모든 다음 필드가 1바이트씩 어긋나 다음 `read_string`
-에서 `bad [String] isNotNull byte: 45 (= '-')` 폭발 — UUID 의 하이픈을
-isNotNull 바이트로 잘못 해석.
+Because of this single missing byte, every following field was off by one
+byte and the next `read_string` exploded with
+`bad [String] isNotNull byte: 45 (= '-')` — a hyphen from a UUID
+misinterpreted as the isNotNull byte.
 
 Fix:
-- `arq_writer/types.py`: `BlobLoc.isLargePack: bool = False` 필드 추가.
-- `arq_reader/parse.py:parse_blobloc`: `read_bool()` 한 번 더.
-- `arq_writer/serialize.py:write_blobloc`: `write_bool(loc.isLargePack)` 추가.
-- `arq_writer/backuprecord.py:blobloc_to_dict`: JSON 에도 `"isLargePack"` 키 emit.
-- `arq_reader/restore.py:_blobloc_from_dict`: JSON 의 `isLargePack` 읽음.
+- `arq_writer/types.py`: add the `BlobLoc.isLargePack: bool = False` field.
+- `arq_reader/parse.py:parse_blobloc`: one more `read_bool()`.
+- `arq_writer/serialize.py:write_blobloc`: add `write_bool(loc.isLargePack)`.
+- `arq_writer/backuprecord.py:blobloc_to_dict`: also emit `"isLargePack"` in JSON.
+- `arq_reader/restore.py:_blobloc_from_dict`: read `isLargePack` from JSON.
 
-테스트 `test_blobloc_keys_overlap` 으로 lock-in.
+Locked in by `test_blobloc_keys_overlap`.
 
-## 4. Node 직렬화에 `userName` / `groupName` 필드가 빠져 있었음
+## 4. Node serialization was missing `userName` / `groupName` fields
 
 ### Before
 
-`node_to_dict` 가 emit 하는 키:
+Keys emitted by `node_to_dict`:
 ```python
 {
   "isTree", "computerOSType", "containedFilesCount", "itemSize",
@@ -173,32 +180,35 @@ Fix:
 
 ### After (commit `399480a`)
 
-운영자 record 의 `node` dict keys:
+Keys of the operator record's `node` dict:
 ```
-{... 위와 같음 ..., 'groupName', 'userName', 'reparseTag',
+{... same as above ..., 'groupName', 'userName', 'reparseTag',
  'reparsePointIsDirectory', ...}
 ```
 
-`userName`/`groupName` 누락. Numeric uid/gid 만으로는 Arq.app 의 GUI 복원에서
-ownership 표시가 안 되거나, `arq_restore` 의 일부 코드 경로가 fail 할 수 있음.
+`userName`/`groupName` were missing. With only numeric uid/gid, Arq.app's
+GUI restore may fail to display ownership, or some code paths in
+`arq_restore` may fail.
 
 Fix:
-- `arq_writer/backuprecord.py:node_to_dict`: 두 키 추가 (값은 `node.username
-  or ""`, `node.groupName or ""`).
-- `arq_writer/backup.py`: 새 `_resolve_owner(uid, gid)` 헬퍼 — POSIX
-  `pwd`/`grp` 모듈로 uid → username, gid → groupname 변환. 실패 (LDAP-only
-  환경, Windows) 면 `None` 반환 → writer 가 빈 문자열로 emit.
-- `Backup._walk_file` / `_walk_symlink` 의 두 FileNode 생성 지점에서
-  `_resolve_owner` 호출.
+- `arq_writer/backuprecord.py:node_to_dict`: add the two keys (values are
+  `node.username or ""`, `node.groupName or ""`).
+- `arq_writer/backup.py`: a new `_resolve_owner(uid, gid)` helper — uses
+  the POSIX `pwd`/`grp` modules to convert uid → username and gid →
+  groupname. On failure (LDAP-only environments, Windows) returns `None`
+  → the writer emits an empty string.
+- `Backup._walk_file` / `_walk_symlink` call `_resolve_owner` at the two
+  FileNode construction points.
 
-테스트 `test_node_keys_overlap_with_arq_app` 으로 lock-in.
+Locked in by `test_node_keys_overlap_with_arq_app`.
 
-## 5. SFTP partial-read 가 packed blob 마다 전체 pack 다운로드
+## 5. SFTP partial-read downloads the entire pack for every packed blob
 
 ### Before
 
-Hetzner 같은 chrooted 서버에서는 `ssh ... -- head -c <length>` 가 거부되므로
-`read_range` 의 fallback 이 sftp `get` 으로 **전체 파일 다운로드**:
+On chrooted servers like Hetzner, `ssh ... -- head -c <length>` is
+rejected, so the `read_range` fallback uses sftp `get` to **download the
+entire file**:
 
 ```python
 def _read_range_via_sftp_get(self, path, offset, length, *, timeout):
@@ -209,20 +219,20 @@ def _read_range_via_sftp_get(self, path, offset, length, *, timeout):
         return f.read(length)
 ```
 
-문제: pack 파일 한 개에 수십 개 blob 이 들어있는데, restore 마다 각 blob 의
-range read 가 **같은 pack 파일을 다시 다운로드**. 결과:
-- Pack 50MB × N reads = 수백 MB 중복 다운로드
-- restore 1회 = 30분+ hang
-- 단순한 test 도 끝까지 가지 않음
+Problem: a single pack file holds dozens of blobs, but every blob's range
+read during a restore **re-downloads the same pack file**. The result:
+- Pack 50MB × N reads = hundreds of MB of duplicate downloads
+- A single restore = 30+ minute hang
+- Even simple tests never reach the end
 
 ### After (commit `399480a`)
 
-Per-session pack file 캐시 추가:
+Added a per-session pack file cache:
 
 ```python
 class SftpBackend:
     def __init__(self, ...):
-        self._read_cache: Dict[str, Path] = {}   # 새 필드
+        self._read_cache: Dict[str, Path] = {}   # new field
 
     def _read_range_via_sftp_get(self, path, offset, length, *, timeout):
         cached = self._read_cache.get(path)
@@ -243,17 +253,17 @@ class SftpBackend:
         self._read_cache.clear()
 ```
 
-같은 pack 파일에 대한 N 번째 read 는 local seek (마이크로초). `__exit__` /
-`close` 에서 모든 캐시 파일 정리 — 디스크 leak 없음.
+The Nth read of the same pack file becomes a local seek (microseconds).
+`__exit__` / `close` clears every cached file — no disk leak.
 
-검증: writer round-trip 8분 (pre-cache 30분+ → post-cache 8분 — 60-70%
-감소).
+Verification: writer round-trip 8 minutes (pre-cache 30+ minutes →
+post-cache 8 minutes — a 60-70% reduction).
 
-## 6. List_backuprecords bucket 공식의 잘못된 가정
+## 6. Wrong assumption in the List_backuprecords bucket formula
 
 ### Before (commit `7ded492`)
 
-기존 docstring:
+The previous docstring:
 ```python
 def list_backuprecords(...):
     """...
@@ -263,143 +273,154 @@ def list_backuprecords(...):
     """
 ```
 
-테스트가 실 destination 에서 `bucket=176, creationDate=1761965143` 을 발견:
+A test against the real destination found `bucket=176, creationDate=1761965143`:
 - `floor(1761965143 / 100000) = 17619` ≠ 176
-- 실측 비율은 **`/ 10_000_000`** 에 가까움 (176.1965...)
-- `num=2351653` 도 `creationDate % anything` 로 설명 안 됨 — 별도 sequence
+- The observed ratio is closer to **`/ 10_000_000`** (176.1965...)
+- `num=2351653` cannot be explained as `creationDate % anything` either —
+  it is a separate sequence
 
 ### After
 
-Spec 의 bucket 공식은 Arq.app 내부 implementation detail 로 격하. Caller 는
-**chronological 정렬** 만 의존하므로 그것만 검증:
+The spec's bucket formula is demoted to an Arq.app internal implementation
+detail. Callers only depend on **chronological ordering**, so we verify
+only that:
 
-- docstring: "Arq.app picks (bucket, num) such that lexicographic ordering
-  matches creationDate order" 로 변경. 정확한 공식 claim 제거.
-- 새 테스트 `test_record_paths_sort_chronologically`: 5폴더 × 5records
-  decrypt 후 path 정렬과 creationDate 정렬 일치 검증 (실 destination 에서 PASS).
+- docstring: changed to "Arq.app picks (bucket, num) such that lexicographic
+  ordering matches creationDate order". The exact-formula claim is removed.
+- New test `test_record_paths_sort_chronologically`: decrypt 5 folders ×
+  5 records each, then verify path ordering matches creationDate ordering
+  (PASS on the real destination).
 
-## 7. Tree v4 binary 포맷의 38-byte trailing block
+## 7. The 38-byte trailing block in the Tree v4 binary format
 
 ### Before
 
-우리 `parse_node` 는 Tree v3 만 알고 있었습니다. 운영자의 5개 폴더 중
-4개가 Tree v4 로 기록되어 있어, 이 폴더들의 root tree 부터 walk 자체가
-`bad [String] isNotNull byte: 55 at pos=680` 같은 형태로 즉시 폭발했습니다.
+Our `parse_node` only knew about Tree v3. Four of the operator's five
+folders were recorded as Tree v4, so even walking the root tree of those
+folders exploded immediately with errors like
+`bad [String] isNotNull byte: 55 at pos=680`.
 
-### After (commit `60496a1` + 본 PR)
+### After (commit `60496a1` + this PR)
 
-Hex diff 분석으로 v4 가 **모든 Node 끝에 38바이트 trailing block** 을
-추가한다는 점을 발견. 초기 sampling 에서는 모두 zero 였지만, 더 넓은 walk
-(`scripts/probe_tree_v4_block.py`, 30 nodes 샘플) 에서 **non-zero 패턴이
-드러났습니다**.
+Hex-diff analysis revealed that v4 **adds a 38-byte trailing block at the
+end of every Node**. Initial sampling showed all zeros, but a wider walk
+(`scripts/probe_tree_v4_block.py`, sampling 30 nodes) **revealed non-zero
+patterns**.
 
-#### 38-byte block 의 추정 구조 (실측 30 nodes 기준)
+#### Estimated structure of the 38-byte block (based on 30 observed nodes)
 
 ```
-바이트 0..7   int64 BE  scanned-at sec   (≈ 백업 pass 시각, 노드별로
-                                          ~7분 창 안에 분포 — 파일 자체의
-                                          mtime/ctime/create 와 무관)
-바이트 8..15  int64 BE  scanned-at nsec
-바이트 16..23 int64 BE  0x00000000_01000000 (모든 non-zero block 에서
-                                          동일 — present-flag 또는
-                                          version marker 로 추정)
-바이트 24..37 14 bytes  reserved (모두 zero)
+bytes 0..7   int64 BE  scanned-at sec   (≈ backup pass time, distributed
+                                         within a ~7-minute window across
+                                         nodes — unrelated to the file's
+                                         own mtime/ctime/create)
+bytes 8..15  int64 BE  scanned-at nsec
+bytes 16..23 int64 BE  0x00000000_01000000 (identical across every
+                                         non-zero block — presumed a
+                                         present-flag or version marker)
+bytes 24..37 14 bytes  reserved (all zero)
 ```
 
-특이 사항:
-- 30개 nodes 중 3개 (모두 `.DS_Store`) 는 38 bytes 가 **모두 zero**.
-  이 3 노드는 mtime == ctime == create_sec (동일 시각) — 가장 최근
-  백업 pass 에서 새로 추가된 파일들이라는 공통점.
-- 나머지 27개 nodes 는 위 구조 패턴 — scanned-at timestamp 가 모두
-  2025-07-23 18:33-18:40 UTC 사이 (해당 백업 pass 시각).
+Notable observations:
+- 3 of the 30 nodes (all `.DS_Store`) had **all-zero** 38 bytes. These
+  three nodes have mtime == ctime == create_sec (same instant) — all share
+  the trait of being files newly added in the most recent backup pass.
+- The remaining 27 nodes follow the structure pattern above — every
+  scanned-at timestamp falls between 2025-07-23 18:33-18:40 UTC (the
+  time of that backup pass).
 
-#### 결론
+#### Conclusion
 
-reader 는 그대로 38 bytes 를 opaque skip — 양쪽 shape 모두 다음 child
-와 정확히 align 됨을 `tests/test_tree_v4_trailing_block.py` 가 핀.
-정확한 field 의미 (lastVerifiedAt? scannedAt? reverifiedAt?) 확정은
-Arq.app Mach-O RE 후속 작업으로 deferred — 우리 구현이 Arq.app 와
-binary-perfect 한 backup 을 생성하려면 writer 에 같은 38 bytes 를 emit
-해야 하지만, 현재 writer 는 v3 트리만 emit 하므로 영향 없음.
+The reader simply skips the 38 bytes opaquely — `tests/test_tree_v4_trailing_block.py`
+pins that both shapes align exactly with the next child. Determining the
+exact field semantics (lastVerifiedAt? scannedAt? reverifiedAt?) is
+deferred to follow-up Arq.app Mach-O RE work — for our implementation to
+produce binary-perfect backups against Arq.app, the writer would have to
+emit the same 38 bytes, but the current writer only emits v3 trees, so
+there is no impact today.
 
 Fix:
 - (PR #18) `arq_reader/parse.py:parse_node`: `if tree_version >= 4:
   reader.read_raw(38)`
-- (PR #18) 새 `BinaryReader.read_raw(n)` 메서드 — 미해석 바이트 N개
-  consume
-- (이 PR) parse_node 의 inline comment 에 추정 구조 기록
-- (이 PR) `tests/test_tree_v4_trailing_block.py` — all-zero shape +
-  structured shape + v3 binary-compat regression 4 tests
-- (이 PR) `scripts/probe_tree_v4_block.py` — 운영자 destination 에서
-  실측 sample 추가 수집 도구
+- (PR #18) new `BinaryReader.read_raw(n)` method — consumes N
+  uninterpreted bytes
+- (this PR) recorded the estimated structure as inline comments in parse_node
+- (this PR) `tests/test_tree_v4_trailing_block.py` — 4 tests covering the
+  all-zero shape + structured shape + v3 binary-compat regression
+- (this PR) `scripts/probe_tree_v4_block.py` — a tool to collect more
+  observed samples from the operator's destination
 
-검증: 운영자의 5개 폴더 모두 (v3 1개 + v4 4개) `parse_tree` 통과.
-38-byte block 의 정확한 field semantics 는 Arq.app Mach-O RE 후속 작업.
+Verification: all five operator folders (1 v3 + 4 v4) pass `parse_tree`.
+The exact field semantics of the 38-byte block remain follow-up work for
+Arq.app Mach-O RE.
 
-## 영향도 매트릭스
+## Impact matrix
 
-| 영역 | Before | After | 영향받은 코드 |
+| Area | Before | After | Affected code |
 |---|---|---|---|
-| Hetzner-style SFTP 호환성 | ❌ 모든 backend op 실패 | ✅ sftp 프로토콜만으로 동작 | `arq_validator/sftp.py` |
-| Backuprecord 직렬화 | binary plist (not Arq.app) | JSON default + plist back-compat | `arq_writer/backuprecord.py`, `arq_reader/restore.py` |
-| BlobLoc 바이너리 레이아웃 | spec 따름 (실제와 다름) | `isLargePack` 추가, Arq.app 일치 | `arq_writer/serialize.py`, `arq_reader/parse.py`, dict 변환기들 |
-| Node 직렬화 | uid/gid 만 | userName/groupName 까지 | `arq_writer/backup.py`, `arq_writer/backuprecord.py` |
-| SFTP partial-read 성능 | pack 마다 전체 재다운로드 | 세션 캐시 — local seek | `arq_validator/sftp.py` |
-| Bucket 공식 docs | 잘못된 100x 차이 | 공식 자체를 contract 에서 제거 | `arq_validator/layout.py` |
-| Tree v4 binary 호환성 | ❌ v4 모든 폴더 walk 실패 | ✅ 38-byte trailing block opaque skip | `arq_reader/parse.py` |
+| Hetzner-style SFTP compatibility | ❌ every backend op fails | ✅ works using the sftp protocol alone | `arq_validator/sftp.py` |
+| Backuprecord serialization | binary plist (not Arq.app) | JSON default + plist back-compat | `arq_writer/backuprecord.py`, `arq_reader/restore.py` |
+| BlobLoc binary layout | followed the spec (differs from reality) | added `isLargePack`, matches Arq.app | `arq_writer/serialize.py`, `arq_reader/parse.py`, dict converters |
+| Node serialization | uid/gid only | also userName/groupName | `arq_writer/backup.py`, `arq_writer/backuprecord.py` |
+| SFTP partial-read performance | re-downloaded the full pack each time | session cache — local seek | `arq_validator/sftp.py` |
+| Bucket formula docs | wrong by a factor of 100 | the formula itself is removed from the contract | `arq_validator/layout.py` |
+| Tree v4 binary compatibility | ❌ every v4 folder walk failed | ✅ opaquely skips the 38-byte trailing block | `arq_reader/parse.py` |
 
-## 신규 통합 테스트 카탈로그
+## Catalogue of new integration tests
 
-`tests/integration/test_arq_real_destination_deep.py` (신규):
+`tests/integration/test_arq_real_destination_deep.py` (new):
 
-| 테스트 클래스 | 테스트 | 검증 내용 |
+| Test class | Test | What it verifies |
 |---|---|---|
-| `FolderAndHistoryParseTests` | `test_every_folder_has_decryptable_latest_record` | 5폴더 모두 최신 record JSON parse |
-| | `test_oldest_record_still_decrypts` | 가장 오래된 record 도 decrypt — keyset rotation 무결성 |
-| | `test_record_paths_sort_chronologically` | path 정렬 == creationDate 정렬 invariant |
-| `TreeBinaryParseTests` | `test_top_level_tree_parses` | 모든 폴더의 root tree blob binary parse |
-| | `test_nested_trees_parse_cleanly` | 첫 폴더의 50개 nested tree (`isLargePack` regression test) |
-| `WriterFormatCompatTests` | `test_node_keys_overlap_with_arq_app` | 우리 `node_to_dict` 가 Arq.app 의 모든 node 키 emit |
-| | `test_record_top_level_keys_overlap` | 우리 `build_backuprecord_dict` 가 Arq.app 의 모든 top-level 키 emit |
-| | `test_blobloc_keys_overlap` | 우리 `blobloc_to_dict` 가 Arq.app 의 모든 BlobLoc 키 emit (isLargePack regression) |
+| `FolderAndHistoryParseTests` | `test_every_folder_has_decryptable_latest_record` | latest record JSON parse for all 5 folders |
+| | `test_oldest_record_still_decrypts` | the oldest record still decrypts — keyset rotation integrity |
+| | `test_record_paths_sort_chronologically` | path-ordering == creationDate-ordering invariant |
+| `TreeBinaryParseTests` | `test_top_level_tree_parses` | binary parse of every folder's root tree blob |
+| | `test_nested_trees_parse_cleanly` | 50 nested trees of the first folder (`isLargePack` regression test) |
+| `WriterFormatCompatTests` | `test_node_keys_overlap_with_arq_app` | our `node_to_dict` emits every Arq.app node key |
+| | `test_record_top_level_keys_overlap` | our `build_backuprecord_dict` emits every Arq.app top-level key |
+| | `test_blobloc_keys_overlap` | our `blobloc_to_dict` emits every Arq.app BlobLoc key (isLargePack regression) |
 
 `tests/integration/test_arq_real_destination.py` (PR #16):
 
-| 테스트 | 검증 내용 |
+| Test | What it verifies |
 |---|---|
-| `test_restore_latest_record_of_first_folder` | reader 가 운영자 실 데이터 복원 |
+| `test_restore_latest_record_of_first_folder` | reader restores the operator's real data |
 | `test_audit_drip_capped_at_a_few_megabytes` | validator L2 audit-drip on real data |
 | `test_round_trip_via_real_sftp` | writer → reader → validator end-to-end (sandbox) |
 
-`tests/integration/test_arqapp_sftp_compat.py` (PR #9, attribute 이름 수정됨):
+`tests/integration/test_arqapp_sftp_compat.py` (PR #9, attribute names corrected):
 
-| 테스트 | 검증 내용 |
+| Test | What it verifies |
 |---|---|
-| `test_layout_discovers_computer` | discover_layout(enumerate_objects=False) — 빠른 UUID 발견 |
-| `test_keyset_decrypts` | 운영자 keyset PBKDF2-SHA256 + AES-CBC 복호화 |
-| `test_compatibility_audit_passes` | 25개 invariant 모두 통과 |
-| `test_validator_l0_l1a_l1b_tiers_pass` | DEEP tier 통과 |
-| `test_fingerprint_is_well_formed_json` | shape fingerprint JSON 직렬화 |
-| `test_records_list_at_least_one` | 폴더에 최소 1 record 존재 |
-| `test_sample_standalone_object_arqo_valid` | standalone object ARQO + HMAC + blob_id 검증 |
+| `test_layout_discovers_computer` | discover_layout(enumerate_objects=False) — fast UUID discovery |
+| `test_keyset_decrypts` | operator keyset PBKDF2-SHA256 + AES-CBC decryption |
+| `test_compatibility_audit_passes` | all 25 invariants pass |
+| `test_validator_l0_l1a_l1b_tiers_pass` | DEEP tier passes |
+| `test_fingerprint_is_well_formed_json` | shape fingerprint JSON serialization |
+| `test_records_list_at_least_one` | folder contains at least 1 record |
+| `test_sample_standalone_object_arqo_valid` | standalone object ARQO + HMAC + blob_id verification |
 
-## 핵심 교훈
+## Key takeaways
 
-1. **합성 테스트는 자기 일관성만 보증**한다. 양방향 (reader+writer) 모두 통과해도
-   진짜 호환성은 외부 reference 와 비교해야만 검증된다.
-2. **Spec 문서가 실제와 다를 수 있다.** Arq 7 공식 spec 의 "binary plist"
-   표현은 실제로는 JSON 으로 emit 된다. `isLargePack` 도 spec 에 없다.
-3. **SFTP-only 서버는 일반적이다.** Hetzner 외에도 클라우드 storage box 류는
-   대부분 chrooted 로 SSH 명령 차단. backend 는 sftp 프로토콜만으로 동작해야
-   한다.
-4. **운영자가 자기 destination 으로 검증할 수 있는 framework** (`.secrets/` +
-   integration tests) 가 sandbox 에서 발견 못 하는 호환성 버그를 즉시 노출시킨다.
+1. **Synthetic tests guarantee only self-consistency.** Even when both
+   directions (reader+writer) pass, true compatibility can only be verified
+   by comparing against an external reference.
+2. **Spec documents can differ from reality.** The "binary plist"
+   representation in the official Arq 7 spec is actually emitted as JSON.
+   `isLargePack` is also missing from the spec.
+3. **SFTP-only servers are common.** Beyond Hetzner, most cloud storage
+   boxes are chrooted and block SSH commands. The backend must work using
+   the sftp protocol alone.
+4. **A framework that lets the operator verify against their own
+   destination** (`.secrets/` + integration tests) immediately exposes
+   compatibility bugs the sandbox cannot find.
 
-## 운영자 가이드
+## Operator guide
 
-운영자가 자신의 destination 으로 위 테스트를 실행하는 절차는
-`docs/COMPAT-SFTP-TESTING.md` 의 "0. 자격증명 소스" 섹션을 참조하세요.
-요약:
+For the procedure operators should follow to run the above tests against
+their own destination, see the "0. Credential sources" section of
+`docs/COMPAT-SFTP-TESTING.md`. Summary:
 
 ```sh
 cd /path/to/arq-backup-tui
@@ -409,7 +430,8 @@ cp .secrets/dest_password.example .secrets/dest_password
 chmod 600 .secrets/sftp.json .secrets/dest_password
 $EDITOR .secrets/sftp.json .secrets/dest_password
 
-python3 -m unittest tests.integration -v   # 전체 통합 테스트
+python3 -m unittest tests.integration -v   # entire integration suite
 ```
 
-자격증명이 비어 있으면 모든 통합 테스트는 자동 skip — 일반 회귀에 영향 없음.
+If credentials are empty, every integration test auto-skips — no impact
+on regular regression runs.

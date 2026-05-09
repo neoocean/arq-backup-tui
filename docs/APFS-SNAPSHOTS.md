@@ -1,46 +1,48 @@
-# macOS APFS 스냅샷 기반 백업
+# macOS APFS Snapshot-Based Backup
 
-## 1. 동기
+## 1. Motivation
 
-라이브 macOS 소스 트리를 그대로 walk하며 백업하면 walk 도중
-파일 내용이 바뀔 수 있습니다 — 사용자가 hashing 중인 문서를 저장
-하면 결과는 pre-save 도 post-save 도 아닌 chunk를 만들어냅니다.
-Apple의 권장 해결책은 **APFS 스냅샷**을 먼저 만들고 그 read-only
-view를 walk하는 것이며, **Time Machine 자체가 정확히 그렇게
-작동**합니다. Arq.app도 같은 패턴을 사용합니다.
+If you walk a live macOS source tree and back it up directly, file contents
+can change while the walk is in progress — if the user saves a document
+while it is being hashed, the result is a chunk that is neither the
+pre-save nor the post-save state. Apple's recommended solution is to
+first create an **APFS snapshot** and walk its read-only view, and **Time
+Machine itself works exactly that way**. Arq.app uses the same pattern.
 
-본 프로젝트는 macOS에서 옵션으로 같은 보호를 제공합니다.
+This project optionally provides the same protection on macOS.
 
-## 2. 검토한 옵션
+## 2. Options Considered
 
-### 2.1 macOS 옵션
+### 2.1 macOS Options
 
-| 메커니즘 | 도구 | 특이사항 |
+| Mechanism | Tool | Notes |
 |---------|------|---------|
-| **Time Machine local snapshot** | `tmutil localsnapshot` | 이름은 `com.apple.TimeMachine.YYYY-MM-DD-HHMMSS.local`; 24시간 후 자동 삭제됨; 누구나 만들 수 있음(sudo 필요) |
-| **APFS native snapshot** | `fs_snapshot_create` syscall | 일반적으로 SIP 면제 또는 entitlement가 필요해 일반 도구에서 사용 어려움 |
-| **`mount_apfs -s <name>`** | mount tool | 어떤 snapshot이든 read-only로 마운트 가능; sudo 필요 |
-| **`tmutil deletelocalsnapshots`** | tmutil | TM snapshot 삭제; sudo 필요 |
+| **Time Machine local snapshot** | `tmutil localsnapshot` | Name is `com.apple.TimeMachine.YYYY-MM-DD-HHMMSS.local`; auto-deleted after 24 hours; anyone can create one (sudo required) |
+| **APFS native snapshot** | `fs_snapshot_create` syscall | Generally requires SIP exemption or an entitlement, making it hard to use from ordinary tools |
+| **`mount_apfs -s <name>`** | mount tool | Any snapshot can be mounted read-only; sudo required |
+| **`tmutil deletelocalsnapshots`** | tmutil | Deletes a TM snapshot; sudo required |
 
-**선택**: Time Machine local snapshot + mount_apfs.
-- 비특권 entitlement 불필요
-- Apple이 공식적으로 지원하는 패턴
-- Arq.app도 같은 방식 추정
+**Choice**: Time Machine local snapshot + mount_apfs.
+- No unprivileged entitlement required
+- A pattern officially supported by Apple
+- Presumed to be the same approach Arq.app uses
 
-### 2.2 다른 OS
+### 2.2 Other OSes
 
-- **Linux ext4**: 네이티브 스냅샷 없음. LVM이나 btrfs로 우회.
-- **Linux btrfs**: `btrfs subvolume snapshot` 가능하지만 본 프로젝트의 macOS 우선 stance와 별개로 다뤄야 함 (이 PR 범위 외).
-- **Windows NTFS**: VSS (Volume Shadow Copy) 가능; 별도 PR.
+- **Linux ext4**: no native snapshot. Workaround via LVM or btrfs.
+- **Linux btrfs**: `btrfs subvolume snapshot` is possible but should be
+  treated separately from this project's macOS-first stance (out of scope
+  for this PR).
+- **Windows NTFS**: VSS (Volume Shadow Copy) is possible; separate PR.
 
-본 PR은 **macOS 만** 지원하며, 다른 OS에서는 라이브 트리 walk로
-fallback (옵션 무시).
+This PR supports **macOS only**; on other OSes it falls back to a live tree
+walk (the option is ignored).
 
-## 3. 구현 개요
+## 3. Implementation Overview
 
-새 모듈: `arq_writer.macos_snapshot`
+New module: `arq_writer.macos_snapshot`
 
-### 3.1 함수 카탈로그
+### 3.1 Function Catalog
 
 ```python
 from arq_writer import (
@@ -52,48 +54,48 @@ from arq_writer import (
 )
 ```
 
-| 함수 | 권한 필요 | 동작 |
+| Function | Privileges required | Behavior |
 |------|----------|------|
-| `is_macos()` | 없음 | bool |
-| `is_macos_apfs(path)` | 없음 | bool (diskutil info -plist 호출) |
-| `create_snapshot()` | sudo (tmutil) | sudo tmutil localsnapshot → 새 SnapshotInfo |
-| `list_snapshots(volume="/")` | 없음 | tmutil listlocalsnapshots → List[SnapshotInfo] |
+| `is_macos()` | None | bool |
+| `is_macos_apfs(path)` | None | bool (calls diskutil info -plist) |
+| `create_snapshot()` | sudo (tmutil) | sudo tmutil localsnapshot → new SnapshotInfo |
+| `list_snapshots(volume="/")` | None | tmutil listlocalsnapshots → List[SnapshotInfo] |
 | `delete_snapshot(snap)` | sudo | sudo tmutil deletelocalsnapshots <date-stamp> |
 | `mount_snapshot(snap, mount_point)` | sudo | sudo mount_apfs -s … -o ro,nobrowse |
-| `unmount_snapshot(mount_point)` | sudo | sudo umount; 이미-언마운트는 OK |
-| `with_apfs_snapshot(source)` | sudo | context manager: create + mount + cleanup |
+| `unmount_snapshot(mount_point)` | sudo | sudo umount; already-unmounted is OK |
+| `with_apfs_snapshot(source)` | sudo | Context manager: create + mount + cleanup |
 
-### 3.2 build_backup 통합
+### 3.2 build_backup Integration
 
-`build_backup`에 옵션 추가:
+An option is added to `build_backup`:
 
 ```python
 build_backup(
     source, dest, password,
-    use_apfs_snapshot=True,    # 옵션
+    use_apfs_snapshot=True,    # option
 )
 ```
 
-흐름:
+Flow:
 
-1. macOS + APFS이면 `tmutil localsnapshot` 실행
-2. 임시 mount point에 `mount_apfs -s … -o ro,nobrowse` 마운트
-3. 원본 source path를 mount-relative path로 translate
-4. 그 frozen view로 walk + 백업
-5. cleanup (umount; snapshot은 default로 보존 — TM이 의존)
+1. If macOS + APFS, run `tmutil localsnapshot`
+2. Mount at a temporary mount point with `mount_apfs -s … -o ro,nobrowse`
+3. Translate the original source path to a mount-relative path
+4. Walk and back up that frozen view
+5. Cleanup (umount; the snapshot is preserved by default — TM relies on it)
 
-비macOS이면:
-- `apfs_snapshot_skipped` 콜백 이벤트 emit
-- 라이브 source로 fallback (실패 없음)
+If non-macOS:
+- Emit an `apfs_snapshot_skipped` callback event
+- Fall back to the live source (no failure)
 
-### 3.3 권한 정책
+### 3.3 Privilege Policy
 
 `tmutil localsnapshot` / `tmutil deletelocalsnapshots` /
-`mount_apfs` 모두 root가 필요합니다. 라이브러리는 `sudo`를
-**호출**하지만 비밀번호 prompt는 OS의 sudo가 처리합니다.
+`mount_apfs` all require root. The library **invokes** `sudo`,
+but the password prompt is handled by the OS's sudo.
 
-cron / launchd 자동화 사용 시 운영자가 `sudoers`에서 다음을
-NOPASSWD로 설정 권장:
+When using cron / launchd automation, it is recommended that the
+operator configure the following in `sudoers` as NOPASSWD:
 
 ```
 yourusername ALL=(root) NOPASSWD: /usr/bin/tmutil localsnapshot
@@ -102,58 +104,58 @@ yourusername ALL=(root) NOPASSWD: /sbin/mount_apfs *
 yourusername ALL=(root) NOPASSWD: /sbin/umount *
 ```
 
-## 4. 보장 + 한계
+## 4. Guarantees + Limitations
 
-### 4.1 보장
+### 4.1 Guarantees
 
-- **walk 시작 시점 일관성**: snapshot 마운트 후의 모든 read는 동일 timestamp
-- **chunker 안정성**: 같은 source가 같은 chunker로 두 번 백업되면 동일 chunks (live walk에서는 user의 mid-walk save로 인해 미세하게 다를 수 있음)
-- **mtime 정합성**: snapshot의 stat이 정확함; live walk는 stat 후 read 사이에 변경 가능
+- **Consistency at walk start**: every read after the snapshot is mounted is at the same timestamp
+- **Chunker stability**: backing up the same source twice with the same chunker produces identical chunks (live walks may differ subtly because of mid-walk user saves)
+- **mtime accuracy**: stat on the snapshot is accurate; live walks can change between stat and read
 
-### 4.2 한계
+### 4.2 Limitations
 
-- **macOS only**: Linux btrfs/LVM, Windows VSS는 별도 PR
-- **boot 볼륨 한정**: snapshot은 한 APFS 볼륨 전체. 여러 볼륨 병행 백업 시 각각 snapshot
-- **sudo prompt**: NOPASSWD 설정이 없으면 매 백업마다 prompt
-- **Sandbox 검증 불가**: macOS 없이는 mount_apfs 통합 테스트 불가능; sandbox는 mock 기반 단위 테스트만
+- **macOS only**: Linux btrfs/LVM, Windows VSS are separate PRs
+- **Boot volume scope**: a snapshot covers one entire APFS volume. When backing up multiple volumes in parallel, snapshot each one
+- **sudo prompt**: without NOPASSWD configuration, a prompt occurs on every backup
+- **Cannot verify in sandbox**: without macOS, mount_apfs integration tests are not possible; the sandbox has only mock-based unit tests
 
-### 4.3 안전성
+### 4.3 Safety
 
-- snapshot 자체는 디스크 공간을 거의 차지하지 않음 (CoW 기반). 디스크 가득 차면 자동 삭제.
-- snapshot mount의 cleanup은 `with_apfs_snapshot` context manager가 보장 (예외 발생해도 unmount 시도)
-- snapshot **삭제는 default로 안 함** — Time Machine이 자체적으로 그 snapshot을 사용할 수 있음
+- The snapshot itself takes almost no disk space (CoW based). It is auto-deleted when the disk fills up.
+- Cleanup of the snapshot mount is guaranteed by the `with_apfs_snapshot` context manager (it attempts unmount even on exception)
+- The snapshot is **not deleted by default** — Time Machine may use that snapshot itself.
 
-## 5. Operator 검증 절차 (sandbox에서 테스트 불가능한 부분)
+## 5. Operator Verification Procedure (Things That Cannot Be Tested in Sandbox)
 
-Sandbox에서 검증할 수 있는 것:
-- ✅ tmutil 출력 파싱 (mocked)
-- ✅ mount_apfs 인자 시퀀스 (mocked)
-- ✅ snapshot path 변환 (`/Users/me/foo` → `<mount>/Users/me/foo`)
-- ✅ Linux fallback 동작 (`apfs_snapshot_skipped` 이벤트)
+What can be verified in the sandbox:
+- ✅ Parsing tmutil output (mocked)
+- ✅ mount_apfs argument sequence (mocked)
+- ✅ Snapshot path translation (`/Users/me/foo` → `<mount>/Users/me/foo`)
+- ✅ Linux fallback behavior (`apfs_snapshot_skipped` event)
 
-Sandbox에서 **검증 불가능한** 것 (macOS 운영자가 paste):
+What **cannot be verified** in the sandbox (a macOS operator pastes):
 
-### 5.1 실제 mount + walk 검증
+### 5.1 Real Mount + Walk Verification
 
-운영자가 macOS에서:
+Operator on macOS:
 
 ```bash
-# 1) 알려진 fixture
+# 1) Known fixture
 mkdir -p /tmp/snap-test
 echo hello > /tmp/snap-test/a.txt
 
-# 2) 백업 (snapshot 모드)
+# 2) Backup (snapshot mode)
 arq-backup create /tmp/snap-test \
     --dest /tmp/dest-snap \
     --password test \
     --use-apfs-snapshot
 
-# 3) 검증 — 결과 fingerprint 추출
+# 3) Verify — extract result fingerprint
 arq-fingerprint compute /tmp/dest-snap \
     --password test \
     --out /tmp/fp-snap.json
 
-# 4) 같은 source를 라이브 모드로
+# 4) Same source in live mode
 arq-backup create /tmp/snap-test \
     --dest /tmp/dest-live \
     --password test
@@ -161,54 +163,55 @@ arq-fingerprint compute /tmp/dest-live \
     --password test \
     --out /tmp/fp-live.json
 
-# 5) 비교 — 같아야 함 (file 내용 동일하므로)
+# 5) Compare — should be the same (since file contents are identical)
 arq-fingerprint compare /tmp/fp-snap.json /tmp/fp-live.json
 ```
 
-`arq-fingerprint compare`이 `match: true`로 출력하면 snapshot
-경로가 정상 동작.
+If `arq-fingerprint compare` outputs `match: true`, the snapshot path
+is working correctly.
 
-### 5.2 mid-walk 변경 stress
+### 5.2 Mid-Walk Mutation Stress
 
-운영자가:
+Operator:
 
 ```bash
-# 1) 큰 fixture
+# 1) Big fixture
 mkdir -p /tmp/big-test
 for i in {1..1000}; do head -c 10240 </dev/urandom > /tmp/big-test/f$i.bin; done
 
-# 2) 동시에:
-#    - 터미널 A: arq-backup create /tmp/big-test --dest /tmp/dest --use-apfs-snapshot
-#    - 터미널 B: while true; do echo extra >> /tmp/big-test/f1.bin; done
+# 2) Concurrently:
+#    - Terminal A: arq-backup create /tmp/big-test --dest /tmp/dest --use-apfs-snapshot
+#    - Terminal B: while true; do echo extra >> /tmp/big-test/f1.bin; done
 
-# 3) 백업 끝나면 restore
-arq-backup의 결과로 만들어진 destination을 restore
-diff /tmp/big-test/f1.bin /restored/f1.bin   # 어떤 한 시점이어야 함
+# 3) When backup finishes, restore
+Restore the destination produced by arq-backup
+diff /tmp/big-test/f1.bin /restored/f1.bin   # Should be some single point in time
 ```
 
-snapshot 모드면 `f1.bin`이 backup 시작 시점의 버전으로 재구성되어
-diff가 빈 출력 (또는 backup 실행 중간 어디든 한 시점) 이어야
-합니다 — torn write가 없어야 함.
+In snapshot mode, `f1.bin` should be reconstructed from the version at the
+moment the backup started, so the diff should be empty (or correspond to
+some single point in time during the backup run) — there should be no torn
+write.
 
-라이브 모드는 동일한 stress 테스트에서 `f1.bin`이 부분적으로
-구버전 + 신버전이 섞여 무효한 결과가 될 수 있음.
+In live mode, the same stress test can produce an invalid result for
+`f1.bin`, partly old version + partly new version mixed together.
 
-## 6. 향후 작업
+## 6. Future Work
 
-본 PR은 macOS만 다룹니다. 동일 패턴을 다른 OS로 확장:
+This PR covers macOS only. Extending the same pattern to other OSes:
 
-| OS | 메커니즘 | 노력 |
+| OS | Mechanism | Effort |
 |----|---------|------|
-| Linux btrfs | `btrfs subvolume snapshot` | 작음 (~50 LOC) |
-| Linux LVM | `lvm lvcreate --snapshot` | 작음 |
-| Linux ext4 (snapshot 없음) | unsupported; fallback only | N/A |
-| Windows VSS | `wmic shadowcopy create` 또는 PowerShell | 중간 (~150 LOC) |
+| Linux btrfs | `btrfs subvolume snapshot` | Small (~50 LOC) |
+| Linux LVM | `lvm lvcreate --snapshot` | Small |
+| Linux ext4 (no snapshot) | unsupported; fallback only | N/A |
+| Windows VSS | `wmic shadowcopy create` or PowerShell | Medium (~150 LOC) |
 
-각각 별도 PR로 추가 가능. 현재는 macOS만 우선순위.
+Each can be added in a separate PR. For now, macOS is the only priority.
 
-## 7. CLI 노출
+## 7. CLI Exposure
 
-이 PR은 `build_backup(use_apfs_snapshot=True)` Python API + 옵션
-인자로 노출합니다. CLI (`arq-backup`) 의 `--use-apfs-snapshot`
-플래그는 별도 follow-up PR에서 추가하는 것이 안전합니다 (CLI는
-이미 안정 surface이므로 한 PR에 너무 많이 묶지 않기 위해).
+This PR exposes the Python API `build_backup(use_apfs_snapshot=True)` along
+with the option argument. Adding the `--use-apfs-snapshot` flag to the
+CLI (`arq-backup`) is safer in a separate follow-up PR (because the CLI is
+already a stable surface, so we avoid bundling too much into one PR).
