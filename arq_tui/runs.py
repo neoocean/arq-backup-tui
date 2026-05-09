@@ -97,6 +97,8 @@ class RunStatus(str, enum.Enum):
 
     STARTING = "starting"
     RUNNING = "running"
+    PAUSED = "paused"            # walker suspended via Backup.pause();
+                                  # transitions back to RUNNING on resume
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"

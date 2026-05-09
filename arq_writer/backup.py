@@ -404,6 +404,19 @@ class Backup:
         # produce a partial result (no backuprecord written) so the
         # destination's prior state is unchanged.
         self._cancelled = False
+        # Pause/resume scaffolding. ``_paused`` is the requested
+        # state — set by another thread via :meth:`pause` /
+        # :meth:`resume`. The walker observes it at every
+        # directory boundary + start of each file walk via
+        # :meth:`_check_cancel` (which now also handles pause)
+        # and blocks until resumed. Distinct from cancel so the
+        # operator can pause a long backup, do something else,
+        # and resume without losing in-flight state.
+        self._paused = False
+        # Sleep granularity inside the pause spin. 0.5s is fast
+        # enough that a resume feels immediate but slow enough
+        # that the walker doesn't burn CPU while paused.
+        self._pause_poll_sec = 0.5
 
     def cancel(self) -> None:
         """Request graceful cancellation of an in-flight backup.
@@ -417,8 +430,41 @@ class Backup:
         flushed only if some content was already buffered.
         """
         self._cancelled = True
+        # A pending cancel takes precedence over a pending pause —
+        # un-pause so the walker wakes from its spin and sees
+        # _cancelled.
+        self._paused = False
+
+    def pause(self) -> None:
+        """Request the walker to suspend at the next checkpoint.
+
+        Thread-safe (same contract as :meth:`cancel`). The walker
+        will keep the in-memory state intact and spin in
+        :meth:`_check_cancel` until :meth:`resume` is called.
+        Pack-file buffers stay in memory; no flush happens during
+        pause, so resuming continues the same pack instead of
+        starting a fresh one.
+        """
+        self._paused = True
+        _emit(self.callback, "backup_paused")
+
+    def resume(self) -> None:
+        """Lift a previously-set pause flag. No-op if not paused."""
+        if self._paused:
+            self._paused = False
+            _emit(self.callback, "backup_resumed")
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
 
     def _check_cancel(self) -> None:
+        # Pause first — paused walkers shouldn't see cancel-style
+        # exceptions purely from being mid-spin when the cancel
+        # arrives.
+        while self._paused and not self._cancelled:
+            import time as _time
+            _time.sleep(self._pause_poll_sec)
         if self._cancelled:
             raise BackupCancelled(
                 "backup cancelled by Backup.cancel()"

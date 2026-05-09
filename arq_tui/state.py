@@ -71,6 +71,14 @@ class Plan:
     sources: List[str] = field(default_factory=list)
     destination_kind: str = "local"   # "local" | "sftp"
     destination: dict = field(default_factory=dict)
+    # Optional additional destinations the plan also targets. Each
+    # dict carries its own ``kind`` ("local"/"sftp") + the kind-
+    # appropriate connection fields (path / host / port / user /
+    # path / identity_file). The primary ``destination`` /
+    # ``destination_kind`` above counts as the first destination —
+    # ``iter_destinations()`` yields it ahead of these extras so
+    # operators of single-destination plans see no change.
+    additional_destinations: List[dict] = field(default_factory=list)
     chunker: str = "default"
     per_source_chunkers: dict = field(default_factory=dict)
     use_packs: bool = True
@@ -88,6 +96,31 @@ class Plan:
     #   {"interval_sec": 3600}        — every N seconds
     # Setting both keys is rejected by ScheduleSpec.__post_init__.
     schedule: dict = field(default_factory=dict)
+
+    def iter_destinations(self) -> List[dict]:
+        """Yield every destination this plan targets, primary first.
+
+        Returns a list of ``{"kind": …, …}`` dicts. The primary
+        destination is built from ``destination_kind`` +
+        ``destination``; subsequent entries come from
+        ``additional_destinations`` verbatim. Empty primary
+        (no path / no host) is skipped so a plan that only uses
+        the additional list isn't double-counted.
+        """
+        out: List[dict] = []
+        primary = dict(self.destination or {})
+        primary["kind"] = self.destination_kind
+        # Skip the primary if it carries no usable connection
+        # info — operators sometimes leave the legacy primary
+        # blank when migrating to the additional list.
+        if primary.get("path") or primary.get("host"):
+            out.append(primary)
+        for d in self.additional_destinations:
+            normalised = dict(d)
+            # Default kind to local if the operator forgot it.
+            normalised.setdefault("kind", "local")
+            out.append(normalised)
+        return out
 
 
 class PlanRegistry:
@@ -145,6 +178,10 @@ class PlanRegistry:
                     data.get("destination_kind") or "local"
                 ),
                 destination=dict(data.get("destination") or {}),
+                additional_destinations=[
+                    dict(d) for d in
+                    (data.get("additional_destinations") or [])
+                ],
                 chunker=str(data.get("chunker") or "default"),
                 per_source_chunkers=dict(
                     data.get("per_source_chunkers") or {}
@@ -191,6 +228,9 @@ class PlanRegistry:
             "sources": list(plan.sources),
             "destination_kind": plan.destination_kind,
             "destination": dict(plan.destination),
+            "additional_destinations": [
+                dict(d) for d in plan.additional_destinations
+            ],
             "chunker": plan.chunker,
             "per_source_chunkers": dict(plan.per_source_chunkers),
             "use_packs": plan.use_packs,
