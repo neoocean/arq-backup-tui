@@ -186,9 +186,35 @@ class HomeScreen(Screen):
 
     def action_scheduling(self) -> None:
         """Open the scheduling screen — list / install / remove
-        cron + launchd schedules for plans."""
+        cron + launchd schedules for plans.
+
+        When a plan is focused, that plan rides along as the
+        ``staged_plan`` so the operator can immediately press [i]
+        / [l] to install a schedule for it. When no plan is
+        focused, the screen opens in pure-list mode (no plans →
+        no install — that's fine + expected)."""
         from .scheduling import SchedulingScreen
-        self.app.push_screen(SchedulingScreen())
+        # Quiet variant of _focused_plan — don't notify when no
+        # plans exist (the scheduling screen is still useful for
+        # listing existing schedules even with zero plans).
+        plans = self._load_plans()
+        focused = None
+        if plans:
+            try:
+                lv = self.query_one("#plans-list")
+                idx = (
+                    int(lv.index)
+                    if getattr(lv, "index", None) is not None
+                    else 0
+                )
+                focused = plans[
+                    max(0, min(idx, len(plans) - 1))
+                ]
+            except Exception:
+                focused = plans[0]
+        self.app.push_screen(
+            SchedulingScreen(staged_plan=focused),
+        )
 
     def action_run_focused(self) -> None:
         plan = self._focused_plan()
