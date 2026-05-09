@@ -240,6 +240,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit each progress event as a JSON line on stderr.",
     )
+    p.add_argument(
+        "--debug", default=None, nargs="?", const="all",
+        metavar="SUBSYSTEMS",
+        help=(
+            "Verbose debug logging. Pass alone for all "
+            "subsystems, or comma-separated names "
+            "(sftp,blob,tree,cli,backend,crypto). Goes to "
+            "stderr."
+        ),
+    )
     return p
 
 
@@ -395,6 +405,13 @@ def _close_backend(backend: Backend) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    if getattr(args, "debug", None) is not None:
+        from .debug_logging import (
+            enable_debug_logging, parse_debug_flag,
+        )
+        enable_debug_logging(
+            subsystems=parse_debug_flag(args.debug),
+        )
     is_drip = args.tier == "audit-drip"
     is_record = args.tier == "record"
     tier = (

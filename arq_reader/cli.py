@@ -69,6 +69,16 @@ def _build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--quiet", action="store_true")
         sp.add_argument("--json-events", action="store_true")
         sp.add_argument(
+            "--debug", default=None, nargs="?", const="all",
+            metavar="SUBSYSTEMS",
+            help=(
+                "Verbose debug logging. Pass alone for all "
+                "subsystems, or comma-separated names "
+                "(sftp,blob,tree,cli,backend,crypto). Goes to "
+                "stderr so --json-events stdout stays parseable."
+            ),
+        )
+        sp.add_argument(
             "--state-file", type=Path, default=None,
             help=(
                 "Path to a JSON state file the CLI updates as work "
@@ -117,6 +127,15 @@ def _make_callback(args: argparse.Namespace):
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    # Wire --debug as early as possible so any error path (path
+    # validation, password lookup, backend open) gets logged.
+    if getattr(args, "debug", None) is not None:
+        from arq_validator.debug_logging import (
+            enable_debug_logging, parse_debug_flag,
+        )
+        enable_debug_logging(
+            subsystems=parse_debug_flag(args.debug),
+        )
     if not args.src.is_dir():
         print(f"error: src is not a directory: {args.src}", file=sys.stderr)
         return 2
