@@ -97,6 +97,10 @@ class ScheduleSpec:
 
 
 _CRONTAB_MARKER_PREFIX = "# arq-backup-tui:plan="
+# Sentinel marker for the GC entry — distinct from
+# per-plan markers so list/remove can target it
+# specifically without parsing argv.
+_CRONTAB_GC_MARKER = "# arq-backup-tui:gc"
 
 
 def generate_crontab_entry(
@@ -342,6 +346,71 @@ def _schedule_from_plan(plan) -> ScheduleSpec:
 # ---------------------------------------------------------------------------
 # Install / list / remove (host-side I/O)
 # ---------------------------------------------------------------------------
+
+
+def install_gc_schedule(
+    *,
+    crontab_cmd: str = "crontab",
+    schedule_expr: str = "0 4 * * 0",   # Sundays 04:00
+    older_than_days: int = 30,
+    executable: Optional[str] = None,
+) -> None:
+    """Install a weekly gc entry that drops finished run-state
+    files older than ``older_than_days``. Without this, cron-
+    driven backups accumulate state files indefinitely.
+
+    Idempotent — re-installing replaces any prior gc entry.
+    Use :func:`remove_gc_schedule` to uninstall.
+    """
+    import shlex
+    if executable is None:
+        executable = sys.executable
+    argv = [
+        executable, "-m", "arq_tui",
+        "runs", "gc",
+        "--older-than-days", str(older_than_days),
+    ]
+    quoted = " ".join(shlex.quote(a) for a in argv)
+    new_entry = (
+        f"{_CRONTAB_GC_MARKER}\n{schedule_expr} {quoted}"
+    )
+    existing = _read_crontab(crontab_cmd)
+    cleaned = _strip_gc_from_crontab(existing)
+    if cleaned and not cleaned.endswith("\n"):
+        cleaned += "\n"
+    merged = cleaned + new_entry + "\n"
+    _write_crontab(merged, crontab_cmd)
+
+
+def remove_gc_schedule(
+    *, crontab_cmd: str = "crontab",
+) -> bool:
+    """Drop the gc entry. Returns True iff one was present."""
+    existing = _read_crontab(crontab_cmd)
+    cleaned = _strip_gc_from_crontab(existing)
+    if cleaned == existing:
+        return False
+    _write_crontab(cleaned, crontab_cmd)
+    return True
+
+
+def _strip_gc_from_crontab(crontab: str) -> str:
+    """Remove the gc marker comment + the next line (entry).
+    Operator-owned lines are preserved verbatim — same
+    contract as :func:`_strip_plan_from_crontab`."""
+    out: List[str] = []
+    lines = crontab.splitlines()
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == _CRONTAB_GC_MARKER:
+            i += 2          # skip marker + entry line
+            continue
+        out.append(lines[i])
+        i += 1
+    result = "\n".join(out)
+    if crontab.endswith("\n") and not result.endswith("\n"):
+        result += "\n"
+    return result
 
 
 def install_schedule(

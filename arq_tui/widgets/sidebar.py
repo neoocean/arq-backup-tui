@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from textual.containers import Vertical
+from textual import events
 from textual.message import Message
 from textual.widgets import Static
 
@@ -41,6 +42,28 @@ DEFAULT_SECTIONS: List[Tuple[str, str]] = [
     ("validate", "Validate"),
     ("help", "Help"),
 ]
+
+
+def section_for_screen(screen_class_name: str) -> str:
+    """Map a Screen subclass name to the sidebar section it
+    represents. Used by screens that adopt the Sidebar so the
+    active highlight stays in lockstep as the operator navigates
+    between sections.
+
+    Unknown / unmatched screens default to ``plans`` (the
+    landing screen) — at worst the highlight is wrong on a
+    rare screen rather than missing entirely."""
+    routing = {
+        "HomeScreen": "plans",
+        "RunsMonitorScreen": "activity",
+        "BackupSetListScreen": "browse",
+        "RecordBrowserScreen": "browse",
+        "ValidateLaunchScreen": "validate",
+        "ValidateRunScreen": "validate",
+        "HelpScreen": "help",
+        "SchedulingScreen": "plans",
+    }
+    return routing.get(screen_class_name, "plans")
 
 
 class SidebarNavigation(Message):
@@ -88,6 +111,25 @@ class Sidebar(Vertical):
             yield Static(
                 label, classes=cls, id=f"sidebar-{key}",
             )
+
+    async def on_click(self, event: events.Click) -> None:
+        """Mouse click on a sidebar row → emit
+        :class:`SidebarNavigation` so the screen handler can
+        route to the matching section. Hosts that bind
+        on_sidebar_navigation get one event per click; hosts
+        that don't see no effect (no exception)."""
+        # Walk up the click target's ancestry until we find a
+        # row with the sidebar-section-keyed id ("sidebar-…").
+        widget = event.widget
+        while widget is not None:
+            wid = getattr(widget, "id", None)
+            if wid and wid.startswith("sidebar-"):
+                section_key = wid[len("sidebar-"):]
+                self.post_message(SidebarNavigation(section_key))
+                self.set_active(section_key)
+                event.stop()
+                return
+            widget = getattr(widget, "parent", None)
 
     def set_active(self, section: str) -> None:
         """Re-render the highlight to point at ``section``.

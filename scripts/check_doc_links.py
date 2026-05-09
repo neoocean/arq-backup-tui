@@ -39,13 +39,21 @@ from typing import List, Set
 # The regex is conservative — it only matches things that look
 # like module paths or file paths. URLs, command flags, and
 # free prose stay untouched.
+#
+# IMPORTANT: ASCII-only character classes (no \w — Python 3's
+# default \w matches Unicode letters, which would falsely flag
+# Korean test-data filenames like `한글.txt` /
+# `문서/이력서.txt` that appear in the docs as Unicode handling
+# examples. ASCII-only keeps the regex matching real code refs
+# without sweeping up demonstration data. See
+# tests/test_group_9_polish.py for the pinning test.
 _PATH_RE = re.compile(
     r"`((?:arq_writer|arq_reader|arq_validator|arq_tui|tests|"
-    r"scripts|docs)(?:/[\w._-]+)+\.[a-zA-Z]+)`"
+    r"scripts|docs)(?:/[A-Za-z0-9._-]+)+\.[a-zA-Z]+)`"
 )
 _SYMBOL_RE = re.compile(
     r"`((?:arq_writer|arq_reader|arq_validator|arq_tui)"
-    r"(?:\.[A-Za-z_][\w]*)+)`"
+    r"(?:\.[A-Za-z_][A-Za-z0-9_]*)+)`"
 )
 
 # Refs that intentionally point at files in OTHER repos. The path

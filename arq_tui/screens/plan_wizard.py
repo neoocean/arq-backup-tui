@@ -76,6 +76,10 @@ class PlanWizardScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back to Home", show=True),
+        Binding(
+            "d", "preview_dry_run",
+            "Dry-run preview", show=True,
+        ),
     ]
 
     DEFAULT_CSS = """
@@ -690,6 +694,75 @@ class PlanWizardScreen(Screen):
     # ------------------------------------------------------------------
     # Save
     # ------------------------------------------------------------------
+
+    def action_preview_dry_run(self) -> None:
+        """Walk the configured source(s) + show what WOULD be
+        backed up (file count + total bytes + extension
+        breakdown). Operator runs this on step 6 before saving
+        to confirm exclusion rules are doing what they expect.
+
+        Skips silently if no sources are set yet — typically
+        because the operator pressed [d] before reaching step
+        1's source picker."""
+        if not self.draft.sources:
+            self.notify(
+                "No sources set yet. Add at least one source "
+                "in step 1 first.",
+                severity="warning",
+            )
+            return
+        from arq_writer.dry_run import dry_run_source
+        from arq_writer.exclusions import ExclusionRules
+        if (
+            self.draft.exclude_globs
+            or self.draft.exclude_regexes
+            or self.draft.exclude_gitignore_lines
+        ):
+            rules = ExclusionRules.of(
+                wildcard=tuple(self.draft.exclude_globs),
+                regex=tuple(self.draft.exclude_regexes),
+                gitignore_lines=tuple(
+                    self.draft.exclude_gitignore_lines,
+                ),
+            )
+        else:
+            rules = ExclusionRules.empty()
+        from pathlib import Path
+        total_files = 0
+        total_bytes = 0
+        for src in self.draft.sources:
+            try:
+                s = dry_run_source(
+                    Path(src), exclusions=rules,
+                    max_file_bytes=self.draft.max_file_bytes,
+                )
+                total_files += s.files_in_scope
+                total_bytes += s.bytes_in_scope
+            except (OSError, ValueError) as exc:
+                self.notify(
+                    f"dry-run failed for {src}: {exc}",
+                    severity="error",
+                )
+                return
+        # Format bytes operator-friendly.
+        units = [
+            ("PB", 1 << 50),
+            ("TB", 1 << 40),
+            ("GB", 1 << 30),
+            ("MB", 1 << 20),
+            ("KB", 1 << 10),
+        ]
+        size_str = f"{total_bytes} B"
+        for unit, scale in units:
+            if total_bytes >= scale:
+                size_str = f"{total_bytes / scale:.2f} {unit}"
+                break
+        self.notify(
+            f"Dry-run: {total_files:,} files / {size_str} "
+            f"would be backed up.",
+            severity="information",
+            timeout=10,
+        )
 
     def _save_and_exit(self) -> None:
         d = self.draft
