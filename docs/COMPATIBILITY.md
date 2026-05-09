@@ -141,7 +141,7 @@ the report.
   Arq.app, but this project doesn't bundle Arq.app to prove it.
 - **Sampling for ID2 / A1**: standalone-object checks sample up
   to 32 blobs per run; full-suite verification is the L2 audit
-  in `arq_validator.tiers.run_l2`, which HMACs every object.
+  in `arq_validator.tiers.run_full_audit`, which HMACs every object.
 - **No cryptographic guarantees beyond what the checker tests**:
   e.g. PBKDF2 iteration count is asserted indirectly by C3
   (decryption succeeds with the same iteration count the writer

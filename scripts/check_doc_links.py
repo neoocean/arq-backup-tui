@@ -48,6 +48,15 @@ _SYMBOL_RE = re.compile(
     r"(?:\.[A-Za-z_][\w]*)+)`"
 )
 
+# Refs that intentionally point at files in OTHER repos. The path
+# shape matches our regex but the file lives elsewhere; flagging
+# them as stale would force us to obscure the formatting.
+_EXTERNAL_REF_PATHS = {
+    # The original validator lives in the docker-monitor repo.
+    # See DESIGN.md §1.2.
+    "scripts/arq-validate.py",
+}
+
 
 @dataclass
 class StaleRef:
@@ -83,6 +92,10 @@ def _scan(repo_root: Path) -> CheckResult:
         for lineno, line in enumerate(text.splitlines(), start=1):
             for ref in _PATH_RE.findall(line):
                 out.refs_checked += 1
+                if ref in _EXTERNAL_REF_PATHS:
+                    # Documented as living in another repo — not
+                    # stale, just out-of-tree.
+                    continue
                 target = repo_root / ref
                 if not target.exists():
                     out.stale.append(StaleRef(
