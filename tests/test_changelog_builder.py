@@ -195,12 +195,23 @@ class GitDriverSmokeTests(unittest.TestCase):
     git-driver doesn't choke on actual history."""
 
     def test_collect_against_real_repo_returns_entries(self) -> None:
+        # Skip on shallow clones (GitHub Actions default
+        # checkout depth is 1, so HEAD~5 would not exist).
+        # The test exercises the git driver against whatever
+        # depth IS available.
+        import subprocess
+        try:
+            subprocess.run(
+                ["git", "rev-parse", "HEAD~3"],
+                check=True, capture_output=True, timeout=5,
+            )
+            since = "HEAD~3"
+        except subprocess.CalledProcessError:
+            self.skipTest(
+                "shallow clone — git history < 3 commits"
+            )
         from build_changelog import _collect_commits
-        commits = _collect_commits(since="HEAD~5")
-        # Should yield at least 1 commit (HEAD~5 spans the
-        # last 5 commits — git's exact count varies depending
-        # on merge structure but always >=1 in a non-empty
-        # repo).
+        commits = _collect_commits(since=since)
         self.assertGreater(len(commits), 0)
         for c in commits:
             self.assertEqual(len(c.sha7), 7)
