@@ -185,6 +185,7 @@ class Restore:
         *,
         openssl_path: str = "openssl",
         backend: Optional[Backend] = None,
+        on_conflict: str = "overwrite",
     ) -> None:
         """Open a backup destination for restore.
 
@@ -196,7 +197,34 @@ class Restore:
         relative root path inside the SFTP server (typically the
         absolute server path that points at the backup destination,
         e.g. ``"/home/arq/dest1"``), not a local filesystem path.
+
+        ``on_conflict`` controls what happens when a restored
+        file would land on top of an existing one in the
+        destination. Three policies:
+
+        - ``"overwrite"`` (default, legacy behaviour): the
+          existing file is silently replaced with the restored
+          bytes.
+        - ``"skip"``: the restored file is dropped silently +
+          a ``conflict_skipped`` event fires on the callback.
+        - ``"rename"``: the restored file is written to a
+          sibling path with a ``.restored-<N>`` suffix where
+          ``N`` is the smallest integer that doesn't already
+          exist. ``conflict_renamed`` event carries the new
+          name. The original file stays untouched.
+
+        Operators on a partial-restore-into-live-tree workflow
+        ("restore just /home/me/Documents from last week's
+        snapshot, on top of my current home dir") usually want
+        ``"rename"`` so they can compare the two side-by-side
+        before deleting either.
         """
+        if on_conflict not in ("overwrite", "skip", "rename"):
+            raise ValueError(
+                f"on_conflict must be 'overwrite' / 'skip' / "
+                f"'rename', got {on_conflict!r}"
+            )
+        self.on_conflict = on_conflict
         self.src = Path(src) if backend is None else src
         self.password = encryption_password
         self.openssl_path = openssl_path
@@ -340,6 +368,49 @@ class Restore:
     # ------------------------------------------------------------------
     # Walk + materialize
     # ------------------------------------------------------------------
+
+    def _resolve_conflict_target(
+        self,
+        out_path: Path,
+        callback: Optional[ProgressCb],
+    ) -> Optional[Path]:
+        """Apply ``self.on_conflict`` to ``out_path``.
+
+        Returns the path the caller should actually write to, or
+        ``None`` when the policy says to skip. Always emits one
+        of ``conflict_skipped`` / ``conflict_renamed`` /
+        ``conflict_overwritten`` when a conflict is observed so
+        the operator can see what happened in the log tail.
+        """
+        if not (out_path.exists() or out_path.is_symlink()):
+            return out_path
+        if self.on_conflict == "skip":
+            _emit(callback, "conflict_skipped",
+                  path=str(out_path))
+            return None
+        if self.on_conflict == "rename":
+            for n in range(1, 1000):
+                candidate = out_path.with_name(
+                    f"{out_path.name}.restored-{n}",
+                )
+                if not (
+                    candidate.exists()
+                    or candidate.is_symlink()
+                ):
+                    _emit(callback, "conflict_renamed",
+                          path=str(out_path),
+                          renamed_to=str(candidate))
+                    return candidate
+            # 1000 collisions is hopeless; surface as a
+            # failure-equivalent skip.
+            _emit(callback, "conflict_skipped",
+                  path=str(out_path),
+                  reason="rename_exhausted")
+            return None
+        # "overwrite" (default) — silently replace.
+        _emit(callback, "conflict_overwritten",
+              path=str(out_path))
+        return out_path
 
     def _apply_acl_to(
         self,
@@ -585,14 +656,27 @@ class Restore:
                   symlink=True)
             return
 
-        out_path.write_bytes(body)
+        # Conflict resolution: if a file already exists at
+        # out_path, the policy chosen at Restore.__init__ time
+        # decides what to do.
+        write_target = self._resolve_conflict_target(
+            out_path, callback,
+        )
+        if write_target is None:
+            # Skip policy → don't write, don't tally bytes.
+            return
+        write_target.write_bytes(body)
         result.bytes_restored += len(body)
         result.files_restored += 1
 
         # Remember this path as the link target for any
         # subsequent FileNode carrying the same inode.
         if nlink > 1 and ino:
-            self._inode_to_restored_path[ino] = out_path
+            self._inode_to_restored_path[ino] = write_target
+        # Subsequent metadata steps (chmod / chown / xattrs /
+        # ACL) act on the actual write target, which may be
+        # a renamed sibling. Update out_path to point at it.
+        out_path = write_target
 
         # Metadata restoration. Each step is wrapped in try/except
         # so a single permission denied (e.g. uid restore as a
