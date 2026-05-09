@@ -64,6 +64,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "rather than re-chunked."
         ),
     )
+    p_restore.add_argument(
+        "--on-conflict",
+        choices=("overwrite", "skip", "rename"),
+        default="overwrite",
+        help=(
+            "Policy when a restored file would land on top of "
+            "an existing file in the destination. 'overwrite' "
+            "(default, legacy behaviour) silently replaces; "
+            "'skip' leaves the existing file alone + drops the "
+            "restored bytes (with a 'conflict_skipped' event); "
+            "'rename' writes the restored bytes to a sibling "
+            "path with a '.restored-N' suffix so both versions "
+            "remain (with a 'conflict_renamed' event)."
+        ),
+    )
 
     for sp in (p, *sub.choices.values()):
         sp.add_argument("--quiet", action="store_true")
@@ -158,6 +173,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     cb = _make_callback(args)
     restorer = Restore(
         args.src, password, openssl_path=args.openssl_path,
+        on_conflict=getattr(args, "on_conflict", "overwrite"),
     )
 
     if args.command == "list":
