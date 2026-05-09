@@ -184,6 +184,27 @@ class HomeScreen(Screen):
         from .runs_monitor import RunsMonitorScreen
         self.app.push_screen(RunsMonitorScreen())
 
+    def on_sidebar_navigation(self, event) -> None:
+        """Sidebar click → route to the matching section by
+        invoking the same action handlers the keyboard
+        bindings call. Keeps mouse + keyboard navigation in
+        lockstep without a separate dispatch table."""
+        section = getattr(event, "section", "")
+        routes = {
+            "plans": lambda: None,           # already here
+            "activity": self.action_activity,
+            "browse": self.action_browse,
+            "validate": self.action_validate,
+            "help": lambda: self.notify(
+                "Help screen — press [?] anywhere for "
+                "key bindings.",
+                severity="information",
+            ),
+        }
+        handler = routes.get(section)
+        if handler is not None:
+            handler()
+
     def action_scheduling(self) -> None:
         """Open the scheduling screen — list / install / remove
         cron + launchd schedules for plans.
