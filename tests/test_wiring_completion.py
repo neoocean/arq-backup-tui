@@ -110,13 +110,18 @@ class VerifyAfterEndToEndTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class SchedulingStagedPlanTests(unittest.TestCase):
+class SchedulingStagedPlanTests(unittest.IsolatedAsyncioTestCase):
+    """Textual screens have to be instantiated inside a running
+    App on Python 3.9 (Lock() needs an event loop). We use
+    run_test() as the async context for both the staged-plan
+    + no-staged-plan cases."""
 
-    def test_screen_accepts_staged_plan(self) -> None:
+    async def test_screen_accepts_staged_plan(self) -> None:
         try:
             from arq_tui.screens.scheduling import SchedulingScreen
         except ImportError:
             self.skipTest("textual not installed")
+        from textual.app import App
         from arq_tui.state import Plan
         plan = Plan(
             plan_id="P-staged", name="staged",
@@ -125,30 +130,39 @@ class SchedulingStagedPlanTests(unittest.TestCase):
             destination={"path": "/Volumes/x"},
             schedule={"cron_expr": "0 4 * * *"},
         )
-        s = SchedulingScreen(staged_plan=plan)
-        self.assertIs(s._staged_plan, plan)
-        self.assertEqual(
-            s._plan_to_install().plan_id, "P-staged",
-        )
 
-    def test_screen_without_staged_plan_falls_through(self) -> None:
-        """Without a staged plan + no focused row + no live App
-        context, _plan_to_install returns None (or raises an
-        attribute lookup error from .query_one — both are the
-        'no plan to install' path)."""
+        class _A(App):
+            pass
+
+        async with _A().run_test() as pilot:
+            s = SchedulingScreen(staged_plan=plan)
+            self.assertIs(s._staged_plan, plan)
+            self.assertEqual(
+                s._plan_to_install().plan_id, "P-staged",
+            )
+
+    async def test_screen_without_staged_plan_falls_through(self) -> None:
+        """Without a staged plan + no focused row, _plan_to_install
+        returns None (notification side-effect aside)."""
         try:
             from arq_tui.screens.scheduling import SchedulingScreen
         except ImportError:
             self.skipTest("textual not installed")
-        s = SchedulingScreen()
-        try:
-            result = s._plan_to_install()
-        except Exception:
-            # query_one / notify need a live App; outside one
-            # they raise. Either outcome counts as the
-            # "no plan" path the production code handles.
-            result = None
-        self.assertIsNone(result)
+        from textual.app import App
+
+        class _A(App):
+            pass
+
+        async with _A().run_test() as pilot:
+            s = SchedulingScreen()
+            try:
+                result = s._plan_to_install()
+            except Exception:
+                # _focused_plan calls query_one before we can
+                # mount the screen, which raises in the bare-
+                # ctor case. Either outcome = "no plan".
+                result = None
+            self.assertIsNone(result)
 
 
 # ---------------------------------------------------------------------------
