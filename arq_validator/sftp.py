@@ -28,7 +28,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 
 class SftpConnectionError(RuntimeError):
@@ -118,6 +118,57 @@ class _RateLimitTracker:
         return self.consecutive_failures >= self.threshold
 
 
+# ---------------------------------------------------------------------------
+# Adaptive backoff
+# ---------------------------------------------------------------------------
+
+
+class _BackoffPolicy:
+    """Exponential-with-jitter backoff for transient SFTP errors.
+
+    Only the *first* command after a rate-limit hit sleeps the
+    base interval; subsequent consecutive hits double the wait,
+    capped at :attr:`max_sleep_sec`. A clean run resets the
+    counter to 0 so the next isolated hit doesn't immediately
+    sleep for minutes.
+
+    The policy stays small + state-only: callers ask
+    :meth:`sleep_for` to compute the next sleep, then sleep on
+    their own (usually inside a try/except retry loop). This
+    separation keeps the policy unit-testable without sleeping in
+    the test process.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_sec: float = 2.0,
+        factor: float = 2.0,
+        max_sleep_sec: float = 300.0,
+        max_attempts: int = 5,
+        jitter_fraction: float = 0.25,
+    ) -> None:
+        self.base_sec = base_sec
+        self.factor = factor
+        self.max_sleep_sec = max_sleep_sec
+        self.max_attempts = max_attempts
+        self.jitter_fraction = jitter_fraction
+
+    def sleep_for(self, attempt: int) -> float:
+        """Return the backoff (seconds) to wait *before* attempt N
+        (0-indexed). Attempt 0 = no sleep yet (first try); attempt
+        1 = base; attempt 2 = base*factor; etc., capped at
+        :attr:`max_sleep_sec` and jittered by ``±jitter_fraction``.
+        """
+        import random
+        if attempt <= 0:
+            return 0.0
+        raw = self.base_sec * (self.factor ** (attempt - 1))
+        capped = min(raw, self.max_sleep_sec)
+        jitter = capped * self.jitter_fraction
+        return max(0.0, capped + random.uniform(-jitter, jitter))
+
+
 class SftpBackend:
     """SSH/SFTP-backed implementation of the ``Backend`` protocol.
 
@@ -152,6 +203,12 @@ class SftpBackend:
         sftp_path: str = "sftp",
         root: str = "",
         rate_limit_abort_threshold: int = 20,
+        backoff_base_sec: float = 2.0,
+        backoff_max_sec: float = 300.0,
+        backoff_max_attempts: int = 5,
+        backoff_callback: Optional[
+            "Callable[[str, Dict], None]"
+        ] = None,
     ) -> None:
         """``root`` (optional): when set, every backend-method path
         is interpreted relative to this server-side prefix. Use it
@@ -191,6 +248,18 @@ class SftpBackend:
         self._rate_limit = _RateLimitTracker(
             threshold=rate_limit_abort_threshold,
         )
+        # Adaptive backoff that wraps every _run_ssh / _run_sftp_batch
+        # call. When the underlying command's stderr looks like a
+        # rate-limit pattern we sleep + retry up to backoff_max_attempts
+        # before surfacing the error. Decoupled from the streak counter
+        # so a successful retry resets streak (matching the existing
+        # tracker semantics) but still consumed an attempt budget.
+        self._backoff = _BackoffPolicy(
+            base_sec=backoff_base_sec,
+            max_sleep_sec=backoff_max_sec,
+            max_attempts=backoff_max_attempts,
+        )
+        self._backoff_callback = backoff_callback
         # Per-session whole-file cache for the SFTP-only fallback in
         # ``read_range``. Chrooted endpoints (Hetzner Storage Box)
         # reject ssh shell commands, so byte-range reads have to
@@ -376,12 +445,17 @@ class SftpBackend:
             self._user_at_host(),
             remote_cmd,
         ]
-        cp = subprocess.run(
-            cmd, capture_output=True,
-            timeout=timeout if timeout is not None else self.op_timeout_sec,
+        return self._run_with_backoff(
+            "ssh",
+            lambda: subprocess.run(
+                cmd, capture_output=True,
+                timeout=(
+                    timeout if timeout is not None
+                    else self.op_timeout_sec
+                ),
+            ),
+            command_summary=remote_cmd[:80],
         )
-        self._track_rate_limit(cp)
-        return cp
 
     def _run_sftp_batch(
         self, batch_text: str, *, timeout: Optional[int] = None,
@@ -401,17 +475,103 @@ class SftpBackend:
                 "-P", str(self.port),
                 self._user_at_host(),
             ]
-            cp = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=timeout if timeout is not None else self.op_timeout_sec,
+            return self._run_with_backoff(
+                "sftp",
+                lambda: subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    timeout=(
+                        timeout if timeout is not None
+                        else self.op_timeout_sec
+                    ),
+                ),
+                command_summary=batch_text.strip().splitlines()[0]
+                if batch_text.strip() else "",
             )
-            self._track_rate_limit(cp)
-            return cp
         finally:
             try:
                 Path(path).unlink()
             except OSError:
                 pass
+
+    def _run_with_backoff(
+        self, kind: str,
+        invoke: Callable[[], subprocess.CompletedProcess],
+        *, command_summary: str = "",
+    ) -> subprocess.CompletedProcess:
+        """Execute ``invoke()`` and, if its stderr trips a
+        rate-limit pattern, sleep + retry up to
+        ``self._backoff.max_attempts`` times.
+
+        On every retry we emit ``rate_limit_backoff`` on the
+        backoff callback so the TUI can show "Throttling for X
+        seconds…" — operators on Hetzner used to see opaque
+        SftpRateLimitedError after 20 consecutive hits; now they
+        see the throttling cycle and the run typically finishes
+        without manual intervention.
+
+        On final failure (max_attempts exhausted) we still call
+        :meth:`_track_rate_limit` so the streak counter stays
+        consistent with the legacy fail-fast semantics.
+        """
+        last_cp: Optional[subprocess.CompletedProcess] = None
+        for attempt in range(self._backoff.max_attempts):
+            sleep_s = self._backoff.sleep_for(attempt)
+            if sleep_s > 0:
+                self._notify_backoff(
+                    sleep_sec=sleep_s, attempt=attempt,
+                    kind=kind, command=command_summary,
+                )
+                time.sleep(sleep_s)
+            cp = invoke()
+            last_cp = cp
+            stderr = cp.stderr
+            if isinstance(stderr, (bytes, bytearray)):
+                stderr_text = stderr.decode("utf-8", "replace")
+            else:
+                stderr_text = stderr or ""
+            # Rate-limit pattern? Bump streak + maybe retry.
+            matched = self._rate_limit.record(
+                cp.returncode, stderr_text,
+            )
+            if cp.returncode == 0:
+                return cp
+            if matched is None:
+                # Non-rate-limit failure — caller decides.
+                return cp
+            # Else: matched a rate-limit pattern. Loop tries the
+            # next attempt with backoff. Don't raise on threshold
+            # mid-loop so the retry actually gets attempted; the
+            # threshold trip happens on the final pass below.
+        # All retries exhausted — surface as the existing tracker
+        # would have, so callers that catch SftpRateLimitedError
+        # keep working.
+        if last_cp is not None and self._rate_limit.threshold_hit():
+            raise SftpRateLimitedError(
+                f"SFTP backend hit rate-limit threshold after "
+                f"{self._backoff.max_attempts} backoff attempts; "
+                f"last pattern: "
+                f"{self._rate_limit.last_pattern!r}"
+            )
+        return last_cp  # type: ignore[return-value]
+
+    def _notify_backoff(
+        self, *, sleep_sec: float, attempt: int, kind: str,
+        command: str,
+    ) -> None:
+        if self._backoff_callback is None:
+            return
+        try:
+            self._backoff_callback(
+                "rate_limit_backoff",
+                {"sleep_sec": float(sleep_sec),
+                 "attempt": int(attempt),
+                 "kind": kind,
+                 "command": command,
+                 "consecutive_failures":
+                     self._rate_limit.consecutive_failures},
+            )
+        except Exception:
+            pass
 
     def _track_rate_limit(
         self, cp: subprocess.CompletedProcess,

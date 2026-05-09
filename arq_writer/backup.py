@@ -74,6 +74,7 @@ from .lz4_block import lz4_wrap
 from .pack_builder import DEFAULT_MAX_PACK_BYTES, PackBuilder
 from .serialize import write_tree
 from .types import BlobLoc, FileNode, Node, Tree, TreeChild, TreeNode
+from .xattrs import capture_xattrs, serialize_xattrs
 
 
 ProgressCb = Callable[[str, dict], None]
@@ -364,6 +365,15 @@ class Backup:
         # written in the same run. Maps blob_id -> BlobLoc so packed
         # and standalone modes share a single source of truth.
         self._written_blobs: Dict[str, BlobLoc] = {}
+        # Hardlink cache: (st_dev, st_ino) → already-walked FileNode.
+        # Sources with many hardlinks (git checkouts, node_modules)
+        # share inode across many path entries; without this the
+        # walker re-reads + re-chunks + re-encrypts the same bytes
+        # for each link. With it we hit a single FileNode build per
+        # inode, then return that same Node for the rest of the
+        # links — restore-side hardlink reconstruction relies on
+        # the matching mac_st_ino to recreate the link relationship.
+        self._inode_to_node: Dict[Tuple[int, int], FileNode] = {}
 
         # Per-family pack builders, lazily initialized on first use
         # to avoid creating empty pack-shaped paths when use_packs is
@@ -514,6 +524,33 @@ class Backup:
     # ------------------------------------------------------------------
     # Blob writing
     # ------------------------------------------------------------------
+
+    def _xattr_locs_for(self, src: Path) -> List[BlobLoc]:
+        """Capture every xattr on ``src`` and return the BlobLoc list
+        to attach to the corresponding Node.
+
+        Returns an empty list when the entry has no xattrs OR the
+        host/Python doesn't expose xattr APIs (Windows, stripped
+        builds). Otherwise serializes all of them into one
+        binary-plist blob — see ``arq_writer/xattrs.py`` for the
+        rationale of the single-blob-per-Node format.
+        """
+        try:
+            xattrs = capture_xattrs(src, callback=lambda kind, payload:
+                                    _emit(self.callback, kind, **payload))
+        except Exception as exc:
+            # capture_xattrs already swallows expected OSErrors; if
+            # something else escapes, log + continue rather than
+            # blocking the whole walk on one entry.
+            _emit(self.callback, "xattr_capture_error",
+                  path=str(src), error=str(exc))
+            return []
+        if not xattrs:
+            return []
+        blob = serialize_xattrs(xattrs)
+        if not blob:
+            return []
+        return [self._write_blob(blob)]
 
     def _write_blob(self, plaintext: bytes, *, is_tree: bool = False) -> BlobLoc:
         """Encrypt+LZ4-wrap+write ``plaintext`` and return its BlobLoc.
@@ -684,6 +721,50 @@ class Backup:
                           size=int(stat_now.st_size),
                           chunks=len(node.dataBlobLocs))
                     return node, int(stat_now.st_size), 1
+        # Hardlink dedup. Sources with many hardlinks (a git
+        # checkout, a node_modules tree) share an inode across
+        # many path entries; without this short-circuit the
+        # walker re-reads + re-chunks + re-encrypts the same
+        # bytes for each link. Symlinks are excluded because
+        # st_nlink semantics there are murky (the link itself,
+        # not the target, is what we're recording).
+        is_symlink_for_dedup = src.is_symlink()
+        if not is_symlink_for_dedup:
+            try:
+                st_for_link = src.stat()
+            except OSError:
+                st_for_link = None
+            if (
+                st_for_link is not None
+                and getattr(st_for_link, "st_nlink", 1) > 1
+            ):
+                key = (
+                    int(getattr(st_for_link, "st_dev", 0) or 0),
+                    int(getattr(st_for_link, "st_ino", 0) or 0),
+                )
+                if key[1]:
+                    cached = self._inode_to_node.get(key)
+                    if cached is not None:
+                        # Re-use the same FileNode (binary-identical
+                        # bytes → tree blob_id stays stable, dedup
+                        # holds across runs). Restore-side hardlink
+                        # reconstruction reads mac_st_ino off the
+                        # node and groups equal-inode entries.
+                        _emit(self.callback, "file_hardlinked",
+                              path=str(src),
+                              rel_path=rel_path,
+                              inode=key[1])
+                        self.files_written += 1
+                        return (
+                            cached,
+                            int(getattr(cached, "itemSize", 0)),
+                            1,
+                        )
+        # Capture extended attributes once per entry; one
+        # consolidated blob per Node keeps the BlobLoc count
+        # bounded regardless of how many xattrs the file has.
+        # See arq_writer/xattrs.py for the format choice.
+        xattr_locs = self._xattr_locs_for(src)
         # Symlinks: don't follow. Store the link target string as
         # the file's content so the restorer can rebuild the link
         # under the S_IFLNK mode bit.
@@ -705,6 +786,7 @@ class Backup:
             )
             node = FileNode(
                 dataBlobLocs=locs,
+                xattrsBlobLocs=xattr_locs,
                 itemSize=len(data),
                 containedFilesCount=1,
                 mtime_sec=int(st.st_mtime),
@@ -753,6 +835,7 @@ class Backup:
         )
         node = FileNode(
             dataBlobLocs=locs,
+            xattrsBlobLocs=xattr_locs,
             itemSize=len(data),
             containedFilesCount=1,
             mtime_sec=int(st.st_mtime),
@@ -767,6 +850,12 @@ class Backup:
             mac_st_ino=st.st_ino,
             mac_st_nlink=st.st_nlink,
         )
+        # Cache for the next link of the same inode in this run.
+        if int(getattr(st, "st_nlink", 1) or 1) > 1:
+            self._inode_to_node[(
+                int(getattr(st, "st_dev", 0) or 0),
+                int(getattr(st, "st_ino", 0) or 0),
+            )] = node
         self.files_written += 1
         _emit(self.callback, "file_written",
               path=str(src), size=len(data),
@@ -814,8 +903,13 @@ class Backup:
         self.trees_written += 1
 
         st = src.stat()
+        # Directories can carry xattrs too (Finder labels, ACL
+        # markers, etc.). Capture them on the TreeNode itself so
+        # restore can re-apply them after mkdir.
+        dir_xattr_locs = self._xattr_locs_for(src)
         node = TreeNode(
             treeBlobLoc=tree_loc,
+            xattrsBlobLocs=dir_xattr_locs,
             itemSize=item_size,
             containedFilesCount=contained,
             mtime_sec=int(st.st_mtime),

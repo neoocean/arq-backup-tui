@@ -71,8 +71,29 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "tier",
-        choices=[*[t.value for t in ValidationTier], "audit-drip"],
-        help="Validation tier (cheaper -> deeper).",
+        choices=[*[t.value for t in ValidationTier],
+                 "audit-drip", "record"],
+        help=(
+            "Validation tier (cheaper -> deeper). 'record' walks "
+            "every BlobLoc reachable from a single backuprecord; "
+            "pair it with --record-path."
+        ),
+    )
+    p.add_argument(
+        "--record-path",
+        default=None,
+        help=(
+            "[record tier only] Absolute server-side path of the "
+            "backuprecord file to validate."
+        ),
+    )
+    p.add_argument(
+        "--record-max-blobs",
+        type=int, default=0,
+        help=(
+            "[record tier only] Cap the walk after this many blobs "
+            "(0 = unbounded). Useful for CI smoke runs."
+        ),
     )
     p.add_argument(
         "path",
@@ -375,14 +396,18 @@ def _close_backend(backend: Backend) -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     is_drip = args.tier == "audit-drip"
-    tier = None if is_drip else ValidationTier(args.tier)
+    is_record = args.tier == "record"
+    tier = (
+        None if (is_drip or is_record)
+        else ValidationTier(args.tier)
+    )
 
     backend, root, rc = _open_backend(args)
     if rc != 0:
         return rc
     assert backend is not None and root is not None
 
-    needs_password = is_drip or tier in (
+    needs_password = is_drip or is_record or tier in (
         ValidationTier.DEEP, ValidationTier.AUDIT,
     )
     password: Optional[str] = None
@@ -435,6 +460,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(asdict(state), indent=2,
                               ensure_ascii=False, default=str))
             return _exit_code_for_drip(state)
+
+        if is_record:
+            if not args.record_path:
+                print(
+                    "error: --record-path is required for the "
+                    "'record' tier",
+                    file=sys.stderr,
+                )
+                return 2
+            from .record_validator import validate_record
+            report = validate_record(
+                backend, args.record_path,
+                encryption_password=password or "",
+                openssl_path=args.openssl_path,
+                max_blobs=args.record_max_blobs,
+                callback=callback,
+            )
+            print(json.dumps(asdict(report), indent=2,
+                             ensure_ascii=False, default=str))
+            return 0 if report.ok else 4
 
         report = validate(
             backend,

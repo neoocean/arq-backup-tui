@@ -41,6 +41,7 @@ from arq_validator.layout import (
     list_backuprecords,
 )
 from arq_writer.types import BlobLoc, FileNode, TreeNode
+from arq_writer.xattrs import apply_xattrs, deserialize_xattrs
 
 from .decrypt import DecryptError, decrypt_encrypted_object, decrypt_lz4_arqo
 from .parse import parse_tree
@@ -198,6 +199,13 @@ class Restore:
             self.backend = LocalBackend(Path(src).resolve())
         self._layouts = None
         self._keyset_by_computer: Dict[str, Keyset] = {}
+        # Hardlink restore: maps the original source inode (as
+        # stored in the FileNode's mac_st_ino) to the first path
+        # we materialised for that inode. Subsequent FileNodes
+        # carrying the same mac_st_ino are restored as os.link()
+        # to the first path so the link relationship survives
+        # the round-trip.
+        self._inode_to_restored_path: Dict[int, Path] = {}
 
     # ------------------------------------------------------------------
     # Discovery
@@ -297,6 +305,48 @@ class Restore:
     # Walk + materialize
     # ------------------------------------------------------------------
 
+    def _apply_xattrs_to(
+        self,
+        node,
+        out_path: Path,
+        keyset: Keyset,
+        result: RestoreResult,
+        callback: Optional[ProgressCb],
+    ) -> int:
+        """Fetch + decode + apply every xattr blob attached to a Node.
+
+        Returns the number of xattrs actually applied (0 when the
+        node has no xattrs, the host doesn't support xattrs, or
+        every entry hit a per-attr error). Per-attr OSErrors are
+        surfaced through ``callback("xattr_apply_error", …)`` from
+        :func:`apply_xattrs` directly so a single bad attr can't
+        wreck the file.
+        """
+        locs = getattr(node, "xattrsBlobLocs", None) or []
+        if not locs:
+            return 0
+        total = 0
+        for loc in locs:
+            try:
+                blob = self._fetch_blob(loc, keyset)
+            except (DecryptError, OSError, NotImplementedError) as exc:
+                _emit(callback, "xattr_fetch_error",
+                      path=str(out_path), error=str(exc))
+                continue
+            try:
+                xattrs = deserialize_xattrs(blob)
+            except Exception as exc:
+                _emit(callback, "xattr_decode_error",
+                      path=str(out_path), error=str(exc))
+                continue
+            total += apply_xattrs(
+                out_path, xattrs,
+                callback=lambda kind, payload: _emit(
+                    callback, kind, **payload,
+                ),
+            )
+        return total
+
     def _restore_dir_node(
         self,
         tree_blob_loc: BlobLoc,
@@ -308,6 +358,7 @@ class Restore:
         rel_path: str = "",
         path_filter: "Optional[_PathFilter]" = None,
         check_cancel: "Optional[Callable[[], None]]" = None,
+        tree_node: "Optional[TreeNode]" = None,
     ) -> None:
         if check_cancel is not None:
             check_cancel()
@@ -344,6 +395,7 @@ class Restore:
                     rel_path=child_rel,
                     path_filter=path_filter,
                     check_cancel=check_cancel,
+                    tree_node=child.node,
                 )
             elif isinstance(child.node, FileNode):
                 if (
@@ -354,6 +406,14 @@ class Restore:
                 self._restore_file_node(
                     child.node, child_out, keyset, result, callback,
                 )
+        # Re-apply directory-level xattrs after children are placed.
+        # If we did this before children, recursive directory creation
+        # could overwrite the xattrs (some FS/xattr namespaces are
+        # cleared on subsequent inode mutations).
+        if tree_node is not None:
+            self._apply_xattrs_to(
+                tree_node, out_dir, keyset, result, callback,
+            )
 
     def _restore_file_node(
         self,
@@ -365,6 +425,39 @@ class Restore:
     ) -> None:
         import stat as _stat
         out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Hardlink reconstruction. The writer cached
+        # (st_dev, st_ino) -> FileNode in this run, so multiple
+        # children that originally shared an inode now share the
+        # same FileNode object — same mac_st_ino + same
+        # mac_st_nlink > 1. When we see the second-and-later
+        # occurrence, link to the first restored path instead of
+        # writing the body again.
+        nlink = int(getattr(node, "mac_st_nlink", 1) or 1)
+        ino = int(getattr(node, "mac_st_ino", 0) or 0)
+        if nlink > 1 and ino:
+            prev_path = self._inode_to_restored_path.get(ino)
+            if prev_path is not None and prev_path.exists():
+                try:
+                    if out_path.exists() or out_path.is_symlink():
+                        out_path.unlink()
+                except OSError:
+                    pass
+                try:
+                    os.link(prev_path, out_path)
+                    result.files_restored += 1
+                    _emit(callback, "file_restored",
+                          path=str(out_path),
+                          size=int(getattr(node, "itemSize", 0)),
+                          hardlink_to=str(prev_path))
+                    return
+                except OSError as exc:
+                    # Fall through to normal write — links can
+                    # fail across filesystems or with permissions.
+                    _emit(callback, "hardlink_fallback",
+                          path=str(out_path),
+                          target=str(prev_path),
+                          error=str(exc))
 
         # Symlinks: writer stores the link target as the file's
         # content (under the S_IFLNK mode bit) so a restorer can
@@ -421,6 +514,11 @@ class Restore:
         result.bytes_restored += len(body)
         result.files_restored += 1
 
+        # Remember this path as the link target for any
+        # subsequent FileNode carrying the same inode.
+        if nlink > 1 and ino:
+            self._inode_to_restored_path[ino] = out_path
+
         # Metadata restoration. Each step is wrapped in try/except
         # so a single permission denied (e.g. uid restore as a
         # non-root user) doesn't abort the whole file.
@@ -441,8 +539,15 @@ class Restore:
                 )
         except OSError:
             pass
+        # Re-apply xattrs the writer captured. Per-attr failures
+        # surface via the callback (xattr_apply_error) but don't
+        # abort the file — same policy as the chmod above.
+        applied = self._apply_xattrs_to(
+            node, out_path, keyset, result, callback,
+        )
         _emit(callback, "file_restored",
-              path=str(out_path), size=len(body))
+              path=str(out_path), size=len(body),
+              xattrs_applied=applied)
 
     def _count_tree(
         self,
@@ -650,9 +755,23 @@ class Restore:
                 _emit(callback, "restore_planned",
                       total_files=total_files,
                       total_bytes=total_bytes)
+            # Build a minimal root TreeNode just so the recursion's
+            # xattr-application step has something to read; the only
+            # field we actually consume from it at the root level is
+            # ``xattrsBlobLocs`` (every other field is rebuilt from
+            # the freshly-parsed Tree binaries).
+            root_xattr_locs = [
+                self._blobloc_from_dict(b)
+                for b in (node_dict.get("xattrsBlobLocs") or [])
+            ]
+            root_tree_node = TreeNode(
+                treeBlobLoc=tree_blob_loc,
+                xattrsBlobLocs=root_xattr_locs,
+            )
             self._restore_dir_node(
                 tree_blob_loc, out_dir, keyset, result, callback,
                 rel_path="", path_filter=path_filter,
+                tree_node=root_tree_node,
             )
         else:
             # Root is a single file (rare but representable).
