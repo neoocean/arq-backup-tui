@@ -193,14 +193,32 @@ def parse_node(reader: BinaryReader, *, tree_version: int):
         win_reparse_tag = reader.read_uint32()
         win_reparse_is_dir = reader.read_bool()
 
-    # Tree v4 added a 38-byte trailing block per node whose internal
-    # structure isn't documented in the public spec. Empirical
-    # observation against Arq.app v8 trees on a real Hetzner
-    # destination: every byte of this block is zero for typical
-    # files, and consuming it as opaque bytes makes the parser
-    # re-align with the next child. The exact field decomposition
-    # (likely some combination of new timestamps / flags / a null
-    # BlobLoc) can be filled in once Arq.app source can be RE'd.
+    # Tree v4 added a 38-byte trailing block per Node whose internal
+    # structure isn't documented in the public spec. From sampling
+    # 30 Nodes on a real Hetzner destination via
+    # ``scripts/probe_tree_v4_block.py`` we observed two shapes:
+    #
+    # - ALL-ZERO (3/30 cases — files where mtime == ctime ==
+    #   create_sec, freshly created in the latest backup pass).
+    # - Structured (27/30 cases). Within those:
+    #     bytes  0..7  int64 BE    timestamp (sec) — values fall in
+    #                              the ~7-minute window of the backup
+    #                              pass that recorded this Node, NOT
+    #                              the file's own mtime/ctime/create
+    #     bytes  8..15 int64 BE    timestamp (nsec)
+    #     bytes 16..23 int64 BE    constant 0x0000_0000_0100_0000 (a
+    #                              present-flag / version marker?)
+    #     bytes 24..37 14 zero bytes (reserved)
+    #
+    # Best guess: a "scanned-at" / "lastVerifiedAt" timestamp the v4
+    # writer added to support Arq.app's repair / re-verification
+    # heuristics. Confirmation requires Mach-O RE of Arq.app, which
+    # is a follow-up task.
+    #
+    # Until that lands we keep skipping the block as opaque so
+    # parsing continues to align with subsequent children. Tests in
+    # ``tests/integration/test_arq_real_destination_deep.py``
+    # exercise both shapes against the real destination.
     if tree_version >= 4:
         reader.read_raw(38)
 
