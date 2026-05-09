@@ -265,6 +265,49 @@ class BackupWorker(_BaseWorker):
 # ---------------------------------------------------------------------------
 
 
+class MultiDestBackupWorker(_BaseWorker):
+    """Drive ``arq_tui.multi_destination.run_plan_multi`` from a
+    worker thread.
+
+    Used when the screen detects ``plan.additional_destinations``
+    is non-empty — runs the plan against each destination in
+    sequence, one Backup per destination. Per-destination
+    failures don't drop the others; the WorkerFinished result
+    carries the full :class:`MultiBackupResult` so the screen
+    can render partial-success summaries.
+
+    Cancellation is best-effort: SIGINT-style propagation isn't
+    wired through ``run_plan_multi`` yet (the per-destination
+    Backup objects aren't exposed from inside the runner). For
+    now cancel just flips the flag; the next destination's
+    Backup observes it before starting.
+    """
+
+    def __init__(
+        self, target, *,
+        plan, encryption_password: str,
+        chunker_config=None, exclusions=None,
+        openssl_path: str = "openssl",
+    ) -> None:
+        super().__init__(target)
+        self.plan = plan
+        self.encryption_password = encryption_password
+        self.chunker_config = chunker_config
+        self.exclusions = exclusions
+        self.openssl_path = openssl_path
+
+    def _run(self):
+        from .multi_destination import run_plan_multi
+        return run_plan_multi(
+            self.plan,
+            encryption_password=self.encryption_password,
+            callback=self._emit,
+            chunker_config=self.chunker_config,
+            exclusions=self.exclusions,
+            openssl_path=self.openssl_path,
+        )
+
+
 class RestoreWorker(_BaseWorker):
     """Drive ``arq_reader.Restore.restore`` from a worker thread."""
 

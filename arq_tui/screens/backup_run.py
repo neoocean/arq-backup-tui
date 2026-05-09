@@ -39,7 +39,13 @@ from ..subprocess_workers import (
     subprocess_eligible,
 )
 from ..widgets.progress_panel import ProgressPanel
-from ..workers import BackupWorker, WorkerEvent, WorkerFailed, WorkerFinished
+from ..workers import (
+    BackupWorker,
+    MultiDestBackupWorker,
+    WorkerEvent,
+    WorkerFailed,
+    WorkerFinished,
+)
 
 
 class BackupRunScreen(Screen):
@@ -52,6 +58,8 @@ class BackupRunScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel", show=True),
+        Binding("p", "pause_resume",
+                "Pause/Resume", show=True),
     ]
 
     DEFAULT_CSS = """
@@ -97,6 +105,17 @@ class BackupRunScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Multi-destination plans take priority: we always run
+        # them in-process via the multi_destination runner so
+        # per-destination outcomes are observable in one place.
+        # The single-destination paths (subprocess for cron-
+        # parity, in-process as fallback) only apply when the
+        # plan targets exactly one destination.
+        if self.plan.additional_destinations:
+            self._mode = "multi_destination"
+            self._start_multi_dest_worker()
+            return
+
         # Decide which worker mode applies first: subprocess (the
         # default — same code path as cron / systemd) or in-process
         # (legacy + fallback when CLI args can't express the plan).
@@ -114,6 +133,27 @@ class BackupRunScreen(Screen):
             self._start_subprocess_worker()
         else:
             self._start_in_process_worker()
+
+    def _start_multi_dest_worker(self) -> None:
+        """Spawn a MultiDestBackupWorker covering every destination
+        the plan lists. The runner opens its own backends per
+        destination so we don't open/share one in the parent."""
+        panel = self.query_one(ProgressPanel)
+        n = len(self.plan.iter_destinations())
+        panel.append_log(
+            f"Multi-destination plan: running against "
+            f"{n} destinations sequentially…"
+        )
+        chunker_config = self._resolve_chunker(self.plan.chunker)
+        exclusions = self._resolve_exclusions(self.plan)
+        self.worker = MultiDestBackupWorker(
+            self,
+            plan=self.plan,
+            encryption_password=self.password,
+            chunker_config=chunker_config,
+            exclusions=exclusions,
+        )
+        self.worker.start()
 
     def _start_subprocess_worker(self) -> None:
         """Spawn ``arq-backup create --state-file …`` as a child
@@ -237,6 +277,37 @@ class BackupRunScreen(Screen):
             self.notify("Cancellation requested.", severity="warning")
         else:
             self.app.pop_screen()
+
+    def action_pause_resume(self) -> None:
+        """[p] toggles pause / resume on the underlying Backup.
+
+        Only the in-process worker exposes pause/resume directly;
+        the subprocess worker would need a SIGUSR1 forwarder
+        (deferred — Backup.pause() lives on the Backup object,
+        not the subprocess writer). When called against the
+        subprocess worker we surface a hint instead of silently
+        no-op'ing.
+        """
+        worker = self.worker
+        if worker is None:
+            return
+        # Only in-process BackupWorker has direct pause/resume
+        # access (subprocess mode would need to send a signal +
+        # the writer doesn't yet handle SIGUSR1).
+        bk = getattr(worker, "_backup", None)
+        if bk is None:
+            self.notify(
+                "Pause/resume only works in in-process mode "
+                "(set ARQ_TUI_IN_PROCESS=1).",
+                severity="warning",
+            )
+            return
+        if bk.is_paused:
+            bk.resume()
+            self.notify("Resumed.", severity="information")
+        else:
+            bk.pause()
+            self.notify("Paused.", severity="information")
 
     # ------------------------------------------------------------------
     # Helpers

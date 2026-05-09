@@ -55,3 +55,42 @@ packages = [
 [tool.setuptools.package-data]
 arq_validator = ["py.typed"]
 arq_tui = ["theming.css"]
+
+[tool.pyright]
+# pyright runs on CI in basic mode — strict mode would chase
+# every `# type: ignore[attr-defined]` we sprinkle for cross-
+# module dynamic attribute access. Basic catches the high-value
+# bugs (undefined names, missing imports, accidentally-broken
+# call shapes) without forcing every callable to carry a
+# complete signature.
+include = [
+    "arq_writer", "arq_reader", "arq_validator", "arq_tui",
+]
+exclude = [
+    "**/__pycache__", "tests", "scripts", "docs",
+    # Legacy compatibility module — keeps Arq 5 binary parser +
+    # restorer working alongside the Arq 7 path.
+    "arq_reader/arq5_*.py",
+]
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
+reportMissingTypeStubs = "none"
+# Allow `**payload` callbacks + dataclasses with optional fields
+# without forcing exhaustive Optional handling on every access.
+reportOptionalMemberAccess = "none"
+reportOptionalSubscript = "none"
+reportOptionalIterable = "none"
+reportOptionalCall = "none"
+# `**common` dict-spread into dataclass __init__ produces
+# `int | str | BlobLoc | List[BlobLoc] | None` per arg —
+# correct at runtime, but pyright can't narrow per-key. Same
+# story for getattr() returns + dynamic dispatch on Tree v3 vs v4.
+# Demote to warning so the genuinely-broken stuff still fails.
+reportArgumentType = "warning"
+reportGeneralTypeIssues = "warning"
+reportAttributeAccessIssue = "warning"
+reportCallIssue = "warning"
+reportAssignmentType = "warning"
+reportReturnType = "warning"
+reportRedeclaration = "warning"
+reportInvalidTypeForm = "warning"

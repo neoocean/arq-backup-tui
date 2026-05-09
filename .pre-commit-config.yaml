@@ -1,0 +1,56 @@
+# Pre-commit hooks for arq-backup-tui.
+#
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# These run before every commit on touched files. They catch the
+# kinds of mistakes that would otherwise fail CI minutes later —
+# trailing whitespace, broken doc refs, syntax errors, etc.
+#
+# We deliberately keep the toolchain minimal:
+# - stdlib hooks (whitespace, EOF, large-files)
+# - check_doc_links.py (our own — fails on stale doc refs)
+# - pyright (when installed locally; CI runs it regardless)
+#
+# Black / ruff are NOT enabled by default because the existing
+# codebase has a bespoke comment density + line-break style that
+# auto-formatters would churn. Operators who want them can add
+# them locally.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Markdown lines often end in trailing spaces (line break
+        # in some renderers); leave them alone.
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+        # 1MB cap. Pack-file fixtures + integration creds are the
+        # cases that'd trip this; both are gitignored.
+        args: ['--maxkb=1024']
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: check-doc-links
+        name: arq-backup-tui doc-link checker
+        # Greps every .md for refs to `arq_*/...py` paths or
+        # `arq_*.module.symbol` identifiers + verifies each one
+        # exists. Same script CI runs.
+        entry: python scripts/check_doc_links.py --quiet
+        language: system
+        files: '\.md$'
+        pass_filenames: false
+
+      - id: pyright
+        name: pyright (basic)
+        # Only fires when pyright is installed locally; otherwise
+        # silently skips. CI runs it unconditionally.
+        entry: bash -c 'command -v pyright >/dev/null && pyright || exit 0'
+        language: system
+        files: '\.py$'
+        pass_filenames: false

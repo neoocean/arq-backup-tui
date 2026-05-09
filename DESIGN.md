@@ -44,6 +44,23 @@ The core reverse-engineering results from the reference — the unpadded
 ARQO multi-object container detection, and so on — are adopted verbatim
 in this project. (See the comments in `arq_validator/constants.py`.)
 
+### 1.3 Documentation conventions
+
+- **Diagrams** use [Mermaid](https://mermaid.js.org/) (` ```mermaid `
+  fenced code blocks). Flow / state / sequence / class diagrams render
+  inline on GitHub + on most modern Markdown viewers. ASCII box-drawing
+  is reserved for cases where the visual layout is itself the point
+  (terminal-UI mockups, file-system tree listings) — anything that
+  represents control flow, data flow, or state transitions should be
+  Mermaid so it stays readable as it grows.
+- **Code references** in prose use inline `code` formatting. The
+  `scripts/check_doc_links.py` checker (wired into CI) resolves every
+  ``arq_*/...py`` path + ``arq_*.module.symbol`` ref against the live
+  codebase + fails on stale references.
+- **External-repo references** (e.g. ``scripts/arq-validate.py`` in
+  ``neoocean/docker-monitor``) are listed in the checker's
+  ``_EXTERNAL_REF_PATHS`` set so they don't trip CI.
+
 ## 2. Package structure
 
 ```

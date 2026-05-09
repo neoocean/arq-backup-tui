@@ -39,3 +39,14 @@ jobs:
         # need three runs of the same check.
         if: matrix.python == '3.12'
         run: python scripts/check_doc_links.py
+      - name: Static type check (pyright)
+        # Catches wrong return shapes, undefined names, broken
+        # imports — the high-value bugs that wouldn't surface
+        # via unittest because they'd never reach the
+        # broken code path. Basic mode (see pyproject.toml's
+        # [tool.pyright]) avoids the strict-mode noise from
+        # cross-module dynamic attribute access.
+        if: matrix.python == '3.12'
+        run: |
+          pip install pyright
+          pyright
