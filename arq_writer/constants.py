@@ -41,13 +41,26 @@ COMPRESSION_NONE = 0
 COMPRESSION_GZIP = 1
 COMPRESSION_LZ4 = 2
 
-# Tree binary format version. Arq 7 uses version=3 (the version Arq.app
-# emits today). Versions >=2 include the win_reparse_tag /
-# win_reparse_point_is_directory fields in Node.
+# Tree binary format version. Arq 7 / Arq.app v7 emit version=3.
+# Arq.app v8 bumped to version=4 — same Node fields plus a 38-byte
+# trailing block per Node we discovered via real-data sampling
+# (see ``docs/REAL-DATA-DISCOVERIES.md`` §7 + the
+# ``parse_node`` comment in ``arq_reader/parse.py``).
+#
+# Default stays at 3 so the writer keeps emitting the format Arq
+# 7's spec documents; opt into 4 by passing ``tree_version=4`` to
+# :func:`write_tree` / :func:`write_node`. Reading both versions
+# is automatic in ``arq_reader/parse.py``.
 TREE_VERSION = 3
+TREE_VERSION_V4_TRAILING_BLOCK = 4
 
 # Node fields gated by Tree version.
 NODE_REPARSE_FIELDS_MIN_TREE_VERSION = 2
+
+# Width of the v4 trailing block per Node, inclusive of every
+# field we've sampled (scanned-at sec/nsec + present-flag +
+# 14 reserved zeros). Pinned in tests to catch any spec drift.
+NODE_V4_TRAILING_BLOCK_BYTES = 38
 
 # blobIdentifierType in backupconfig.json: 1 = SHA-1, 2 = SHA-256.
 BLOB_ID_SHA1 = 1

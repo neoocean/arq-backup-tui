@@ -24,7 +24,9 @@ from typing import Optional
 
 from .constants import (
     NODE_REPARSE_FIELDS_MIN_TREE_VERSION,
+    NODE_V4_TRAILING_BLOCK_BYTES,
     TREE_VERSION,
+    TREE_VERSION_V4_TRAILING_BLOCK,
 )
 from .types import BlobLoc, FileNode, Node, Tree, TreeNode
 
@@ -146,6 +148,48 @@ def write_node(node: Node, *, tree_version: int = TREE_VERSION) -> bytes:
     if tree_version >= NODE_REPARSE_FIELDS_MIN_TREE_VERSION:
         out += write_uint32(node.win_reparse_tag)
         out += write_bool(node.win_reparse_point_is_directory)
+    if tree_version >= TREE_VERSION_V4_TRAILING_BLOCK:
+        out += _v4_trailing_block(node)
+    return bytes(out)
+
+
+def _v4_trailing_block(node: Node) -> bytes:
+    """Encode the 38-byte trailing block Tree v4 adds per Node.
+
+    Empirical structure (from sampling 30 real-world nodes — see
+    ``docs/REAL-DATA-DISCOVERIES.md`` §7 and
+    ``arq_reader/parse.py:parse_node``):
+
+      bytes  0..7  int64 BE  scanned-at sec   (the backup-pass time)
+      bytes  8..15 int64 BE  scanned-at nsec
+      bytes 16..23 int64 BE  0x00000000_01000000  (present-flag)
+      bytes 24..37 14 zero bytes (reserved)
+
+    The all-zero shape only appears for files freshly created in
+    the latest pass; for anything we're emitting from a fresh walk
+    those conditions essentially never hold, so we always write
+    the structured form. The "scanned-at" timestamp is read from
+    the writer's ``v4_scanned_at_sec`` / ``v4_scanned_at_nsec``
+    attributes if set, else falls back to the node's create_time
+    so the output is deterministic in tests.
+    """
+    sec = int(getattr(node, "v4_scanned_at_sec", 0) or 0)
+    nsec = int(getattr(node, "v4_scanned_at_nsec", 0) or 0)
+    if sec == 0 and nsec == 0:
+        # Fall back to create_time to keep output deterministic
+        # without forcing the caller to plumb a scanned-at value
+        # through every Node construction.
+        sec = int(getattr(node, "create_time_sec", 0) or 0)
+        nsec = int(getattr(node, "create_time_nsec", 0) or 0)
+    out = bytearray()
+    out += write_int64(sec)
+    out += write_int64(nsec)
+    out += write_int64(0x00000000_01000000)   # present-flag
+    out += b"\x00" * 14                        # reserved
+    assert len(out) == NODE_V4_TRAILING_BLOCK_BYTES, (
+        f"v4 trailing block must be exactly "
+        f"{NODE_V4_TRAILING_BLOCK_BYTES} bytes, got {len(out)}"
+    )
     return bytes(out)
 
 
