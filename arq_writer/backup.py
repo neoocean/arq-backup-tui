@@ -272,6 +272,7 @@ class Backup:
         exclusions=None,
         backend=None,
         callback: Optional[ProgressCb] = None,
+        tree_version: int = TREE_VERSION,
     ) -> None:
         # When ``backend`` is None we drive a LocalBackend rooted at
         # dest_root (so all backend-relative paths starting with /
@@ -335,6 +336,15 @@ class Backup:
             self._keyset_was_reused = False
         self.openssl_path = openssl_path
         self.use_packs = use_packs
+        # Tree binary version this writer emits. Default = 3 (the
+        # version the Arq 7 spec documents). Pass 4 to also emit
+        # the 38-byte trailing block per Node we discovered in
+        # Arq.app v8 destinations (see
+        # docs/REAL-DATA-DISCOVERIES.md §7); the reader handles
+        # both versions transparently. Existing unit tests assume
+        # 3, so we keep that as the default and let opt-ins flow
+        # through this knob.
+        self.tree_version = int(tree_version)
         self.max_pack_bytes = max_pack_bytes
         self.large_blob_threshold = large_blob_threshold
         self.chunker_config = chunker_config
@@ -897,8 +907,8 @@ class Backup:
             item_size += child_size
             contained += child_count
 
-        tree = Tree(children=children, version=TREE_VERSION)
-        tree_bytes = write_tree(tree, version=TREE_VERSION)
+        tree = Tree(children=children, version=self.tree_version)
+        tree_bytes = write_tree(tree, version=self.tree_version)
         tree_loc = self._write_blob(tree_bytes, is_tree=True)
         self.trees_written += 1
 
@@ -1017,9 +1027,9 @@ class Backup:
                 # Whole source root excluded? Emit empty TreeNode
                 # so the backuprecord still has well-defined shape.
                 from .types import Tree
-                empty_tree = Tree(children=[], version=TREE_VERSION)
+                empty_tree = Tree(children=[], version=self.tree_version)
                 tree_loc = self._write_blob(
-                    write_tree(empty_tree, version=TREE_VERSION),
+                    write_tree(empty_tree, version=self.tree_version),
                     is_tree=True,
                 )
                 root_node = TreeNode(
@@ -1123,6 +1133,7 @@ def build_backup(
     max_file_bytes: Optional[int] = None,
     exclusions=None,
     use_apfs_snapshot: bool = False,
+    tree_version: int = TREE_VERSION,
 ) -> BackupResult:
     """One-shot convenience wrapper: full plan init + single folder.
 
@@ -1160,6 +1171,7 @@ def build_backup(
         dedup_against_existing=dedup_against_existing,
         max_file_bytes=max_file_bytes,
         exclusions=exclusions,
+        tree_version=tree_version,
     )
     bk.init_plan()
 
