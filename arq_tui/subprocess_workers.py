@@ -74,21 +74,19 @@ def subprocess_eligible(plan, dest_kind: str) -> bool:
     """Return True iff the subprocess + state-file path can drive
     this plan without losing functionality.
 
-    Limitations of the current ``arq-backup create`` CLI:
+    Both local and SFTP destinations are now supported (the CLI
+    grew ``--sftp-host``/``--sftp-user``/``--sftp-path``/
+    ``--sftp-identity-file``/``--sftp-password-env`` args). Both
+    single- and multi-source plans are supported (the CLI takes
+    ``nargs='+'`` for the positional source list).
 
-    - Local destinations only. SFTP destinations need to keep using
-      the in-process Backup(backend=...) path because the CLI's
-      ``--dest`` is a local Path, not a backend URL.
-    - Single-source plans only. The CLI takes one positional source
-      argument; a multi-source plan that calls ``bk.add_folder``
-      multiple times in-process would need either a CLI extension
-      or a wrapper subcommand.
-
-    The screen falls back to in-process when this returns False.
+    The only remaining gate is destination-kind sanity: anything
+    we don't recognize falls back to in-process so we don't pass
+    a bogus dest spec to the subprocess.
     """
-    if dest_kind != "local":
+    if dest_kind not in ("local", "sftp"):
         return False
-    if len(plan.sources) != 1:
+    if not plan.sources:
         return False
     return True
 
@@ -180,13 +178,48 @@ class SubprocessBackupWorker:
     def _build_argv(self) -> list:
         """Translate :class:`Plan` fields into ``arq-backup create``
         argv. Caller is responsible for ensuring
-        :func:`subprocess_eligible` returned True before invoking."""
+        :func:`subprocess_eligible` returned True before invoking.
+
+        Source list goes in as positional args (the CLI accepts
+        ``nargs='+'``); destination is either ``--dest <path>`` for
+        local plans or the ``--sftp-host``/``--sftp-port``/
+        ``--sftp-user``/``--sftp-path``/``--sftp-identity-file``/
+        ``--sftp-password-env`` family for SFTP plans.
+        """
         plan = self.plan
         argv = [
             self.executable, "-m", "arq_writer",
             "create",
-            plan.sources[0],
-            "--dest", str(plan.destination.get("path") or ""),
+        ]
+        # Sources first — CLI keeps positional args before flags.
+        for src in plan.sources:
+            argv.append(src)
+        # Destination wiring depends on kind.
+        if plan.destination_kind == "sftp":
+            d = plan.destination or {}
+            argv += [
+                "--sftp-host", str(d.get("host") or ""),
+                "--sftp-port", str(int(d.get("port") or 22)),
+                "--sftp-user", str(d.get("user") or ""),
+                "--sftp-path", str(d.get("path") or ""),
+            ]
+            if d.get("identity_file"):
+                argv += [
+                    "--sftp-identity-file",
+                    str(d.get("identity_file")),
+                ]
+            # SSH password (when password auth is used) is read from
+            # an env var so it never appears in argv. The screen
+            # primes ARQ_SFTP_PW_TUI in env when the cached SFTP
+            # auth contains a password.
+            if d.get("password_env"):
+                argv += [
+                    "--sftp-password-env",
+                    str(d.get("password_env")),
+                ]
+        else:
+            argv += ["--dest", str(plan.destination.get("path") or "")]
+        argv += [
             "--password-env", "ARQ_BACKUP_PW_TUI",
             "--state-file", str(self.state_file),
             "--backup-name", plan.name or "TUI backup",

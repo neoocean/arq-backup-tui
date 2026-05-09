@@ -1,0 +1,78 @@
+name: integration-nightly
+
+# Runs the SFTP-backed integration suite against a destination
+# whose credentials live in the repo's GitHub Secrets. Triggers:
+#
+# - schedule: every night at 04:00 UTC. The default backup
+#   window for most operators is 03:00 local; this gives the
+#   destination a buffer before our walk + audit hits it.
+# - workflow_dispatch: lets a maintainer kick a one-off run
+#   from the Actions tab without waiting for the schedule.
+#
+# Failures surface as a GitHub Issue with the failing test's
+# stderr in the body — easier for the operator to triage than
+# scrolling through Actions logs.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  integration:
+    name: integration suite (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install package + TUI extras
+        run: pip install -e ".[test,tui]"
+      - name: Materialise SFTP credentials from secrets
+        # Fail fast when the secrets aren't set so the workflow
+        # status shows "skipped/missing creds" rather than a
+        # confusing per-test skip.
+        if: env.ARQ_TEST_SFTP_HOST != ''
+        env:
+          ARQ_TEST_SFTP_HOST: ${{ secrets.ARQ_TEST_SFTP_HOST }}
+        run: |
+          mkdir -p .secrets
+          cat > .secrets/sftp.json <<EOF
+          {
+            "host": "${{ secrets.ARQ_TEST_SFTP_HOST }}",
+            "port": ${{ secrets.ARQ_TEST_SFTP_PORT || 22 }},
+            "user": "${{ secrets.ARQ_TEST_SFTP_USER }}",
+            "root": "${{ secrets.ARQ_TEST_SFTP_ROOT }}",
+            "password": "${{ secrets.ARQ_TEST_SFTP_PASSWORD }}",
+            "write_subdir": ".arq-backup-tui-ci-write-test"
+          }
+          EOF
+          chmod 600 .secrets/sftp.json
+          echo -n "${{ secrets.ARQ_TEST_DEST_PASSWORD }}" \
+            > .secrets/dest_password
+          chmod 600 .secrets/dest_password
+      - name: Run integration suite
+        if: env.ARQ_TEST_SFTP_HOST != ''
+        env:
+          ARQ_TEST_SFTP_HOST: ${{ secrets.ARQ_TEST_SFTP_HOST }}
+        run: python -m unittest discover -s tests/integration -v
+      - name: Notify on failure
+        # Only fire when the integration step actually ran AND
+        # failed — avoids opening an issue every night when the
+        # secrets aren't configured.
+        if: failure() && env.ARQ_TEST_SFTP_HOST != ''
+        env:
+          ARQ_TEST_SFTP_HOST: ${{ secrets.ARQ_TEST_SFTP_HOST }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Nightly integration tests failed: $(date -u +%Y-%m-%d)" \
+            --body "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "ci,nightly" \
+            || true

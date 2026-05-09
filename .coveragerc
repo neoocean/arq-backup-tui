@@ -1,0 +1,32 @@
+[run]
+branch = True
+source =
+    arq_writer
+    arq_reader
+    arq_validator
+    arq_tui
+omit =
+    # Tests are not the system under test.
+    tests/*
+    # Scripts are operator tools, not library code.
+    scripts/*
+    # Generated / vendored.
+    */__pycache__/*
+    */__main__.py
+    */arq5_*.py
+
+[report]
+# Skip lines that are unreachable by design.
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+
+show_missing = True
+precision = 1
+sort = -Cover
+
+[html]
+directory = htmlcov

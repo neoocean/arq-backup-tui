@@ -242,19 +242,47 @@ def capture_xattrs(
     return out
 
 
-def serialize_xattrs(xattrs: Dict[str, bytes]) -> bytes:
-    """Encode a name → value dict as the on-disk xattr blob.
+_XATTR_MAGIC = b"XAttrSetV002"
 
-    Apple binary plist so the bytes are self-describing + can be
-    read with stock plistlib on either side. Empty input returns
-    ``b""`` so the caller can short-circuit "no xattrs → no blob".
+
+def serialize_xattrs(xattrs: Dict[str, bytes]) -> bytes:
+    """Encode a name → value dict as Arq.app's ``XAttrSetV002`` blob.
+
+    Format (reverse-engineered from the operator's destination —
+    see ``docs/REAL-DATA-DISCOVERIES.md`` and
+    ``scripts/probe_xattr_blob.py``)::
+
+        [12 bytes magic "XAttrSetV002"]
+        [uint64 BE: count]
+        Per xattr (count entries):
+            [1 byte 0x01: isPresent marker]
+            [uint64 BE: name length]
+            [name UTF-8 bytes]
+            [uint64 BE: value length]
+            [value bytes]
+
+    Empty input returns ``b""`` so the caller can short-circuit
+    "no xattrs → no blob".
+
+    Names get a deterministic sort so identical-content nodes
+    produce identical blob_ids — within-run + cross-run dedup
+    relies on this.
     """
+    import struct
     if not xattrs:
         return b""
-    # plistlib accepts bytes values directly under FMT_BINARY; that
-    # avoids any base64-or-string encoding round-trip and lets
-    # Finder-style binary xattrs survive byte-perfect.
-    return plistlib.dumps(xattrs, fmt=plistlib.FMT_BINARY)
+    out = bytearray()
+    out += _XATTR_MAGIC
+    out += struct.pack(">Q", len(xattrs))
+    for name in sorted(xattrs):
+        value = xattrs[name]
+        name_bytes = name.encode("utf-8")
+        out.append(0x01)                          # isPresent
+        out += struct.pack(">Q", len(name_bytes))
+        out += name_bytes
+        out += struct.pack(">Q", len(value))
+        out += value
+    return bytes(out)
 
 
 # ---------------------------------------------------------------------------
@@ -263,30 +291,100 @@ def serialize_xattrs(xattrs: Dict[str, bytes]) -> bytes:
 
 
 def deserialize_xattrs(blob: bytes) -> Dict[str, bytes]:
-    """Decode a blob written by :func:`serialize_xattrs`.
+    """Decode an xattr blob.
 
-    Empty / missing input → ``{}``. Malformed plist raises
-    ``plistlib.InvalidFileException`` (the standard library's own
-    exception type so callers can pin it without importing this
-    module's error hierarchy).
+    Accepts both shapes:
+    - The ``XAttrSetV002`` binary format Arq.app uses (what
+      :func:`serialize_xattrs` now emits).
+    - The old binary-plist shape this writer emitted before the
+      Arq.app format was reverse-engineered. Backward-compat
+      lets older destinations restore through the new code.
+
+    Empty / missing input → ``{}``. Malformed input raises
+    ``ValueError``.
     """
+    import struct
     if not blob:
         return {}
-    parsed = plistlib.loads(blob, fmt=plistlib.FMT_BINARY)
-    if not isinstance(parsed, dict):
-        raise plistlib.InvalidFileException(
-            f"xattr blob is not a dict: type={type(parsed).__name__}"
+    # XAttrSetV002 fast path.
+    if blob.startswith(_XATTR_MAGIC):
+        return _deserialize_xattrset_v002(blob)
+    # Backward-compat: binary plist shape from the original PR.
+    if blob.startswith(b"bplist00"):
+        parsed = plistlib.loads(blob, fmt=plistlib.FMT_BINARY)
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"xattr plist blob is not a dict: "
+                f"type={type(parsed).__name__}"
+            )
+        out: Dict[str, bytes] = {}
+        for k, v in parsed.items():
+            if not isinstance(k, str):
+                continue
+            if isinstance(v, (bytes, bytearray)):
+                out[k] = bytes(v)
+            elif isinstance(v, str):
+                out[k] = v.encode("utf-8")
+        return out
+    raise ValueError(
+        f"unknown xattr blob format; first bytes={blob[:16].hex()!r}"
+    )
+
+
+def _deserialize_xattrset_v002(blob: bytes) -> Dict[str, bytes]:
+    """Parse an Arq.app ``XAttrSetV002`` blob into name → value."""
+    import struct
+    pos = len(_XATTR_MAGIC)
+    if pos + 8 > len(blob):
+        raise ValueError(
+            f"XAttrSetV002 too short for count field: {len(blob)}"
         )
+    (count,) = struct.unpack(">Q", blob[pos:pos + 8])
+    pos += 8
     out: Dict[str, bytes] = {}
-    for k, v in parsed.items():
-        if not isinstance(k, str):
-            continue
-        if isinstance(v, (bytes, bytearray)):
-            out[k] = bytes(v)
-        elif isinstance(v, str):
-            # Some sources may emit utf-8-decoded strings; preserve
-            # bytes round-trip by re-encoding.
-            out[k] = v.encode("utf-8")
+    for i in range(count):
+        if pos + 1 > len(blob):
+            raise ValueError(
+                f"XAttrSetV002 truncated at entry {i}: "
+                f"missing isPresent byte"
+            )
+        # isPresent marker — Arq's [String] convention. 0 = null,
+        # 1 = present. We've never seen a "null" entry here in
+        # real data; tolerate it but treat as empty.
+        is_present = blob[pos]
+        pos += 1
+        if pos + 8 > len(blob):
+            raise ValueError(
+                f"XAttrSetV002 truncated at entry {i}: "
+                f"missing name-length field"
+            )
+        (name_len,) = struct.unpack(">Q", blob[pos:pos + 8])
+        pos += 8
+        if pos + name_len > len(blob):
+            raise ValueError(
+                f"XAttrSetV002 truncated at entry {i}: "
+                f"name claims {name_len} bytes, only "
+                f"{len(blob) - pos} remain"
+            )
+        name = blob[pos:pos + name_len].decode("utf-8", "replace")
+        pos += name_len
+        if pos + 8 > len(blob):
+            raise ValueError(
+                f"XAttrSetV002 truncated at entry {i} ({name!r}): "
+                f"missing value-length field"
+            )
+        (value_len,) = struct.unpack(">Q", blob[pos:pos + 8])
+        pos += 8
+        if pos + value_len > len(blob):
+            raise ValueError(
+                f"XAttrSetV002 truncated at entry {i} ({name!r}): "
+                f"value claims {value_len} bytes, only "
+                f"{len(blob) - pos} remain"
+            )
+        value = bytes(blob[pos:pos + value_len])
+        pos += value_len
+        if is_present:
+            out[name] = value
     return out
 
 

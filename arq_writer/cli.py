@@ -11,7 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional
 
-from .backup import build_backup
+from .backup import _emit, build_backup
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -27,19 +27,70 @@ def _build_parser() -> argparse.ArgumentParser:
 
     create = sub.add_parser(
         "create",
-        help="Create a new backup of <source> at <--dest>.",
+        help="Create a new backup of <source...> at <--dest> "
+             "(local) or <--sftp-host> (remote).",
     )
     create.add_argument(
         "source",
-        type=Path,
-        help="Source directory to back up.",
+        type=Path, nargs="+",
+        help=(
+            "One or more source directories to back up. Multiple "
+            "sources land as separate backupfolders under the same "
+            "computer-uuid + plan-uuid (the writer's add_folder is "
+            "called once per source)."
+        ),
     )
     create.add_argument(
         "--dest",
         type=Path,
-        required=True,
-        help="Destination root (a fresh empty directory or an existing "
-             "Arq backup destination — will append a new computer subtree).",
+        default=None,
+        help=(
+            "Local destination root (a fresh empty directory or an "
+            "existing Arq backup destination — will append a new "
+            "computer subtree). Mutually exclusive with --sftp-host."
+        ),
+    )
+    create.add_argument(
+        "--sftp-host",
+        default=None,
+        help=(
+            "SFTP destination host. When set, the backup goes to "
+            "the remote server via the existing SftpBackend rather "
+            "than to a local --dest path."
+        ),
+    )
+    create.add_argument(
+        "--sftp-port",
+        type=int, default=22,
+        help="SFTP port (default 22).",
+    )
+    create.add_argument(
+        "--sftp-user",
+        default="",
+        help="SSH username for --sftp-host.",
+    )
+    create.add_argument(
+        "--sftp-path",
+        default="",
+        help=(
+            "Server-side root path under which the backup is "
+            "anchored (e.g. /home/u504460/arq-backup). "
+            "Equivalent to SftpBackend(root=...)."
+        ),
+    )
+    create.add_argument(
+        "--sftp-identity-file",
+        type=Path, default=None,
+        help="SSH private key for --sftp-host (key-based auth).",
+    )
+    create.add_argument(
+        "--sftp-password-env",
+        default=None,
+        help=(
+            "Env var holding the SSH password for --sftp-host "
+            "(used via SSH_ASKPASS). Mutually exclusive with "
+            "--sftp-identity-file."
+        ),
     )
     create.add_argument(
         "--password",
@@ -274,19 +325,198 @@ def _make_callback(args: argparse.Namespace):
     return cb
 
 
+def _validate_destination_args(
+    args: argparse.Namespace,
+) -> Optional[str]:
+    """Return None when --dest / --sftp-host are valid, else a
+    user-facing error message."""
+    if args.dest is not None and args.sftp_host:
+        return (
+            "--dest and --sftp-host are mutually exclusive; "
+            "pick one"
+        )
+    if args.dest is None and not args.sftp_host:
+        return (
+            "either --dest <path> (local) or --sftp-host <host> "
+            "(remote) must be supplied"
+        )
+    if args.sftp_host and not args.sftp_path:
+        return (
+            "--sftp-path is required when --sftp-host is set "
+            "(server-side root the backup is anchored under)"
+        )
+    return None
+
+
+def _open_sftp_backend(args: argparse.Namespace):
+    """Build + open an SftpBackend from the --sftp-* args."""
+    from arq_validator.sftp import SftpBackend
+    sftp_password = None
+    if args.sftp_password_env:
+        sftp_password = os.environ.get(args.sftp_password_env, "")
+        if not sftp_password:
+            print(
+                f"warning: --sftp-password-env "
+                f"{args.sftp_password_env!r} is unset; "
+                f"falling back to identity-based auth",
+                file=sys.stderr,
+            )
+            sftp_password = None
+    backend = SftpBackend(
+        args.sftp_host, port=args.sftp_port, user=args.sftp_user,
+        password=sftp_password,
+        identity_file=args.sftp_identity_file,
+        root=args.sftp_path,
+    )
+    backend.__enter__()
+    return backend
+
+
+def _run_backup_call(
+    *, sources, args, password, callback, exclusions, chunker_config,
+):
+    """Drive ``Backup`` directly so we can call ``add_folder`` once
+    per source and so we can attach an SftpBackend when --sftp-host
+    is set. Returns a dict suitable for the JSON output (mirrors
+    the dataclass shape ``build_backup`` used to return)."""
+    from .backup import Backup
+
+    use_sftp = bool(args.sftp_host)
+    backend = _open_sftp_backend(args) if use_sftp else None
+    try:
+        bk = Backup(
+            dest_root=Path("/") if use_sftp else args.dest,
+            encryption_password=password,
+            backup_name=args.backup_name,
+            callback=callback,
+            openssl_path=args.openssl_path,
+            computer_uuid=args.computer_uuid,
+            plan_uuid=args.plan_uuid,
+            use_packs=args.use_packs,
+            chunker_config=chunker_config,
+            dedup_against_existing=args.dedup_against_existing,
+            max_file_bytes=args.max_file_bytes,
+            exclusions=exclusions,
+            backend=backend,
+            tree_version=args.tree_version,
+        )
+        bk.init_plan()
+        import time as _time
+        started = _time.time()
+        recs = []
+        folder_uuids: list = []
+
+        def _add_folder_maybe_snapshot(src, folder_uuid, folder_name):
+            """add_folder with the same APFS-snapshot fallback the
+            single-source build_backup convenience wrapper has —
+            on non-macOS the with_apfs_snapshot call raises
+            NotMacOSError + we emit ``apfs_snapshot_skipped`` and
+            walk the live source."""
+            if not args.use_apfs_snapshot:
+                return bk.add_folder(
+                    src, folder_uuid=folder_uuid,
+                    folder_name=folder_name,
+                )
+            from .macos_snapshot import (
+                NotMacOSError, with_apfs_snapshot,
+            )
+            try:
+                with with_apfs_snapshot(src) as snap_path:
+                    return bk.add_folder(
+                        snap_path,
+                        folder_uuid=folder_uuid,
+                        folder_name=folder_name or src.name,
+                    )
+            except NotMacOSError:
+                _emit(callback, "apfs_snapshot_skipped",
+                      reason="not_macos", source=str(src))
+                return bk.add_folder(
+                    src, folder_uuid=folder_uuid,
+                    folder_name=folder_name,
+                )
+
+        for i, src in enumerate(sources):
+            # First source can keep the operator-supplied
+            # --folder-uuid / --folder-name; later sources get
+            # auto-generated UUIDs + their basename so they don't
+            # collide.
+            if i == 0:
+                fu = args.folder_uuid
+                fn = args.folder_name
+            else:
+                fu = None
+                fn = src.name
+            rec_path = _add_folder_maybe_snapshot(src, fu, fn)
+            recs.append(str(rec_path))
+            # The actual UUID Backup picked (whether it was the
+            # explicit --folder-uuid or an autogenerated one)
+            # lives in _folder_plans[-1]["folder_uuid"]; surface
+            # it so single-source callers can look up the
+            # backupfolder dir without parsing rec_path.
+            # build_folder_plan emits "backupFolderUUID" (camelCase
+            # matching Arq's JSON schema) — not "folder_uuid".
+            try:
+                folder_uuids.append(
+                    bk._folder_plans[-1]["backupFolderUUID"],
+                )
+            except (IndexError, KeyError):
+                folder_uuids.append("")
+        elapsed = _time.time() - started
+        # Single-source callers (the historical CLI shape) get
+        # the legacy keys (folder_uuid, backuprecord_path); multi-
+        # source callers see the lists. Both shapes are present so
+        # downstream JSON consumers can pick whichever they need.
+        return {
+            "dest_root": str(bk.dest_root),
+            "computer_uuid": bk.computer_uuid,
+            "plan_uuid": bk.plan_uuid,
+            "folder_uuid": folder_uuids[0] if folder_uuids else "",
+            "folder_uuids": folder_uuids,
+            "backuprecord_path": recs[0] if recs else "",
+            "backuprecord_paths": recs,
+            "files_written": bk.files_written,
+            "files_reused": bk.files_reused,
+            "trees_written": bk.trees_written,
+            "bytes_plaintext": bk.bytes_plaintext,
+            "bytes_on_disk": bk.bytes_on_disk,
+            "blob_count": len(bk.blob_ids),
+            "elapsed_sec": elapsed,
+        }
+    finally:
+        if backend is not None:
+            try:
+                backend.__exit__(None, None, None)
+            except Exception:
+                pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command != "create":
         print(f"error: unknown command {args.command!r}", file=sys.stderr)
         return 2
 
-    if not args.source.exists():
-        print(f"error: source does not exist: {args.source}", file=sys.stderr)
+    err = _validate_destination_args(args)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
         return 2
-    if not args.source.is_dir():
-        print(f"error: source must be a directory: {args.source}",
-              file=sys.stderr)
-        return 2
+
+    # Validate every source is a directory before we open any
+    # backend or prompt for passwords; better to fail fast than
+    # to leak an SSH connection / askpass tempfile.
+    for src in args.source:
+        if not src.exists():
+            print(
+                f"error: source does not exist: {src}",
+                file=sys.stderr,
+            )
+            return 2
+        if not src.is_dir():
+            print(
+                f"error: source must be a directory: {src}",
+                file=sys.stderr,
+            )
+            return 2
 
     password = _resolve_password(args)
     if password is None and sys.stdin.isatty():
@@ -311,14 +541,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     chunker_config = _resolve_chunker(args.chunker)
     exclusions = _resolve_exclusions(args)
 
+    dest_kind = "sftp" if args.sftp_host else "local"
+    dest_label = (
+        f"sftp://{args.sftp_user}@{args.sftp_host}{args.sftp_path}"
+        if args.sftp_host else str(args.dest)
+    )
+
     # Run the backup with optional state-file IPC. The state writer
     # wraps the whole call so any exception (incl. Ctrl-C) flips the
     # file's status to FAILED / CANCELLED automatically; on clean
-    # exit it lands as COMPLETED. ``user_cb`` is the legacy
-    # stderr/--json-events stream; it's kept independent of the
-    # state file so existing scripted callers see the same output.
+    # exit it lands as COMPLETED.
     if args.state_file is not None:
-        # Local import keeps the writer module free of TUI deps.
         from arq_tui.runs import RunKind, run_writer_context
 
         try:
@@ -329,7 +562,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 state_file=args.state_file,
             ) as rw:
                 rw.set_destination(
-                    kind="local", label=str(args.dest),
+                    kind=dest_kind, label=dest_label,
                     computer_uuid=args.computer_uuid or "",
                 )
 
@@ -338,31 +571,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     if user_cb is not None:
                         user_cb(kind, payload)
 
-                result = build_backup(
-                    args.source, args.dest, password,
-                    backup_name=args.backup_name,
-                    folder_name=args.folder_name,
-                    callback=cb,
-                    openssl_path=args.openssl_path,
-                    computer_uuid=args.computer_uuid,
-                    plan_uuid=args.plan_uuid,
-                    folder_uuid=args.folder_uuid,
-                    use_packs=args.use_packs,
+                summary = _run_backup_call(
+                    sources=args.source, args=args, password=password,
+                    callback=cb, exclusions=exclusions,
                     chunker_config=chunker_config,
-                    dedup_against_existing=args.dedup_against_existing,
-                    max_file_bytes=args.max_file_bytes,
-                    exclusions=exclusions,
-                    use_apfs_snapshot=args.use_apfs_snapshot,
-                    tree_version=args.tree_version,
                 )
                 rw.set_result({
-                    "computer_uuid": result.computer_uuid,
-                    "files_written": result.files_written,
-                    "files_reused": getattr(result, "files_reused", 0),
-                    "bytes_plaintext": getattr(
-                        result, "bytes_plaintext", 0,
-                    ),
-                    "elapsed_sec": result.elapsed_sec,
+                    "computer_uuid": summary["computer_uuid"],
+                    "files_written": summary["files_written"],
+                    "files_reused": summary["files_reused"],
+                    "bytes_plaintext": summary["bytes_plaintext"],
                 })
         except Exception as exc:
             print(f"error: backup failed: {type(exc).__name__}: {exc}",
@@ -370,32 +588,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 4
     else:
         try:
-            result = build_backup(
-                args.source, args.dest, password,
-                backup_name=args.backup_name,
-                folder_name=args.folder_name,
-                callback=user_cb,
-                openssl_path=args.openssl_path,
-                computer_uuid=args.computer_uuid,
-                plan_uuid=args.plan_uuid,
-                folder_uuid=args.folder_uuid,
-                use_packs=args.use_packs,
+            summary = _run_backup_call(
+                sources=args.source, args=args, password=password,
+                callback=user_cb, exclusions=exclusions,
                 chunker_config=chunker_config,
-                dedup_against_existing=args.dedup_against_existing,
-                max_file_bytes=args.max_file_bytes,
-                exclusions=exclusions,
-                use_apfs_snapshot=args.use_apfs_snapshot,
             )
         except Exception as exc:
             print(f"error: backup failed: {type(exc).__name__}: {exc}",
                   file=sys.stderr)
             return 4
 
-    out = asdict(result)
-    out["dest_root"] = str(out["dest_root"])
-    out["backuprecord_path"] = str(out["backuprecord_path"])
-    out["elapsed_sec"] = result.elapsed_sec
-    print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+    print(json.dumps(summary, indent=2, ensure_ascii=False, default=str))
     return 0
 
 
