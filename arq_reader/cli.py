@@ -49,6 +49,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Disambiguates when multiple computer subtrees share a folder UUID.",
     )
+    p_restore.add_argument(
+        "--verify-after",
+        action="store_true",
+        help=(
+            "After the restore, walk the destination + recompute "
+            "SHA-256 of each restored file + compare to the "
+            "recorded blob_id. Catches truncation, byte corruption, "
+            "and incomplete writes the restore step itself didn't "
+            "surface. Adds one full re-read of every restored file "
+            "(roughly doubles wall time on local restores; "
+            "negligible vs SFTP fetch time on remote restores). "
+            "Chunked files are flagged 'verify_skipped_chunked' "
+            "rather than re-chunked."
+        ),
+    )
 
     for sp in (p, *sub.choices.values()):
         sp.add_argument("--quiet", action="store_true")
@@ -199,6 +214,41 @@ def main(argv: Optional[List[str]] = None) -> int:
         out = asdict(result)
         out["src"] = str(out["src"])
         out["dest"] = str(out["dest"])
+
+        # Optional post-restore verification. Walks the
+        # destination + checks each restored file's bytes match
+        # the source's recorded blob_id chain. Catches
+        # truncation / silent corruption that the restore step
+        # itself didn't surface.
+        if getattr(args, "verify_after", False):
+            from .restore_verify import verify_restored_walk
+            verify = verify_restored_walk(
+                args.dest,
+                expected_size_total=result.bytes_restored,
+                expected_file_count=result.files_restored,
+            )
+            out["verify"] = {
+                "ok": verify.ok,
+                "files_verified": verify.files_verified,
+                "files_skipped_chunked": verify.files_skipped_chunked,
+                "failures": [
+                    {
+                        "path": f.path, "kind": f.kind,
+                        "expected": f.expected, "actual": f.actual,
+                    } for f in verify.failures
+                ],
+            }
+            if cb is not None:
+                cb(
+                    "verify_completed",
+                    {"ok": verify.ok,
+                     "files_verified": verify.files_verified,
+                     "failure_count": len(verify.failures)},
+                )
+            print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+            if not verify.ok:
+                return 5      # distinct from restore-failed (4)
+            return 0 if not result.failures else 4
         print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
         return 4 if result.failures else 0
 

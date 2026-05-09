@@ -608,6 +608,30 @@ class Backup:
             return []
         return [self._write_blob(blob)]
 
+    def _acl_loc_for(self, src: Path) -> Optional[BlobLoc]:
+        """Capture ``src``'s ACL via the platform's CLI + return
+        a single BlobLoc to attach to ``Node.aclBlobLoc``.
+
+        Returns ``None`` when the entry has no ACL (or no
+        platform CLI). Per-platform errors swallowed via the
+        callback — never aborts the file's walk.
+        """
+        try:
+            from .acl import capture_acl
+            blob = capture_acl(
+                src,
+                callback=lambda kind, payload: _emit(
+                    self.callback, kind, **payload,
+                ),
+            )
+        except Exception as exc:
+            _emit(self.callback, "acl_capture_error",
+                  path=str(src), error=str(exc))
+            return None
+        if not blob:
+            return None
+        return self._write_blob(blob)
+
     def _write_blob(self, plaintext: bytes, *, is_tree: bool = False) -> BlobLoc:
         """Encrypt+LZ4-wrap+write ``plaintext`` and return its BlobLoc.
 
@@ -821,6 +845,11 @@ class Backup:
         # bounded regardless of how many xattrs the file has.
         # See arq_writer/xattrs.py for the format choice.
         xattr_locs = self._xattr_locs_for(src)
+        # ACL capture lives on the same checkpoint as xattrs —
+        # both are platform-CLI calls that can fail gracefully.
+        # The single-blob result lands on Node.aclBlobLoc so the
+        # restore can apply it after chmod/chown.
+        acl_loc = self._acl_loc_for(src)
         # Symlinks: don't follow. Store the link target string as
         # the file's content so the restorer can rebuild the link
         # under the S_IFLNK mode bit.
@@ -843,6 +872,7 @@ class Backup:
             node = FileNode(
                 dataBlobLocs=locs,
                 xattrsBlobLocs=xattr_locs,
+                aclBlobLoc=acl_loc,
                 itemSize=len(data),
                 containedFilesCount=1,
                 mtime_sec=int(st.st_mtime),
@@ -892,6 +922,7 @@ class Backup:
         node = FileNode(
             dataBlobLocs=locs,
             xattrsBlobLocs=xattr_locs,
+            aclBlobLoc=acl_loc,
             itemSize=len(data),
             containedFilesCount=1,
             mtime_sec=int(st.st_mtime),
@@ -959,13 +990,15 @@ class Backup:
         self.trees_written += 1
 
         st = src.stat()
-        # Directories can carry xattrs too (Finder labels, ACL
-        # markers, etc.). Capture them on the TreeNode itself so
-        # restore can re-apply them after mkdir.
+        # Directories can carry xattrs + ACLs too (Finder labels,
+        # NFSv4 ACEs, etc.). Capture both on the TreeNode itself
+        # so restore can re-apply them after mkdir.
         dir_xattr_locs = self._xattr_locs_for(src)
+        dir_acl_loc = self._acl_loc_for(src)
         node = TreeNode(
             treeBlobLoc=tree_loc,
             xattrsBlobLocs=dir_xattr_locs,
+            aclBlobLoc=dir_acl_loc,
             itemSize=item_size,
             containedFilesCount=contained,
             mtime_sec=int(st.st_mtime),

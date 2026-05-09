@@ -199,6 +199,39 @@ against the remote destination via `--sftp-host` etc.
 - **OS**: macOS / Linux. Windows is unsupported due to OpenSSH/openssl
   behavior differences.
 
+## 4.5 Development setup
+
+If you intend to contribute or run the test/lint stack locally:
+
+```sh
+# 1. Install the dev extras
+pip install -e ".[test,tui]" pyright pre-commit
+
+# 2. Wire up the pre-commit hooks
+pre-commit install
+
+# 3. (Optional) Run all hooks against the current tree once,
+#    so your first commit doesn't trip a check that's been
+#    sitting unnoticed.
+pre-commit run --all-files
+```
+
+Hooks that run on every commit (configured in
+`.pre-commit-config.yaml`):
+
+- `check-doc-links` — fails when a `.md` file references a
+  renamed/removed `arq_*/...py` path or undefined symbol
+  (the same checker CI runs on every PR).
+- `pyright` — soft-skips when not installed locally; CI runs
+  it unconditionally on every PR.
+- Standard hygiene: trailing whitespace, missing EOF newlines,
+  large file accidents, malformed YAML/TOML, merge-conflict
+  markers.
+
+CI also runs the static type check (`pyright`) and the doc-link
+checker on every PR — see `.github/workflows/test.yml`. Local
+hooks just shorten the feedback loop.
+
 ## 5. License
 
 This repository itself is under the **MIT License** (`LICENSE`).

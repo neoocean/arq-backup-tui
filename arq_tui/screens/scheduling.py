@@ -55,7 +55,16 @@ class _ScheduleRow(ListItem):
 
 
 class SchedulingScreen(Screen):
-    """List + manage all arq-backup-tui-managed schedules."""
+    """List + manage all arq-backup-tui-managed schedules.
+
+    When opened from HomeScreen with a focused plan
+    (``staged_plan`` set), the install actions ([i] / [l]) target
+    that plan instead of requiring a row to be focused. This is
+    the install-from-Home flow: HomeScreen pushes
+    ``SchedulingScreen(staged_plan=plan)`` → operator presses
+    [i] → cron entry installed for that plan without leaving
+    the screen.
+    """
 
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back", show=True),
@@ -67,6 +76,10 @@ class SchedulingScreen(Screen):
                 "Remove focused", show=True),
         Binding("g", "refresh", "Refresh", show=True),
     ]
+
+    def __init__(self, *, staged_plan=None) -> None:
+        super().__init__()
+        self._staged_plan = staged_plan
 
     DEFAULT_CSS = """
     SchedulingScreen #title {
@@ -185,29 +198,25 @@ class SchedulingScreen(Screen):
     def _plan_to_install(self):
         """Resolve the plan to install a schedule for.
 
-        Right now this expects the operator to have focused a
-        row from a different screen + come here via a "schedule
-        this plan" jump (deferred — for the first iteration the
-        screen only manages EXISTING schedules; install actions
-        require an in-screen focus by plan_id, which falls back
-        to a "no plan focused" notification). The wiring for
-        "select plan on HomeScreen → press [s] → land on
-        SchedulingScreen with that plan pre-focused" is a
-        follow-up.
+        Order of preference:
+        1. ``self._staged_plan`` — set by HomeScreen when the
+           operator presses [s] with a plan focused. This is the
+           normal install-from-Home flow.
+        2. Focused row in the schedule list — re-uses the same
+           plan_id for the new install (effectively reschedules).
+        3. None — emit a hint pointing at the install-from-Home
+           flow.
         """
-        # First pass: when a row is focused, look up the plan by
-        # ID. When the list is empty + no plan is staged, we
-        # surface a hint instead of crashing.
+        if self._staged_plan is not None:
+            return self._staged_plan
         plan_id = self._focused_plan()
         if plan_id is None:
             self.notify(
-                "Open this screen with a plan focused on "
-                "HomeScreen to install a schedule "
-                "(install-from-here is a follow-up).",
+                "No plan staged. Press [s] on HomeScreen with a "
+                "plan focused to install a schedule for it.",
                 severity="warning",
             )
             return None
-        # Look up the plan from the registry by ID.
         registry = getattr(self.app, "plan_registry", None)
         if registry is None:
             return None

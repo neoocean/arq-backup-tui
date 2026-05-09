@@ -341,6 +341,43 @@ class Restore:
     # Walk + materialize
     # ------------------------------------------------------------------
 
+    def _apply_acl_to(
+        self,
+        node,
+        out_path: Path,
+        keyset: Keyset,
+        result: RestoreResult,
+        callback: Optional[ProgressCb],
+    ) -> bool:
+        """Fetch + decrypt + apply the ACL blob attached to a
+        Node, if any. Returns True iff the apply actually ran
+        (False = no ACL, wrong-platform blob, or fetch error).
+
+        Same per-error policy as xattrs — failures surface as
+        callback events but never abort the file.
+        """
+        loc = getattr(node, "aclBlobLoc", None)
+        if loc is None:
+            return False
+        try:
+            blob = self._fetch_blob(loc, keyset)
+        except (DecryptError, OSError, NotImplementedError) as exc:
+            _emit(callback, "acl_fetch_error",
+                  path=str(out_path), error=str(exc))
+            return False
+        from arq_writer.acl import apply_acl
+        try:
+            return apply_acl(
+                out_path, blob,
+                callback=lambda kind, payload: _emit(
+                    callback, kind, **payload,
+                ),
+            )
+        except Exception as exc:
+            _emit(callback, "acl_apply_error",
+                  path=str(out_path), error=str(exc))
+            return False
+
     def _apply_xattrs_to(
         self,
         node,
@@ -600,9 +637,16 @@ class Restore:
         applied = self._apply_xattrs_to(
             node, out_path, keyset, result, callback,
         )
+        # Re-apply ACL (NFSv4 on macOS, POSIX on Linux). Same
+        # error policy as xattr — per-entry failures surface as
+        # callback events but never abort the file.
+        acl_applied = self._apply_acl_to(
+            node, out_path, keyset, result, callback,
+        )
         _emit(callback, "file_restored",
               path=str(out_path), size=len(body),
-              xattrs_applied=applied)
+              xattrs_applied=applied,
+              acl_applied=acl_applied)
 
     def _count_tree(
         self,
