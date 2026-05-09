@@ -768,7 +768,11 @@ class SftpBackend:
     # ------------------------------------------------------------------
 
     def list_dir(self, path: str) -> List[str]:
+        from .debug_logging import get_logger
+        _log = get_logger("sftp")
         path = self._resolve(path)
+        if _log.isEnabledFor(10):    # logging.DEBUG
+            _log.debug("list_dir: %s", path)
         cp = self._run_sftp_batch(f"ls -1 {shlex.quote(path)}\nbye\n")
         if cp.returncode != 0:
             raise RuntimeError(
@@ -822,6 +826,12 @@ class SftpBackend:
             )
         if length == 0:
             return b""
+        from .debug_logging import get_logger
+        _log = get_logger("sftp")
+        if _log.isEnabledFor(10):
+            _log.debug(
+                "read_range: %s @%d +%d", path, offset, length,
+            )
         path = self._resolve(path)
         # Chrooted SFTP-only servers (Hetzner Storage Box etc.) reject
         # arbitrary ``ssh ... head -c`` / ``ssh ... dd`` commands. Try

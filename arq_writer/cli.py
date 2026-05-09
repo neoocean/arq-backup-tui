@@ -149,6 +149,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Emit each progress event as a JSON line on stderr.",
     )
     create.add_argument(
+        "--debug", default=None, nargs="?", const="all",
+        metavar="SUBSYSTEMS",
+        help=(
+            "Verbose debug logging. Pass alone for all "
+            "subsystems, or comma-separated names "
+            "(sftp,blob,tree,cli,backend,crypto). Goes to "
+            "stderr."
+        ),
+    )
+    create.add_argument(
         "--use-packs",
         action="store_true",
         help=(
@@ -586,6 +596,13 @@ def _run_dry_run(args: argparse.Namespace) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    if getattr(args, "debug", None) is not None:
+        from arq_validator.debug_logging import (
+            enable_debug_logging, parse_debug_flag,
+        )
+        enable_debug_logging(
+            subsystems=parse_debug_flag(args.debug),
+        )
     if args.command != "create":
         print(f"error: unknown command {args.command!r}", file=sys.stderr)
         return 2
