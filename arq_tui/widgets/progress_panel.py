@@ -227,6 +227,18 @@ class ProgressPanel(Widget):
         - ``file_restored`` / ``tree_restored`` (reader)
         - ``audit_progress`` etc. (validator) — log-only by default
         """
+        if kind == "restore_planning":
+            # Drip from the pre-walk so the user sees "Planning:
+            # 1234 files, 567 MB so far…" instead of an idle bar
+            # for the duration of a slow tree fetch. We don't set
+            # total_bytes yet — that lands on restore_planned.
+            files = int(payload.get("files") or 0)
+            byts = int(payload.get("bytes") or 0)
+            self.append_log(
+                f"Planning: {files} files, "
+                f"{_human_bytes(byts)} so far…"
+            )
+            return
         if kind == "restore_planned":
             # Pre-walk emitted by Restore.restore(plan_totals=True).
             # Sets the budget the ETA uses; further ticks update the

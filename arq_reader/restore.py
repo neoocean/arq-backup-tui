@@ -47,6 +47,13 @@ from .decrypt import DecryptError, decrypt_encrypted_object, decrypt_lz4_arqo
 from .parse import parse_tree
 
 
+# Planning-phase progress drip cadence: one ``restore_planning``
+# event per N files counted. Set to 200 so a 10 000-file restore
+# emits ~50 ticks during planning — enough for the TUI to look
+# alive without spamming the message queue.
+_PLANNING_TICK_FILES = 200
+
+
 ProgressCb = Callable[[str, dict], None]
 
 
@@ -556,6 +563,8 @@ class Restore:
         path_filter: "Optional[_PathFilter]",
         *,
         rel_path: str = "",
+        callback: "Optional[ProgressCb]" = None,
+        progress: "Optional[Dict[str, int]]" = None,
     ) -> "tuple[int, int]":
         """Walk ``tree_blob_loc`` recursively and return
         ``(file_count, total_bytes)`` covering everything that the
@@ -569,6 +578,13 @@ class Restore:
         failures are silently absorbed into a zero-count for that
         subtree; restore proper will surface them as
         ``tree_failed`` events when it tries again.
+
+        When ``callback`` is supplied, emits ``restore_planning``
+        events every PLANNING_TICK_FILES files counted so the TUI
+        can show "Planning… 1234 files, 567 MB" instead of a
+        silent stall during the pre-walk (which on a big SFTP
+        backup can take tens of seconds before the first file is
+        actually restored).
         """
         if path_filter is not None and not path_filter.descend(rel_path):
             return (0, 0)
@@ -579,6 +595,12 @@ class Restore:
         tree = parse_tree(tree_bytes)
         files = 0
         total_bytes = 0
+        # Local progress accumulator threaded through the recursion
+        # so the planning callback can report cumulative counts
+        # (without it, every recursive call would only see its own
+        # subtree's contribution).
+        if progress is None:
+            progress = {"files": 0, "bytes": 0, "ticks": 0}
         for child in tree.children:
             child_rel = (
                 f"{rel_path}/{child.name}" if rel_path else child.name
@@ -587,6 +609,7 @@ class Restore:
                 f, b = self._count_tree(
                     child.node.treeBlobLoc, keyset, path_filter,
                     rel_path=child_rel,
+                    callback=callback, progress=progress,
                 )
                 files += f
                 total_bytes += b
@@ -598,6 +621,21 @@ class Restore:
                     continue
                 files += 1
                 total_bytes += int(child.node.itemSize or 0)
+                progress["files"] += 1
+                progress["bytes"] += int(child.node.itemSize or 0)
+                # Drip a planning event every N files so the TUI
+                # can update without re-rendering on every single
+                # FileNode (which would be wasteful on big trees).
+                if (
+                    callback is not None
+                    and progress["files"]
+                    - progress["ticks"] * _PLANNING_TICK_FILES
+                    >= _PLANNING_TICK_FILES
+                ):
+                    progress["ticks"] += 1
+                    _emit(callback, "restore_planning",
+                          files=progress["files"],
+                          bytes=progress["bytes"])
         return (files, total_bytes)
 
     # ------------------------------------------------------------------
@@ -751,6 +789,7 @@ class Restore:
             if plan_totals:
                 total_files, total_bytes = self._count_tree(
                     tree_blob_loc, keyset, path_filter,
+                    callback=callback,
                 )
                 _emit(callback, "restore_planned",
                       total_files=total_files,

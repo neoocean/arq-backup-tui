@@ -1,3 +1,7 @@
+# Claude Code local state (per-session task lock + project-local
+# settings overrides). Operator-machine-specific.
+.claude/
+
 __pycache__/
 *.pyc
 *.pyo

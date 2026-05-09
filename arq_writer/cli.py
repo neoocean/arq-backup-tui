@@ -173,6 +173,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     create.add_argument(
+        "--tree-version",
+        type=int, choices=(3, 4), default=3,
+        help=(
+            "Tree binary format version to emit. 3 (default) "
+            "matches the Arq 7 spec; 4 also writes the 38-byte "
+            "trailing-block per Node we observed in Arq.app v8 "
+            "destinations (see docs/REAL-DATA-DISCOVERIES.md §7). "
+            "The reader handles both transparently — pick 4 only "
+            "when you want the writer's output to match Arq.app "
+            "v8's binary shape exactly."
+        ),
+    )
+    create.add_argument(
         "--state-file", type=Path, default=None,
         help=(
             "Path to a JSON state file the CLI updates as work "
@@ -340,6 +353,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     max_file_bytes=args.max_file_bytes,
                     exclusions=exclusions,
                     use_apfs_snapshot=args.use_apfs_snapshot,
+                    tree_version=args.tree_version,
                 )
                 rw.set_result({
                     "computer_uuid": result.computer_uuid,
