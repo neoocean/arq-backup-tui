@@ -55,7 +55,10 @@ class SubprocessEligibilityTests(unittest.TestCase):
         )
         self.assertTrue(subprocess_eligible(plan, "local"))
 
-    def test_sftp_falls_back_to_in_process(self) -> None:
+    def test_sftp_now_eligible(self) -> None:
+        # Updated for PR-C3 — the CLI grew --sftp-host/user/path
+        # so SFTP destinations now flow through subprocess mode
+        # the same as local ones.
         from arq_tui.state import Plan
         from arq_tui.subprocess_workers import subprocess_eligible
         plan = Plan(
@@ -63,11 +66,12 @@ class SubprocessEligibilityTests(unittest.TestCase):
             destination_kind="sftp",
             destination={"host": "u-x.your-storagebox.de"},
         )
-        # The CLI's --dest is a local Path — SFTP can't be
-        # expressed without a CLI extension.
-        self.assertFalse(subprocess_eligible(plan, "sftp"))
+        self.assertTrue(subprocess_eligible(plan, "sftp"))
 
-    def test_multi_source_falls_back_to_in_process(self) -> None:
+    def test_multi_source_now_eligible(self) -> None:
+        # Updated for PR-C3 — the CLI accepts nargs='+' for the
+        # source positional, so multi-source plans flow through
+        # subprocess mode without losing functionality.
         from arq_tui.state import Plan
         from arq_tui.subprocess_workers import subprocess_eligible
         plan = Plan(
@@ -76,9 +80,20 @@ class SubprocessEligibilityTests(unittest.TestCase):
             destination_kind="local",
             destination={"path": "/mnt/backup"},
         )
-        # CLI takes one positional source; multi-source needs the
-        # in-process worker until we add a wrapper subcommand.
-        self.assertFalse(subprocess_eligible(plan, "local"))
+        self.assertTrue(subprocess_eligible(plan, "local"))
+
+    def test_unknown_dest_kind_still_falls_back(self) -> None:
+        # An unrecognized destination kind (e.g. a future "s3"
+        # the CLI hasn't learned yet) should still short-circuit
+        # so we don't pass garbage to the subprocess.
+        from arq_tui.state import Plan
+        from arq_tui.subprocess_workers import subprocess_eligible
+        plan = Plan(
+            plan_id="p", name="t",
+            sources=["/srv/a"],
+            destination_kind="local",
+        )
+        self.assertFalse(subprocess_eligible(plan, "s3"))
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "textual not installed")

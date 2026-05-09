@@ -64,6 +64,51 @@ class SerializeRoundTripTests(unittest.TestCase):
         # Round-trip the b"" sentinel.
         self.assertEqual(deserialize_xattrs(b""), {})
 
+    def test_serialize_emits_arq_xattrset_v002_magic(self) -> None:
+        # Format conformance: every non-empty serialize must start
+        # with "XAttrSetV002" so an Arq.app reader can recognise
+        # our output.
+        out = serialize_xattrs({"user.k": b"v"})
+        self.assertTrue(out.startswith(b"XAttrSetV002"))
+
+    def test_deserialize_real_operator_blob(self) -> None:
+        """The 68-byte xattr blob captured from the operator's
+        actual Arq.app destination via probe_xattr_blob.py.
+        Decoded via reverse-engineering of the XAttrSetV002 format
+        — pin its decode result so a future format-handler change
+        can't silently corrupt operator-readable bytes."""
+        from binascii import unhexlify
+        real = unhexlify(
+            "5841747472536574563030320000000000000001"
+            "010000000000000014"
+            "636f6d2e6170706c652e70726f76656e616e6365"
+            "000000000000000b"
+            "0102008129abf0b51596fe"
+        )
+        parsed = deserialize_xattrs(real)
+        self.assertEqual(set(parsed.keys()), {"com.apple.provenance"})
+        self.assertEqual(
+            parsed["com.apple.provenance"],
+            bytes.fromhex("0102008129abf0b51596fe"),
+        )
+
+    def test_deserialize_legacy_binary_plist_still_works(self) -> None:
+        """Backward-compat: destinations written with the original
+        binary-plist xattr format must keep restoring through the
+        new code."""
+        import plistlib
+        legacy = plistlib.dumps(
+            {"user.legacy": b"hello"},
+            fmt=plistlib.FMT_BINARY,
+        )
+        self.assertTrue(legacy.startswith(b"bplist00"))
+        parsed = deserialize_xattrs(legacy)
+        self.assertEqual(parsed, {"user.legacy": b"hello"})
+
+    def test_deserialize_unknown_format_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            deserialize_xattrs(b"\x00random\x00garbage")
+
 
 @unittest.skipUnless(
     has_xattr_support(), "this host has no xattr APIs",

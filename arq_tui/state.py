@@ -82,6 +82,12 @@ class Plan:
     use_apfs_snapshot: bool = False
     retention: dict = field(default_factory=dict)
     last_run_iso: str = ""
+    # Schedule for periodic execution. Empty dict = unscheduled.
+    # Recognised keys (per arq_tui.scheduling.ScheduleSpec):
+    #   {"cron_expr": "0 3 * * *"}    — cron-style daily
+    #   {"interval_sec": 3600}        — every N seconds
+    # Setting both keys is rejected by ScheduleSpec.__post_init__.
+    schedule: dict = field(default_factory=dict)
 
 
 class PlanRegistry:
@@ -163,6 +169,7 @@ class PlanRegistry:
                 ),
                 retention=dict(data.get("retention") or {}),
                 last_run_iso=str(data.get("last_run_iso") or ""),
+                schedule=dict(data.get("schedule") or {}),
             ))
         out.sort(key=lambda pl: pl.name.lower())
         return out
@@ -195,6 +202,7 @@ class PlanRegistry:
             "use_apfs_snapshot": plan.use_apfs_snapshot,
             "retention": dict(plan.retention),
             "last_run_iso": plan.last_run_iso,
+            "schedule": dict(plan.schedule),
         }
         with path.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
