@@ -56,14 +56,27 @@ The current defaults (`base=2 s, max=300 s, attempts=5`) are
 **already correct** for the failure pattern they handle (an
 isolated transient `Connection closed`). No change recommended.
 
-The structural improvement worth pursuing is **automatic
-ControlMaster reconnection** when an `_run_*` call returns a
-"Connection closed by remote host" stderr — re-open the master
-and retry once before falling back to the existing backoff
-loop. That's a separate refactor; this measurement just
-confirms the assumption that brought us to the current
-defaults was wrong (rate-limiting), but the defaults still
-help in the actual failure mode (idle drop).
+## Follow-up: automatic ControlMaster reconnect (landed)
+
+Building directly on the measurement, **automatic
+ControlMaster reconnect** was added in a follow-up PR — when
+`_run_with_backoff` sees a stderr matching one of the four
+idle-drop signatures (`_RECONNECT_PATTERNS`), it tears down the
+existing master via `_teardown_master()`, re-opens it via
+`__enter__`, and retries the failing command immediately
+without consuming an exponential-backoff sleep slot. Used at
+most once per call so a permanently-dead master can't trap us
+in an infinite reconnect loop.
+
+The TUI shows `ssh_master_reconnect` events on the backoff
+callback so operators see "Reconnecting SFTP master…" in the
+log instead of an unexplained pause. Pack-file read cache is
+preserved across the reconnect — those temp files are still
+valid local copies.
+
+See `arq_validator/sftp.py` (`_RECONNECT_PATTERNS`,
+`_teardown_master`, `_reopen_master`) and
+`tests/test_sftp_master_reconnect.py` (6 tests).
 
 ## Re-running the measurement
 

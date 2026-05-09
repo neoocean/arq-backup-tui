@@ -66,6 +66,25 @@ _RATE_LIMIT_PATTERNS = (
     "Connection closed by remote host",
 )
 
+# Subset of the rate-limit patterns that specifically signal the
+# master ControlMaster is dead — usually because Hetzner closed
+# the multiplexed channel after some idle interval, not because
+# of any rate limit. The throttle measurement in
+# ``docs/SFTP-THROTTLE-MEASUREMENT.md`` showed that even 150
+# back-to-back commands don't actually hit Hetzner's per-
+# connection cap; the "Connection closed" failures we see in long
+# walks (``probe_tree_v4_block.py`` etc.) are stale-channel idle
+# drops. Rebuilding the master + retrying the command once is the
+# right fix; falling through to exponential backoff would just
+# wait several seconds for an entirely-recoverable, transient
+# state.
+_RECONNECT_PATTERNS = (
+    "Connection closed by remote host",
+    "mux_client_request_session",
+    "no master connection",
+    "Control socket connect",
+)
+
 
 class _RateLimitTracker:
     """Counts consecutive Hetzner-style rate-limit failures.
@@ -372,17 +391,17 @@ class SftpBackend:
         """Idempotent shutdown — useful when not using ``with``."""
         self._cleanup()
 
-    def _cleanup(self) -> None:
-        # Drop the per-session pack-file cache so on-disk temps don't
-        # leak past the context manager. Best-effort: a half-downloaded
-        # file or a manually-removed cache entry shouldn't block
-        # cleanup.
-        for cached in list(self._read_cache.values()):
-            try:
-                cached.unlink()
-            except OSError:
-                pass
-        self._read_cache.clear()
+    def _teardown_master(self) -> None:
+        """Close the multiplexed master + drop the socket file
+        without disturbing the per-session read cache.
+
+        Used by both :meth:`_cleanup` (full shutdown) and
+        :meth:`_reopen_master` (mid-session reconnect on idle
+        drop). Splitting the master teardown from the cache
+        teardown lets the reconnect path keep the pack-file cache
+        intact — those temp files are expensive to re-fetch and
+        the reconnect doesn't invalidate them.
+        """
         if self._sock and self._sock.exists():
             try:
                 subprocess.run(
@@ -408,6 +427,57 @@ class SftpBackend:
             except Exception:
                 pass
             self._master = None
+        # Master sockets get re-created under a fresh sock_dir on
+        # the next __enter__; remove the socket file but keep the
+        # dir intact so the reconnect path doesn't have to re-mktemp.
+        if self._sock and self._sock.exists():
+            try:
+                self._sock.unlink()
+            except OSError:
+                pass
+
+    def _reopen_master(self) -> bool:
+        """Tear down the existing ControlMaster + re-establish a
+        fresh one, returning True iff the new master is live.
+
+        Designed for the ``Connection closed by remote host`` /
+        ``no master connection`` recovery path: we deliberately
+        DON'T drop ``self._read_cache`` (those temp files are
+        still valid local copies of remote pack bytes) and we
+        DON'T reset the rate-limit streak counter (one reconnect
+        doesn't mean the next command will succeed; the wrapper
+        still tracks pattern hits).
+
+        Returns False when the new master fails to come up, in
+        which case the caller falls through to the regular
+        backoff loop. We intentionally swallow exceptions so a
+        reconnect failure becomes "the next attempt will retry
+        with backoff" rather than crashing the whole walk.
+        """
+        self._teardown_master()
+        try:
+            # __enter__ short-circuits when self._master is set;
+            # we just nulled it, so it'll do the full re-open.
+            self.__enter__()
+        except Exception:
+            return False
+        return self._master is not None and self._master.poll() is None
+
+    def _cleanup(self) -> None:
+        # Drop the per-session pack-file cache so on-disk temps don't
+        # leak past the context manager. Best-effort: a half-downloaded
+        # file or a manually-removed cache entry shouldn't block
+        # cleanup.
+        for cached in list(self._read_cache.values()):
+            try:
+                cached.unlink()
+            except OSError:
+                pass
+        self._read_cache.clear()
+        # Master + socket teardown. _reopen_master shares this code
+        # path; _cleanup additionally removes the askpass file +
+        # socket dir below.
+        self._teardown_master()
         if self._askpass is not None:
             try:
                 self._askpass.unlink()
@@ -514,6 +584,7 @@ class SftpBackend:
         consistent with the legacy fail-fast semantics.
         """
         last_cp: Optional[subprocess.CompletedProcess] = None
+        reconnect_used = False
         for attempt in range(self._backoff.max_attempts):
             sleep_s = self._backoff.sleep_for(attempt)
             if sleep_s > 0:
@@ -538,6 +609,48 @@ class SftpBackend:
             if matched is None:
                 # Non-rate-limit failure — caller decides.
                 return cp
+            # Idle-drop fast path: if the matched pattern is one
+            # that signals a stale ControlMaster (rather than an
+            # actual rate-limit hit), tear down + re-open the
+            # master + retry the command without sleeping. This
+            # short-circuits the exponential backoff for the
+            # most common real-world failure mode (Hetzner closing
+            # idle multiplexed channels mid-walk). We only do this
+            # once per call so a genuinely unrecoverable master
+            # doesn't trap us in an infinite reconnect loop.
+            if (
+                not reconnect_used
+                and any(p in stderr_text for p in _RECONNECT_PATTERNS)
+            ):
+                reconnect_used = True
+                self._notify_reconnect(
+                    pattern=matched, kind=kind,
+                    command=command_summary,
+                )
+                if self._reopen_master():
+                    # Retry immediately — the next iteration's
+                    # sleep_for(attempt=N+1) would still be 0 since
+                    # attempt 0 has no sleep, but reaching here means
+                    # we already consumed attempt 0. Push the loop
+                    # back so we get a real retry without burning a
+                    # backoff slot.
+                    cp = invoke()
+                    last_cp = cp
+                    stderr = cp.stderr
+                    if isinstance(stderr, (bytes, bytearray)):
+                        stderr_text = stderr.decode("utf-8", "replace")
+                    else:
+                        stderr_text = stderr or ""
+                    matched = self._rate_limit.record(
+                        cp.returncode, stderr_text,
+                    )
+                    if cp.returncode == 0:
+                        return cp
+                    if matched is None:
+                        return cp
+                    # Reconnect succeeded but the command still
+                    # failed — fall through to the regular backoff
+                    # loop for the next attempt.
             # Else: matched a rate-limit pattern. Loop tries the
             # next attempt with backoff. Don't raise on threshold
             # mid-loop so the retry actually gets attempted; the
@@ -553,6 +666,27 @@ class SftpBackend:
                 f"{self._rate_limit.last_pattern!r}"
             )
         return last_cp  # type: ignore[return-value]
+
+    def _notify_reconnect(
+        self, *, pattern: str, kind: str, command: str,
+    ) -> None:
+        """Surface ``ssh_master_reconnect`` on the backoff
+        callback when we tear down + re-open the master in
+        response to an idle drop. The TUI can show "Reconnecting
+        SFTP master…" so the operator sees what happened
+        instead of silently absorbing the gap."""
+        if self._backoff_callback is None:
+            return
+        try:
+            self._backoff_callback(
+                "ssh_master_reconnect",
+                {"pattern": pattern, "kind": kind,
+                 "command": command,
+                 "consecutive_failures":
+                     self._rate_limit.consecutive_failures},
+            )
+        except Exception:
+            pass
 
     def _notify_backoff(
         self, *, sleep_sec: float, attempt: int, kind: str,
