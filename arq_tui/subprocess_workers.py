@@ -169,6 +169,37 @@ class SubprocessBackupWorker:
             except OSError:
                 pass
 
+    def pause(self) -> None:
+        """Forward pause request to the writer subprocess via
+        SIGUSR1. The writer CLI's signal handler (see
+        arq_writer/cli.py:_install_pause_signal_handlers)
+        translates it to ``Backup.pause()``.
+
+        Best-effort: SIGUSR1 is POSIX-only; on Windows the
+        send silently fails. Operators on Windows fall back
+        to ``ARQ_TUI_IN_PROCESS=1`` for pause/resume.
+        """
+        if not hasattr(signal, "SIGUSR1"):
+            return
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.send_signal(signal.SIGUSR1)
+            except OSError:
+                pass
+
+    def resume(self) -> None:
+        """Forward resume request via SIGUSR2; mirror of
+        :meth:`pause`."""
+        if not hasattr(signal, "SIGUSR2"):
+            return
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.send_signal(signal.SIGUSR2)
+            except OSError:
+                pass
+
     def join(self, timeout: Optional[float] = None) -> None:
         if self._poll_thread is not None:
             self._poll_thread.join(timeout)

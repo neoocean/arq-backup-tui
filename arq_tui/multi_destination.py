@@ -78,6 +78,7 @@ def run_plan_multi(
     backend_factory: Optional[
         Callable[[dict], Any]
     ] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> MultiBackupResult:
     """Run ``plan`` once per destination (in iteration order).
 
@@ -99,6 +100,13 @@ def run_plan_multi(
     )
     sources = [Path(s) for s in plan.sources]
     for i, dest in enumerate(plan.iter_destinations()):
+        # Honour cancel between destinations as well as
+        # mid-destination (Backup.cancel propagates through
+        # _check_cancel below). When the caller asks us to stop
+        # before starting the next destination, we mark its
+        # outcome cancelled + break early.
+        if cancel_check is not None and cancel_check():
+            break
         kind = dest.get("kind", "local")
         label = (
             f"sftp://{dest.get('user', '')}@{dest.get('host', '')}"
@@ -137,12 +145,39 @@ def run_plan_multi(
                     backend=backend if kind == "sftp" else None,
                 )
                 bk.init_plan()
-                for src in sources:
-                    bk.add_folder(src)
-                outcome.files_written = bk.files_written
-                outcome.files_reused = bk.files_reused
-                outcome.bytes_plaintext = bk.bytes_plaintext
-                outcome.ok = True
+                # Spawn a tiny watchdog thread to forward
+                # mid-destination cancel to the in-flight Backup.
+                # Without this, cancel only fires between
+                # destinations + the operator has to wait for
+                # the current destination to finish writing
+                # before the cancel takes effect.
+                cancel_watchdog = None
+                if cancel_check is not None:
+                    import threading
+                    stop = threading.Event()
+
+                    def _poll():
+                        while not stop.is_set():
+                            if cancel_check():
+                                bk.cancel()
+                                return
+                            stop.wait(0.5)
+
+                    cancel_watchdog = threading.Thread(
+                        target=_poll, daemon=True,
+                    )
+                    cancel_watchdog.start()
+                try:
+                    for src in sources:
+                        bk.add_folder(src)
+                    outcome.files_written = bk.files_written
+                    outcome.files_reused = bk.files_reused
+                    outcome.bytes_plaintext = bk.bytes_plaintext
+                    outcome.ok = True
+                finally:
+                    if cancel_watchdog is not None:
+                        stop.set()
+                        cancel_watchdog.join(timeout=1.0)
             finally:
                 if backend is not None and hasattr(
                     backend, "__exit__",

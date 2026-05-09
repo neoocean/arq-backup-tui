@@ -305,6 +305,11 @@ class MultiDestBackupWorker(_BaseWorker):
             chunker_config=self.chunker_config,
             exclusions=self.exclusions,
             openssl_path=self.openssl_path,
+            # The watchdog inside run_plan_multi polls this to
+            # forward mid-destination cancel to the in-flight
+            # Backup. Without it, cancel only takes effect
+            # between destinations.
+            cancel_check=lambda: self._cancelled,
         )
 
 

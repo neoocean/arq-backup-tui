@@ -281,24 +281,39 @@ class BackupRunScreen(Screen):
     def action_pause_resume(self) -> None:
         """[p] toggles pause / resume on the underlying Backup.
 
-        Only the in-process worker exposes pause/resume directly;
-        the subprocess worker would need a SIGUSR1 forwarder
-        (deferred — Backup.pause() lives on the Backup object,
-        not the subprocess writer). When called against the
-        subprocess worker we surface a hint instead of silently
-        no-op'ing.
+        Two code paths:
+        - **In-process worker**: direct ``Backup.pause()`` /
+          ``resume()`` on the worker's ``_backup`` attribute.
+        - **Subprocess worker**: forward via SIGUSR1 / SIGUSR2;
+          the writer CLI's signal handlers translate to the
+          same ``Backup.pause()`` / ``resume()`` calls in the
+          child process.
+
+        Tracks paused state locally (``self._is_paused``) since
+        the subprocess writer doesn't expose its is_paused state
+        through the state file yet.
         """
         worker = self.worker
         if worker is None:
             return
-        # Only in-process BackupWorker has direct pause/resume
-        # access (subprocess mode would need to send a signal +
-        # the writer doesn't yet handle SIGUSR1).
+        # Subprocess worker: signal-based forwarding.
+        if hasattr(worker, "pause") and hasattr(worker, "resume"):
+            paused = getattr(self, "_is_paused", False)
+            if paused:
+                worker.resume()
+                self._is_paused = False
+                self.notify("Resumed.", severity="information")
+            else:
+                worker.pause()
+                self._is_paused = True
+                self.notify("Paused.", severity="information")
+            return
+        # In-process BackupWorker: direct method calls.
         bk = getattr(worker, "_backup", None)
         if bk is None:
             self.notify(
-                "Pause/resume only works in in-process mode "
-                "(set ARQ_TUI_IN_PROCESS=1).",
+                "Pause/resume not available for this worker "
+                "type yet.",
                 severity="warning",
             )
             return
