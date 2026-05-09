@@ -1,34 +1,36 @@
-# 실제 SFTP destination 기반 호환성 테스트
+# Compatibility testing against a real SFTP destination
 
-> **Status (2026-05-08)**: ✅ PR #9 에서 형식/형상 호환성 검증
-> harness (`test_arqapp_sftp_compat.py`) 가 도입됨. 후속으로
-> `test_arq_real_destination.py` 와 `.secrets/` 자격증명 디렉터리가
-> 추가되어 **reader / validator / writer 세 기둥의 런타임 동작**을
-> 실 destination 에서 검증할 수 있게 되었습니다. 모든 통합 테스트는
-> 기본 환경에서는 skip 되고, 자격증명을 제공한 운영자에게만
-> 실행됩니다.
+> **Status (2026-05-08)**: ✅ PR #9 introduced the format / shape
+> compatibility-verification harness (`test_arqapp_sftp_compat.py`).
+> Follow-up work added `test_arq_real_destination.py` and the
+> `.secrets/` credentials directory, enabling **runtime verification
+> of the three pillars — reader / validator / writer — against a real
+> destination**. All integration tests skip in the default environment
+> and only run for operators who supply credentials.
 
-본 문서는 운영자가 **실제 운영 중인 Arq 7 SFTP destination**을
-sandbox에서 사용하여 reader / validator / writer / fingerprint
-호환성을 자동 검증하는 절차를 정의합니다. `docs/COMPAT-VERIFICATION.md`
-에서 ⭐로 표시한 Strategy A + B를 자동화된 회귀 테스트로 전환
-합니다.
+This document defines the procedure for an operator to use a **live,
+production Arq 7 SFTP destination** from a sandbox to automatically
+verify reader / validator / writer / fingerprint compatibility. It
+turns the strategies marked with ⭐ in `docs/COMPAT-VERIFICATION.md`
+(Strategy A + B) into automated regression tests.
 
-## 0. 자격증명 소스 — `.secrets/` 또는 `.env`
+## 0. Credential sources — `.secrets/` or `.env`
 
-자격증명은 다음 세 소스 순서로 해결됩니다 (먼저 발견된 값이 우선):
+Credentials are resolved from these three sources in order (the first
+value found wins):
 
-1. **`.secrets/`** (권장) — 워크스테이션에서 장기간 유지하는 경우
-   추천. 한 곳에 모여 있어 감사 / 회전이 쉽습니다. 레이아웃:
+1. **`.secrets/`** (recommended) — best for credentials kept on a
+   workstation long-term. Centralizing them in one place makes
+   auditing and rotation easier. Layout:
    ```
    .secrets/
-   ├── README.md                  ← 커밋됨 (안내)
-   ├── sftp.json.example          ← 커밋됨 (템플릿)
-   ├── dest_password.example      ← 커밋됨 (템플릿)
-   ├── sftp.json                  ← 로컬 전용, 실제 SFTP 정보
-   └── dest_password              ← 로컬 전용, Arq 암호화 비밀번호
+   ├── README.md                  ← committed (instructions)
+   ├── sftp.json.example          ← committed (template)
+   ├── dest_password.example      ← committed (template)
+   ├── sftp.json                  ← local only, real SFTP info
+   └── dest_password              ← local only, Arq encryption password
    ```
-   설정 절차:
+   Setup:
    ```sh
    cp .secrets/sftp.json.example      .secrets/sftp.json
    cp .secrets/dest_password.example  .secrets/dest_password
@@ -36,227 +38,238 @@ sandbox에서 사용하여 reader / validator / writer / fingerprint
    $EDITOR .secrets/dest_password
    chmod 600 .secrets/sftp.json .secrets/dest_password
    ```
-2. **`.env`** (legacy) — `KEY=VALUE` 한 줄씩, 한 파일. PR #9
-   호환을 위해 유지.
-3. **`os.environ`** (CI / 일회성) — 직접 환경변수 export.
+2. **`.env`** (legacy) — `KEY=VALUE` per line, single file. Kept for
+   PR #9 compatibility.
+3. **`os.environ`** (CI / one-off) — export environment variables
+   directly.
 
-`.gitignore` / `.p4ignore` 가 실 자격증명 파일 (`.secrets/sftp.json`,
-`.secrets/dest_password`, `.env`, `.env.local`) 을 git / Perforce 양쪽에서
-모두 제외합니다. 템플릿 (`README.md`, `*.example`) 만 커밋됩니다.
+`.gitignore` / `.p4ignore` exclude the actual credential files
+(`.secrets/sftp.json`, `.secrets/dest_password`, `.env`, `.env.local`)
+from both git and Perforce. Only the templates (`README.md`,
+`*.example`) are committed.
 
-## 1. 보안 정책
+## 1. Security policy
 
-### 1.1 자격증명 처리 원칙
+### 1.1 Credential-handling principles
 
-- **Git에 절대 커밋 안 함**: `.env` / `.env.local` / `tests/
-  integration/.env`이 모두 `.gitignore`에 등록됨
-- **로컬 파일만**: `.env` 파일은 운영자 머신에 머무름. CI / GitHub /
-  remote에 노출되지 않음
-- **읽기 전용**: 모든 integration 테스트는 destination에 **쓰기
-  연산을 수행하지 않음** (SftpBackend의 read_all / read_range /
-  list_dir만 호출)
-- **로그 격리**: SSH 비밀번호 / Arq 비밀번호는 stdout / stderr /
-  실패 메시지에 절대 노출되지 않도록 코드 작성
+- **Never committed to Git**: `.env`, `.env.local`, and
+  `tests/integration/.env` are all listed in `.gitignore`
+- **Local files only**: `.env` lives on the operator's machine. It is
+  not exposed to CI / GitHub / any remote
+- **Read-only**: every integration test **performs no write
+  operations against the destination** (it only calls SftpBackend's
+  read_all / read_range / list_dir)
+- **Log isolation**: the code is written so that SSH passwords and
+  Arq passwords are never leaked to stdout, stderr, or failure
+  messages
 
-### 1.2 PII 노출 방지
+### 1.2 PII exposure prevention
 
-테스트는 **파일 컨텐츠의 정확한 값**을 절대 assert하지 않습니다.
-- 구조 검증만: 파일 존재 여부, 사이즈 범위, ARQO magic, HMAC
-  match, blob_id 자기일관성
-- 운영자의 실제 파일 내용은 메모리에서만 처리되고 디스크 / 로그
-  로 떨어지지 않음
-- 샘플 복원도 임시 디렉터리 (`tempfile.TemporaryDirectory`)에
-  쓰고 즉시 cleanup
+The tests **never assert the exact contents** of any file.
+- Structural checks only: file existence, size ranges, ARQO magic,
+  HMAC match, blob_id self-consistency
+- The operator's actual file contents stay in memory and are never
+  written to disk or to the logs
+- Sample restores write to a temporary directory
+  (`tempfile.TemporaryDirectory`) and clean up immediately
 
-### 1.3 권장 자격증명 운영
+### 1.3 Recommended credential practices
 
-- 가능하면 **read-only 전용 SFTP 계정** 사용
-- `chrooted` 또는 `ChrootDirectory` 설정으로 destination
-  디렉터리만 노출
-- 비밀번호 대신 **SSH key**로 인증 (회수 / 회전이 용이)
-- Arq 비밀번호는 destination별로 다른 값을 사용 (재사용 금지)
+- Use a **read-only-only SFTP account** when possible
+- Restrict access to just the destination directory via `chrooted` or
+  `ChrootDirectory`
+- Authenticate with an **SSH key** instead of a password (easier to
+  revoke / rotate)
+- Use a different Arq password per destination (do not reuse them)
 
-## 2. 환경 변수 contract
+## 2. Environment-variable contract
 
-| 변수 | 필수 | 설명 |
+| Variable | Required | Description |
 |------|:----:|------|
-| `ARQ_TEST_SFTP_HOST` | ✓ | SFTP 호스트명 또는 IP |
-| `ARQ_TEST_SFTP_USER` | ✓ | SSH 사용자명 |
-| `ARQ_TEST_SFTP_PORT` | | 기본 22 |
-| `ARQ_TEST_SFTP_ROOT` | ✓ | 서버측 destination root 경로 (예: `/home/u123/arq`). `<COMPUTER-UUID>/` 디렉터리들이 그 아래에 있어야 함 |
-| `ARQ_TEST_SFTP_AUTH_PASSWORD` | △ | SSH 비밀번호 |
-| `ARQ_TEST_SFTP_IDENTITY` | △ | SSH 개인키 파일 경로 |
-| `ARQ_TEST_DEST_PASSWORD` | ✓ | Arq destination의 암호화 비밀번호 (SSH 비밀번호와 별개) |
+| `ARQ_TEST_SFTP_HOST` | ✓ | SFTP hostname or IP |
+| `ARQ_TEST_SFTP_USER` | ✓ | SSH username |
+| `ARQ_TEST_SFTP_PORT` | | Defaults to 22 |
+| `ARQ_TEST_SFTP_ROOT` | ✓ | Server-side destination root path (e.g. `/home/u123/arq`). The `<COMPUTER-UUID>/` directories must live underneath it |
+| `ARQ_TEST_SFTP_AUTH_PASSWORD` | △ | SSH password |
+| `ARQ_TEST_SFTP_IDENTITY` | △ | Path to the SSH private-key file |
+| `ARQ_TEST_DEST_PASSWORD` | ✓ | The Arq destination's encryption password (separate from the SSH password) |
 
-`ARQ_TEST_SFTP_AUTH_PASSWORD`와 `ARQ_TEST_SFTP_IDENTITY` 중 **최소
-하나**는 설정. 둘 다 비어 있으면 테스트가 자동 스킵.
+At least **one** of `ARQ_TEST_SFTP_AUTH_PASSWORD` or
+`ARQ_TEST_SFTP_IDENTITY` must be set. If both are empty the tests
+auto-skip.
 
-## 3. 설정 절차
+## 3. Setup procedure
 
-### 3.1 .env 파일 작성
+### 3.1 Writing the .env file
 
 ```bash
 cd /path/to/arq-backup-tui
 cp .env.example .env
-chmod 600 .env       # 다른 사용자가 읽지 못하게
-# 에디터로 .env를 열어 실제 값 채우기
+chmod 600 .env       # so other users cannot read it
+# Open .env in an editor and fill in the real values
 ```
 
-### 3.2 sanity check
+### 3.2 Sanity check
 
 ```bash
-# 자격증명이 인식되는지 확인 (CI에서는 자동 skip)
+# Confirm the credentials are picked up (skipped automatically in CI)
 python -m unittest discover -s tests/integration -v
 ```
 
-자격증명이 없으면 모든 테스트가 다음 메시지로 skip됨:
+If credentials are missing, every test skips with this message:
 
 ```
 real-SFTP integration tests skipped — no credentials in env
 (see docs/COMPAT-SFTP-TESTING.md)
 ```
 
-자격증명이 있으면 SSH master 한 번 setup → 7개 테스트 실행.
+If credentials are present, the SSH master is set up once and 7 tests run.
 
-### 3.3 운영자 paste 워크플로 (chat 인터페이스)
+### 3.3 Operator-paste workflow (chat interface)
 
-자격증명이 sandbox에 없으므로, 운영자가 **로컬에서 .env를 작성한
-뒤 통합 테스트 결과를 paste**하는 방식이 됩니다:
+Because the sandbox does not have credentials, the workflow is for the
+operator to **write `.env` locally and then paste the integration-test
+output**:
 
 ```bash
-# 운영자 머신에서:
+# On the operator's machine:
 git pull origin main
 cp .env.example .env && chmod 600 .env
-# .env 편집 (자격증명 입력)
+# Edit .env (enter credentials)
 python -m unittest discover -s tests/integration -v 2>&1 | tail -50
 ```
 
-이 출력 (전체 또는 마지막 50줄)을 chat에 paste하시면, sandbox에서
-실패 원인을 분석하고 fix를 land할 수 있습니다.
+Pasting that output (in full or the last 50 lines) into chat lets the
+sandbox analyze the failure cause and land a fix.
 
-**중요**: paste 시 출력에 SSH 비밀번호 / Arq 비밀번호가 포함되지
-않도록 **테스트 자체가 자격증명을 절대 출력하지 않게** 작성되어
-있습니다 (`tests/integration/_creds.py`). 그래도 paste 전에 한 번
-검토 권장.
+**Important**: to make sure the SSH password and Arq password are not
+included when you paste, **the tests themselves are written to never
+print credentials** (`tests/integration/_creds.py`). A quick review
+before pasting is still recommended.
 
-## 4. 테스트 카탈로그
+## 4. Test catalog
 
-### 4.1 형식·형상 호환성 — `test_arqapp_sftp_compat.py` (PR #9, 7 tests)
+### 4.1 Format and shape compatibility — `test_arqapp_sftp_compat.py` (PR #9, 7 tests)
 
-| 테스트 | 무엇을 검증 |
+| Test | What it verifies |
 |--------|------------|
-| `test_layout_discovers_computer` | `discover_layout`이 적어도 한 컴퓨터 + 폴더 발견 |
-| `test_keyset_decrypts` | `encryptedkeyset.dat` PBKDF2-SHA256 + AES-CBC + HMAC 복호 + 32B field 모양 |
-| `test_compatibility_audit_passes` | `check_arq7_compatibility`의 25 invariant 모두 통과 |
-| `test_validator_l0_l1a_l1b_tiers_pass` | QUICK + DEEP tier 통과 (L2 audit는 너무 길어 별도 실행 필요) |
-| `test_fingerprint_is_well_formed_json` | `compute_shape_fingerprint` 출력이 JSON-serialize 가능, schema_version=1 |
-| `test_records_list_at_least_one` | 최소 한 개 backuprecord 존재 |
-| `test_sample_standalone_object_arqo_valid` | 1 MiB 이하 standalone object 16개 sampling → ARQO + HMAC + blob_id = SHA-256(salt+plaintext) 검증 |
+| `test_layout_discovers_computer` | `discover_layout` finds at least one computer plus folder |
+| `test_keyset_decrypts` | `encryptedkeyset.dat` PBKDF2-SHA256 + AES-CBC + HMAC decrypt + 32B field shape |
+| `test_compatibility_audit_passes` | All 25 invariants of `check_arq7_compatibility` pass |
+| `test_validator_l0_l1a_l1b_tiers_pass` | QUICK + DEEP tiers pass (the L2 audit is too long-running, so it must be invoked separately) |
+| `test_fingerprint_is_well_formed_json` | `compute_shape_fingerprint` output is JSON-serializable, schema_version=1 |
+| `test_records_list_at_least_one` | At least one backuprecord exists |
+| `test_sample_standalone_object_arqo_valid` | Sample 16 standalone objects up to 1 MiB → verify ARQO + HMAC + blob_id = SHA-256(salt+plaintext) |
 
-### 4.2 런타임 동작 — `test_arq_real_destination.py` (3 tests)
+### 4.2 Runtime behavior — `test_arq_real_destination.py` (3 tests)
 
-세 기둥 (reader / validator / writer) 의 실제 동작을 sandbox 가
-아닌 운영자의 실 destination 에서 검증합니다. 단, **writer 는 절대
-운영자 destination 의 root 에 쓰지 않고** `creds.write_subdir`
-(기본 `.arq-backup-tui-write-test`) 의 dot-prefixed 서브디렉터리에서
-만 동작합니다.
+Verifies the runtime behavior of the three pillars (reader / validator
+/ writer) against the operator's real destination rather than a
+sandbox. Note that **the writer never writes to the root of the
+operator's destination** — it only operates inside the dot-prefixed
+subdirectory `creds.write_subdir` (defaulting to
+`.arq-backup-tui-write-test`).
 
-| 테스트 | 클래스 | 무엇을 검증 |
+| Test | Class | What it verifies |
 |--------|--------|------------|
-| `test_restore_latest_record_of_first_folder` | `RealDestinationReaderTests` | 첫 폴더의 최신 record 를 tempdir 에 복원 → 트리에 비-empty 파일 존재 (decrypt 가 정상이면 반드시 통과) |
-| `test_audit_drip_capped_at_a_few_megabytes` | `RealDestinationValidatorTests` | L2 audit-drip 4 MiB / 20 초 cap 으로 실행 → 실패 0, cursor 진행 |
-| `test_round_trip_via_real_sftp` | `RealDestinationWriterTests` | sandbox 디렉터리에 합성 backup 작성 → reader 로 복원 → byte-identical 비교 (alpha.txt + 한글.txt + subdir/gamma.bin) → DEEP tier validator |
+| `test_restore_latest_record_of_first_folder` | `RealDestinationReaderTests` | Restore the latest record of the first folder into a tempdir → at least one non-empty file in the tree (must pass if decryption is working) |
+| `test_audit_drip_capped_at_a_few_megabytes` | `RealDestinationValidatorTests` | Run an L2 audit-drip with a 4 MiB / 20 s cap → 0 failures, cursor advances |
+| `test_round_trip_via_real_sftp` | `RealDestinationWriterTests` | Write a synthetic backup into the sandbox directory → restore via the reader → byte-identical comparison (alpha.txt + 한글.txt + subdir/gamma.bin) → DEEP-tier validator |
 
-writer 테스트는 setUp / tearDown 에서 sandbox 를 `rm -rf` 로
-재초기화 / 정리합니다. 운영자의 실 데이터는 절대 변경되지
-않습니다.
+The writer test re-initializes / cleans up the sandbox via `rm -rf` in
+setUp / tearDown. The operator's real data is never modified.
 
-각 테스트는 **자체적으로 SFTP 마스터 1개**를 setup하고 cleanup하므로
-순서 독립.
+Each test sets up and cleans up **its own SFTP master**, so test order
+is independent.
 
-## 5. 자동화 후크 (CI에서 안 돌아감 — local only)
+## 5. Automation hook (does not run in CI — local only)
 
-기본 `python -m unittest discover`는 `tests/integration/`을
-포함하지만, 자격증명이 없으면 모두 auto-skip되므로 CI는 영향
-없습니다. 운영자 머신에서만 자격증명이 채워져 실제 검증.
+The default `python -m unittest discover` does pick up
+`tests/integration/`, but if credentials are missing every test
+auto-skips, so CI is unaffected. Real verification only happens on the
+operator's machine where credentials are populated.
 
-CI에 SFTP 자격증명을 secret으로 등록할 의향이 있다면 별도 워크플로
-파일 (`.github/workflows/sftp-integration.yml`) 추가 가능 — secret
-값들이 외부 PR에 leak되지 않도록 `pull_request_target` 보안 정책
-필수.
+If you do want to register SFTP credentials as CI secrets, you can
+add a separate workflow file (`.github/workflows/sftp-integration.yml`)
+— `pull_request_target` security policy is required to prevent secret
+values from leaking to external PRs.
 
-## 6. 발견 사례 + fix 흐름
+## 6. Findings + fix flow
 
-운영자가 paste한 결과에서 어느 invariant가 실패했는지에 따라
-다음 fix 패턴 적용:
+Depending on which invariant failed in the operator's pasted output,
+apply the matching fix pattern:
 
-| 실패 invariant | 원인 / 해결 |
+| Failed invariant | Cause / resolution |
 |---------------|------------|
-| `L1` (top-level UUID 없음) | 잘못된 root 경로; `.env` 의 `ARQ_TEST_SFTP_ROOT` 수정 |
-| `C1` (keyset magic 불일치) | 파일 손상; SFTP server filesystem 검증 |
-| `C3` (keyset 복호 실패) | Arq 비밀번호가 틀림 (`ARQ_TEST_DEST_PASSWORD`) |
-| `L3` (config 키 누락) | Arq.app 신버전이 새 키 추가 → 우리 reader가 모름; 우리 `_BACKUPCONFIG_REQUIRED`에 추가 |
-| `L4` (plan 키 누락 / 타입 mismatch) | 동일; `_BACKUPPLAN_REQUIRED` 또는 `_BACKUPFOLDER_REQUIRED` 업데이트 |
-| `B2` (backuprecord 키 누락) | 우리 `_BACKUPRECORD_REQUIRED_KEYS` 업데이트 |
-| `A1` (ARQO magic 불일치) | 파일 손상 또는 우리가 모르는 새 envelope 포맷; spec 재확인 |
-| `ID2` (blob_id mismatch) | 파일 손상 또는 우리 `compute_blob_id` 알고리즘 변경 필요 |
-| `validator l1a / l1b 실패` | 동일 원인; tier 결과 출력에서 정확한 파일 경로 확인 가능 |
+| `L1` (no top-level UUID) | Wrong root path; correct `ARQ_TEST_SFTP_ROOT` in `.env` |
+| `C1` (keyset magic mismatch) | File corruption; check the SFTP server filesystem |
+| `C3` (keyset decrypt failure) | Wrong Arq password (`ARQ_TEST_DEST_PASSWORD`) |
+| `L3` (config key missing) | A new Arq.app version added a new key our reader does not know about; add it to our `_BACKUPCONFIG_REQUIRED` |
+| `L4` (plan key missing / type mismatch) | Same; update `_BACKUPPLAN_REQUIRED` or `_BACKUPFOLDER_REQUIRED` |
+| `B2` (backuprecord key missing) | Update our `_BACKUPRECORD_REQUIRED_KEYS` |
+| `A1` (ARQO magic mismatch) | File corruption, or an envelope format we do not know about; revisit the spec |
+| `ID2` (blob_id mismatch) | File corruption, or our `compute_blob_id` algorithm needs to change |
+| `validator l1a / l1b failure` | Same root causes; the tier output reveals the exact file path |
 
-## 7. SFTP 자격증명 chat-paste 가이드
+## 7. SFTP-credentials chat-paste guide
 
-운영자가 **sandbox에 직접** SFTP 접근을 주려면 (chat 인터페이스
-한정으로):
+If the operator wants to grant **direct sandbox access** to SFTP
+(chat-interface only):
 
-옵션 A — `.env` 내용을 chat으로 paste:
+Option A — paste `.env` contents into chat:
 
 ```
 ARQ_TEST_SFTP_HOST=...
 ARQ_TEST_SFTP_USER=...
 ARQ_TEST_SFTP_PORT=22
 ARQ_TEST_SFTP_ROOT=/...
-ARQ_TEST_SFTP_AUTH_PASSWORD=... 또는 ARQ_TEST_SFTP_IDENTITY=~/...
+ARQ_TEST_SFTP_AUTH_PASSWORD=... or ARQ_TEST_SFTP_IDENTITY=~/...
 ARQ_TEST_DEST_PASSWORD=...
 ```
 
-→ sandbox 측에서 위 값을 환경변수로 export하고 `python -m unittest
-discover -s tests/integration -v` 실행 → 결과 paste back.
+→ The sandbox exports those values as environment variables and runs
+`python -m unittest discover -s tests/integration -v` → pastes the
+results back.
 
-**chat 메시지에 비밀번호가 포함되므로 보안에 매우 주의**:
-- 테스트 직후 비밀번호 회전 권장
-- 가급적 read-only 전용 SSH 계정 사용
-- 일회용 자격증명으로 한정
+**Use extreme caution because the chat message contains passwords**:
+- Rotate the password immediately after the test
+- Use a read-only-only SSH account when possible
+- Limit to disposable credentials
 
-옵션 B — SSH key paste:
+Option B — paste an SSH key:
 
-운영자가 **개인키 내용**을 chat에 paste:
+The operator pastes the **private-key contents** into chat:
 
 ```
 -----BEGIN OPENSSH PRIVATE KEY-----
-...키 내용...
+...key contents...
 -----END OPENSSH PRIVATE KEY-----
 ```
 
-→ sandbox에서 `/tmp/test-key`로 저장 (mode 0600) →
-`ARQ_TEST_SFTP_IDENTITY=/tmp/test-key`로 export → 테스트 실행 →
-끝나면 키 파일 즉시 삭제.
+→ The sandbox saves it as `/tmp/test-key` (mode 0600) → exports
+`ARQ_TEST_SFTP_IDENTITY=/tmp/test-key` → runs the tests → deletes the
+key file immediately when done.
 
-옵션 B가 비밀번호보다 안전 (회수 / 회전이 용이; CSV / DB log에
-실수로 들어가도 키 파일이 없으면 사용 불가).
+Option B is safer than a password (easier to revoke / rotate; even if
+it accidentally lands in a CSV / DB log, it cannot be used without
+the key file).
 
-옵션 C — 운영자 머신에서 실행 + 결과만 paste:
+Option C — operator runs locally, pastes results only:
 
-가장 안전. 운영자가 로컬에서 자신의 `.env`로 테스트 실행 →
-결과 텍스트만 chat에 paste → sandbox는 자격증명 없이도 분석 +
-fix 가능.
+The safest choice. The operator runs the tests locally with their own
+`.env` → only pastes the result text into chat → the sandbox can
+analyze + fix without ever holding credentials.
 
-권장: 가능하면 옵션 C 사용. 부득이 옵션 A / B 사용 시 일회용
-자격증명 + 사용 후 즉시 회전.
+Recommendation: use Option C whenever possible. If Option A / B is
+unavoidable, use disposable credentials and rotate immediately after.
 
-## 8. 향후 작업
+## 8. Future work
 
-- 운영자가 fixture를 paste하면 `tests/fixtures/arqapp_real_sftp/`
-  로 보존 → CI에서 매 PR마다 자동 회귀
-- `tests/integration/test_arqapp_local_compat.py` 동일 구조의 로컬
-  destination 버전 (SFTP 의존 없이도 회귀 가능)
-- AUDIT (L2) tier도 별도 실행 가능하도록 환경변수
-  `ARQ_TEST_RUN_FULL_AUDIT=1` 추가
+- When the operator pastes a fixture, preserve it under
+  `tests/fixtures/arqapp_real_sftp/` → CI then regresses it on every
+  PR
+- A local-destination version of `tests/integration/test_arqapp_local_compat.py`
+  with the same structure (so regression is possible without an SFTP
+  dependency)
+- Allow the AUDIT (L2) tier to be run separately via the
+  `ARQ_TEST_RUN_FULL_AUDIT=1` environment variable
