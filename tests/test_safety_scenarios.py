@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -247,6 +248,12 @@ class BackupSafetyScenarioTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 bk.init_plan()
 
+    @unittest.skipIf(
+        sys.version_info < (3, 10),
+        "Python 3.9 pathlib bypasses our os.stat patch via "
+        "_NormalAccessor; behaviour pinning still happens on "
+        "3.10+ (which is what real operators run).",
+    )
     def test_source_deleted_during_walk_currently_raises(self) -> None:
         """Pin the OBSERVED behaviour: when a file is removed
         between the walker's iterdir() and its stat(), build_backup
