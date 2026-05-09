@@ -405,6 +405,7 @@ def _run_backup_call(
 
     use_sftp = bool(args.sftp_host)
     backend = _open_sftp_backend(args) if use_sftp else None
+    global _active_backup
     try:
         bk = Backup(
             dest_root=Path("/") if use_sftp else args.dest,
@@ -423,6 +424,9 @@ def _run_backup_call(
             tree_version=args.tree_version,
         )
         bk.init_plan()
+        # Publish the active Backup so SIGUSR1/2 handlers can
+        # reach .pause()/.resume() — see _install_pause_signal_handlers.
+        _active_backup = bk
         import time as _time
         started = _time.time()
         recs = []
@@ -510,6 +514,56 @@ def _run_backup_call(
                 backend.__exit__(None, None, None)
             except Exception:
                 pass
+        # Drop the global handle so a stray SIGUSR1 after the
+        # backup completes doesn't try to pause a finished
+        # Backup object.
+        _active_backup = None
+
+
+# Module-level handle on the active Backup so signal handlers
+# can reach .pause()/.resume() without threading the object
+# through every call frame. Set by ``_run_backup_call`` for the
+# duration of one backup; cleared on exit.
+_active_backup = None
+
+
+def _install_pause_signal_handlers() -> None:
+    """Install SIGUSR1 = pause + SIGUSR2 = resume forwarders.
+
+    The TUI's :class:`SubprocessBackupWorker` sends these
+    signals to the writer process when the operator presses
+    ``[p]`` in BackupRunScreen. Without these handlers,
+    subprocess-mode pause/resume would silently no-op
+    (in-process mode already works because the worker thread
+    has direct access to ``Backup.pause()``).
+
+    Best-effort: SIGUSR1/2 are POSIX-only — on Windows the
+    ``signal`` module won't expose them + the install
+    silently no-ops. Operators on Windows fall back to
+    in-process mode for pause/resume.
+    """
+    import signal
+    if not hasattr(signal, "SIGUSR1"):
+        return
+
+    def _on_pause(signum, frame):
+        bk = _active_backup
+        if bk is not None and not bk.is_paused:
+            bk.pause()
+
+    def _on_resume(signum, frame):
+        bk = _active_backup
+        if bk is not None and bk.is_paused:
+            bk.resume()
+
+    try:
+        signal.signal(signal.SIGUSR1, _on_pause)
+        signal.signal(signal.SIGUSR2, _on_resume)
+    except (OSError, ValueError):
+        # ValueError = "signal only works in main thread";
+        # OSError = no permission. Either way, fall back
+        # silently — in-process mode still has pause/resume.
+        pass
 
 
 def _run_dry_run(args: argparse.Namespace) -> int:
@@ -596,6 +650,10 @@ def _run_dry_run(args: argparse.Namespace) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    # Wire pause/resume signal handlers up-front. They look up
+    # _active_backup via the module-level handle so they don't
+    # need to know about argv structure.
+    _install_pause_signal_handlers()
     if getattr(args, "debug", None) is not None:
         from arq_validator.debug_logging import (
             enable_debug_logging, parse_debug_flag,
