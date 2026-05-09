@@ -268,7 +268,8 @@ unavoidable, use disposable credentials and rotate immediately after.
 - When the operator pastes a fixture, preserve it under
   `tests/fixtures/arqapp_real_sftp/` → CI then regresses it on every
   PR
-- A local-destination version of `tests/integration/test_arqapp_local_compat.py`
+- A local-destination version of the same test pattern (a future
+  `test_arqapp_local_compat` module under `tests/integration/`)
   with the same structure (so regression is possible without an SFTP
   dependency)
 - Allow the AUDIT (L2) tier to be run separately via the

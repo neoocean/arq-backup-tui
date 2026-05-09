@@ -197,10 +197,10 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 
 | Arq 7 capability                                              | Status | Notes |
 |---------------------------------------------------------------|:------:|-------|
-| L0 — directory-layout shape check                             |  ✅    | ``arq_validator.tiers.run_l0`` |
-| L1a — ARQO magic-byte sample sweep                            |  ✅    | ``arq_validator.tiers.run_l1a`` |
-| L1b — keyset decrypt + latest backuprecord HMAC               |  ✅    | ``arq_validator.tiers.run_l1b`` |
-| L2 — full HMAC sweep over every EncryptedObject               |  ✅    | ``arq_validator.tiers.run_l2`` |
+| L0 — directory-layout shape check                             |  ✅    | ``arq_validator.tiers.run_layout_check`` |
+| L1a — ARQO magic-byte sample sweep                            |  ✅    | ``arq_validator.tiers.run_magic_check`` |
+| L1b — keyset decrypt + latest backuprecord HMAC               |  ✅    | ``arq_validator.tiers.run_backuprecord_check`` |
+| L2 — full HMAC sweep over every EncryptedObject               |  ✅    | ``arq_validator.tiers.run_full_audit`` |
 | Resumable audit-drip (cursor + throttle + state file)         |  ✅    | ``arq_validator.audit_drip`` |
 | Pluggable storage backend (read-side)                         |  ✅    | ``arq_validator.backend.Backend`` Protocol |
 | Verify a specific historical record                           |  ⚠️    | L1b verifies the latest record per folder; pointing at an older one needs manual code |

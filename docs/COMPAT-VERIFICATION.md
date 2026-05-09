@@ -217,10 +217,10 @@ where, so you can trace which code path of the reader is wrong.
 ### 3.3 Automation hook
 
 From the moment the operator pastes the tarball, automation inside the
-sandbox is possible. Create a file like
-`tests/integration/test_arqapp_cross_restore.py` and cross-restore every
-fixture under `tests/fixtures/arqapp_destinations/*.tgz` to complete
-regression coverage.
+sandbox is possible. Create a future `test_arqapp_cross_restore` module
+under `tests/integration/` and cross-restore every fixture under
+`tests/fixtures/arqapp_destinations/*.tgz` to complete regression
+coverage.
 
 ---
 

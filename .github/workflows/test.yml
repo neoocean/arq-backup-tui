@@ -31,3 +31,11 @@ jobs:
         run: python -m unittest discover
       - name: Run unittest discover (topdir = tests dir)
         run: python -m unittest discover -s tests
+      - name: Verify documentation has no stale code references
+        # PR #25 introduced scripts/check_doc_links.py — fails
+        # CI when a markdown ref points at a renamed/removed
+        # path or symbol. Currently runs on the 3.12 leg only
+        # since the checker imports our packages and we don't
+        # need three runs of the same check.
+        if: matrix.python == '3.12'
+        run: python scripts/check_doc_links.py

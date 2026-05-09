@@ -796,7 +796,7 @@ Common denominators of the three flows:
 | `arq_writer.arq_chunker_params` | RE'd Arq.app v7.41 chunker parameters |
 | `arq_writer.pack_builder` | treepacks/blobpacks/largeblobpacks builder |
 | `arq_writer.dedup` | cross-run dedup seed helpers |
-| `arq_writer.prior_tree_index` | PriorTreeIndex for tree-walk reuse |
+| `arq_writer.prior_tree` | `PriorTreeIndex` for tree-walk reuse |
 | `arq_writer.exclusions` | `ExclusionRules` (glob + regex + .gitignore-subset) |
 | `arq_writer.macos_snapshot` | macOS APFS snapshot context manager (`with_apfs_snapshot`) |
 | `arq_writer.retention` | `RetentionPolicy` + `prune_records` + `gc_orphan_blobs` + `apply_retention` |

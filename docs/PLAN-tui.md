@@ -504,7 +504,7 @@ when complete.
 - `theming.css` (default colors / fonts / key bindings)
 - `Home` screen (static placeholder)
 - `tui` extra in `pyproject.toml` + `arq-tui` console script
-- `tests/test_tui_smoke.py` — verify app start/stop with `pilot`
+- `tests/test_tui_m1_smoke.py` — verify app start/stop with `pilot`
 
 ### M2 — Backup set viewing (2 days)
 
@@ -560,21 +560,23 @@ At this point the user can **create a new backup + execute**.
 
 ### 9.2 Integration tests
 
-- `tests/tui/test_backup_flow.py`: end-to-end of plan create → execute →
+- `tests/test_tui_m3_backup.py`: end-to-end of plan create → execute →
   restore. The library is invoked for real; the backup destination is a
   temporary directory.
-- `tests/tui/test_record_browser.py`: load a pre-built destination, then
+- `tests/test_tui_m2_browser.py`: load a pre-built destination, then
   expand tree nodes + verify metadata display.
-- `tests/tui/test_validate_flow.py`: run all 4 tiers and verify the
+- `tests/test_tui_m5_validate.py`: run all 4 tiers and verify the
   result screen.
 
 ### 9.3 SFTP integration
 
-- `tests/tui/test_sftp_destination.py`: inject a mocked SftpBackend
+- `tests/test_sftp_backend_wiring.py`: inject a mocked SftpBackend
   (LocalBackend on a temp dir) and verify the destination_picker → list
   → record browser flow.
 - Real SFTP server tests follow the `tests/test_sftp.py` pattern,
-  optional.
+  with full end-to-end coverage in
+  `tests/integration/test_arq_real_destination.py` (requires
+  `.secrets/sftp.json` — see `docs/COMPAT-SFTP-TESTING.md`).
 
 ### 9.4 Snapshot tests
 
