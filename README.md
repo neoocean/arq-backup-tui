@@ -4,36 +4,65 @@ An independent verifier + restorer + writer + TUI for Arq Backup 7 format
 destinations. Pure Python ≥ 3.9 + stdlib (HMAC, AES, LZ4, etc. are all
 implemented directly or invoked through the system `openssl`).
 
-## 1. What This Project Intends — and What It Does Not
+## 1. Why This Project Exists
+
+I've used Arq Backup as my primary backup solution for more than **15 years**.
+Its offsite-backup story has bailed me out of several genuine crises — drive
+failures, accidental deletions, ransomware-style incidents on adjacent
+machines — and it remains the tool I trust most for the long-term safety of
+my data. **I plan to keep using Arq as my main backup solution.** This
+project is not a replacement for Arq.app; it's a companion built around it.
+
+What it *is* trying to fix is a small set of personal-workflow gaps in the
+Arq.app interface that, after a decade and a half of daily use, have started
+to bite. This is a **TUI foundation** that fills those gaps without giving up
+the on-disk format I've already committed multi-terabyte multi-year backups
+to. The specific frustrations driving it:
+
+- **Bulk-edit of exclusions across plans**. Arq.app has no good way to apply
+  the same exclusion change (a regex, a wildcard, a path) to several backup
+  plans at once. I want to edit excludes once and have them propagate.
+- **Explicit handling of APFS-snapshot creation failures on macOS**.
+  When `tmutil localsnapshot` (or the writer's APFS-snapshot path) fails
+  mid-backup, I want a per-run choice: abort the whole backup so I notice the
+  problem, or proceed without the snapshot consistency guarantee — knowingly,
+  not silently. Right now the failure mode is opaque.
+- **Convenient juggling of multiple plans and multiple destinations**. I run
+  several plans across several destinations (local, NAS, offsite); the GUI
+  pivots them one at a time. I want a single TUI surface that shows them all
+  side by side and lets me act on any combination at once.
+
+And — the deepest reason — **all of my long-term backups depend on this app**.
+If anything goes wrong years from now (Arq.app drops a feature, the GUI stops
+working on a future macOS, a destination turns out to have silent
+corruption), I want to be able to **read, validate, and restore my own data
+end-to-end without relying on any single tool**. So the TUI is built on top
+of an independent reader / writer / validator that targets:
+
+> **byte-perfect compatibility with Arq 7 and later.**
+
+That's the goal. Anything I write here has to round-trip cleanly through the
+official `arq_restore`, and anything Arq.app writes has to round-trip
+cleanly through this reader. Without that property, the tool would just be
+another way to make backups I can't trust.
 
 This project has **no intent whatsoever** to infringe on the intellectual
-property of [Arq Backup](https://www.arqbackup.com/). It was created for
-two motivations:
+property of [Arq Backup](https://www.arqbackup.com/). The supplementary
+motivation behind the codebase — beyond fitting my personal workflow — is
+**learning backup file-format design**: understanding at the source level
+how encryption, compression, dedup, content-addressable storage, and
+incremental snapshots actually combine in practice in a widely used
+real-world backup tool.
 
-1. **Learning backup file-format design**. The core purpose of this repository
-   is to understand at the source level how concepts such as encryption,
-   compression, dedup, content-addressable storage, and incremental snapshots
-   actually combine in practice. In one line: the code organizes a logical
-   understanding of "how a widely used backup tool internally lays out its
-   data."
-2. **Long-term reliability assurance for Arq backups used for over 15 years**.
-   It is not meant to replace Arq.app itself, but to ensure the operator can
-   **verify the integrity of their Arq 7 destinations on their own at any
-   time**, independent of Arq.app GUI's monthly self-check, and to keep the
-   data **readable** even in environments where the GUI disappears or becomes
-   incompatible. This is a second-source tool for trusting and continuing to
-   use this data into the future.
-
-For that reason this code is **not a tool that replaces the commercial value of
-Arq Backup**, and the following items are **intentionally not implemented**:
+For that reason the following items are **intentionally not implemented**,
+because providing them would dilute the commercial value of Arq.app rather
+than fill an interface gap:
 
 - **Support for S3-compatible storage (S3, Wasabi, B2, Storj, GCS, Azure Blob,
   …)**. Bulk management of cloud backends is one of Arq Backup's core value
-  propositions, and providing this feature here would dilute the incentive to
-  purchase an Arq.app license. **If you want cloud backends, please [purchase an
-  Arq Backup license](https://www.arqbackup.com/).** (For reference, this
-  project supports only local / NAS / SFTP, and users who need a cloud
-  destination must use a `rclone mount` workaround.)
+  propositions. **If you want cloud backends, please [purchase an Arq Backup
+  license](https://www.arqbackup.com/).** (This project supports local / NAS /
+  SFTP only; cloud destinations work via a `rclone mount` workaround.)
 - **Operational features of the Arq.app GUI**: scheduling / notifications /
   menu bar / system tray / dashboard / cloud password recovery / license
   management, and so on, belong to the policy layer of Arq.app and are outside
