@@ -250,17 +250,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "stderr."
         ),
     )
-    # Incremental audit knobs. The ledger persists which
-    # blob_ids have already passed audit so subsequent sweeps
-    # can skip them — see arq_validator.incremental_audit for
-    # the file format.
+    # Incremental audit ledger flags. The ledger persists which
+    # blob_ids have already passed audit so subsequent record-
+    # or audit-tier sweeps can short-circuit them. See
+    # arq_validator.incremental_audit for the file format.
     p.add_argument(
         "--incremental",
         action="store_true",
         help=(
-            "L2 audit only — skip files already in the "
-            "incremental ledger + record fresh passes back to "
-            "it. Use with --ledger-path or rely on the default "
+            "audit / record tier — load + grow + persist a per-"
+            "destination ledger of already-confirmed blob_ids. "
+            "Skips fetch + HMAC for ledger-known blobs. Use with "
+            "--ledger-path or rely on the default location "
             "(~/.local/state/arq-backup-tui/audit-ledgers/<target>)."
         ),
     )
@@ -269,8 +270,19 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Override the incremental audit ledger location. "
-            "Implies --incremental."
+            "Override the incremental ledger location. Implies "
+            "--incremental."
+        ),
+    )
+    p.add_argument(
+        "--ledger-prune-days",
+        type=int,
+        default=0,
+        help=(
+            "Before recording fresh passes, drop ledger entries "
+            "older than N days. 0 = no pruning. Operators should "
+            "run periodically (e.g. monthly) so a blob that "
+            "quietly went bad eventually gets re-audited."
         ),
     )
     return p
@@ -510,13 +522,64 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
                 return 2
             from .record_validator import validate_record
+            # Optional incremental ledger for the record tier.
+            # Mirrors the audit-tier ledger plumbing so the same
+            # state file can grow across either entrypoint.
+            ledger = None
+            ledger_path = None
+            use_incremental = (
+                getattr(args, "incremental", False)
+                or getattr(args, "ledger_path", None) is not None
+            )
+            if use_incremental:
+                from .incremental_audit import (
+                    ledger_path_for, load_ledger, prune_older_than,
+                )
+                target_label = (
+                    str(args.ledger_path) if args.ledger_path
+                    else (args.target or "default")
+                )
+                ledger_path = (
+                    args.ledger_path
+                    if args.ledger_path is not None
+                    else ledger_path_for(args.target or "default")
+                )
+                ledger = load_ledger(ledger_path, target=target_label)
+                # Optional periodic pruning. Operators run this
+                # monthly to keep the ledger from masking blobs
+                # that have quietly gone bad after their last
+                # confirmation.
+                prune_days = int(
+                    getattr(args, "ledger_prune_days", 0) or 0
+                )
+                if prune_days > 0:
+                    dropped = prune_older_than(
+                        ledger, prune_days * 24 * 3600,
+                    )
+                    if dropped:
+                        print(
+                            f"pruned {dropped} ledger entries "
+                            f"older than {prune_days}d",
+                            file=sys.stderr,
+                        )
             report = validate_record(
                 backend, args.record_path,
                 encryption_password=password or "",
                 openssl_path=args.openssl_path,
                 max_blobs=args.record_max_blobs,
                 callback=callback,
+                ledger=ledger,
             )
+            if ledger is not None and ledger_path is not None:
+                from .incremental_audit import save_ledger
+                try:
+                    save_ledger(ledger, ledger_path)
+                except OSError as exc:
+                    print(
+                        f"warning: failed to persist ledger "
+                        f"{ledger_path}: {exc}",
+                        file=sys.stderr,
+                    )
             print(json.dumps(asdict(report), indent=2,
                              ensure_ascii=False, default=str))
             return 0 if report.ok else 4

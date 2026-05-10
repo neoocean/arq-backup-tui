@@ -74,6 +74,14 @@ class RecordValidationReport:
     bytes_fetched: int = 0
     trees_walked: int = 0
     files_walked: int = 0
+    # Counts blobs whose blob_id was already in the incremental
+    # audit ledger and therefore short-circuited (no fetch + no
+    # HMAC). Operators want this surfaced separately from
+    # blobs_walked so a sweep summary like "10000 blobs walked,
+    # 9800 ledger-skipped, 200 actually verified" is readable
+    # at a glance — incremental sweeps should drift towards 100%
+    # ledger-skipped after the first full pass.
+    blobs_skipped_by_ledger: int = 0
     elapsed_sec: float = 0.0
     truncated_after: int = 0   # 0 = walked the whole tree;
                                 # >0 = stopped after this many
@@ -174,6 +182,7 @@ def validate_record(
     openssl_path: str = "openssl",
     max_blobs: int = 0,        # 0 = walk everything
     callback=None,
+    ledger=None,
 ) -> RecordValidationReport:
     """Walk every BlobLoc reachable from ``record_path`` and
     verify each one decrypts + passes HMAC.
@@ -303,6 +312,7 @@ def validate_record(
                 ok = _check_one_loc(
                     backend, tree_loc, keyset, computer_uuid,
                     report, node_path=node_rel, blob_kind="tree",
+                    ledger=ledger,
                 )
                 _emit("blob_walked", path=node_rel, kind="tree", ok=ok)
                 if ok:
@@ -361,6 +371,7 @@ def validate_record(
                 ok = _check_one_loc(
                     backend, loc, keyset, computer_uuid,
                     report, node_path=node_rel, blob_kind="data",
+                    ledger=ledger,
                 )
                 _emit("blob_walked", path=node_rel, kind="data", ok=ok)
             report.files_walked += 1
@@ -375,6 +386,7 @@ def validate_record(
             ok = _check_one_loc(
                 backend, loc, keyset, computer_uuid,
                 report, node_path=node_rel, blob_kind="xattr",
+                ledger=ledger,
             )
             _emit("blob_walked", path=node_rel, kind="xattr", ok=ok)
 
@@ -386,6 +398,7 @@ def validate_record(
             ok = _check_one_loc(
                 backend, acl_loc, keyset, computer_uuid,
                 report, node_path=node_rel, blob_kind="acl",
+                ledger=ledger,
             )
             _emit("blob_walked", path=node_rel, kind="acl", ok=ok)
 
@@ -399,16 +412,37 @@ def _check_one_loc(
     backend: Backend, loc, keyset: Keyset, computer_uuid: str,
     report: RecordValidationReport, *,
     node_path: str, blob_kind: str,
+    ledger=None,
 ) -> bool:
     """Fetch + HMAC-verify one BlobLoc; record any failure on
     ``report`` and return whether it passed. Increments
-    ``blobs_walked`` either way."""
+    ``blobs_walked`` either way.
+
+    When ``ledger`` is non-None and ``ledger.contains(blob_id)``
+    is True, the blob is treated as already-verified — we skip
+    the backend fetch + HMAC, increment the
+    ``blobs_skipped_by_ledger`` counter, and return success.
+    Successful verifications register themselves back into the
+    ledger so subsequent sweeps can skip them too."""
     report.blobs_walked += 1
     blob_id = (
         loc.get("blobIdentifier")
         if isinstance(loc, dict)
         else getattr(loc, "blobIdentifier", "")
     ) or ""
+    # Ledger short-circuit: if we've audited this exact blob_id
+    # before AND it passed, trust the prior result without
+    # re-fetching. blob_id is content-addressed
+    # (SHA-256(salt+plaintext)), so a matching id implies
+    # matching bytes — no risk of false positive from a name
+    # collision.
+    if (
+        ledger is not None
+        and blob_id
+        and ledger.contains(blob_id)
+    ):
+        report.blobs_skipped_by_ledger += 1
+        return True
     rel = _locpath(loc)
     offset = int(_locint(loc, "offset"))
     length = int(_locint(loc, "length"))
@@ -426,6 +460,11 @@ def _check_one_loc(
     report.bytes_fetched += len(raw)
     ok, err = _verify_blob(raw, keyset.hmac_key)
     if ok:
+        # Register the fresh pass so the next sweep can skip
+        # the round-trip. Failures intentionally NOT recorded —
+        # the operator wants the next sweep to retry.
+        if ledger is not None and blob_id:
+            ledger.record(blob_id)
         return True
     report.failures.append(RecordValidationFailure(
         blob_id=blob_id, rel_path=rel,
