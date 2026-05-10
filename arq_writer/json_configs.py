@@ -147,9 +147,27 @@ def build_backupplan(
     return {
         "active": True,
         "arq5UseS3IA": False,
+        # Defaults below mirror what Arq.app v8 emits on a freshly
+        # provisioned plan (sampled 2026-05-10 against the operator's
+        # destination — see docs/COMPAT-VERIFICATION.md §2.7.1).
+        # `backupFolderPlanMountPointsAreInitialized` /
+        # `backupSetIsInitialized` are True because we *do* finalize
+        # the folder + set during build_backup before emitting plan.
+        "backupFolderPlanMountPointsAreInitialized": True,
         "backupFolderPlansByUUID": folder_plans_dict,
+        "backupSetIsInitialized": True,
+        # `budgetGB`: 0 = unbounded; operators with a managed quota
+        # set this externally via Arq.app GUI.
+        "budgetGB": 0,
         "cpuUsage": 25,
+        # Pro Console is Arq.app's enterprise management feature;
+        # standalone backups never originate there.
+        "createdAtProConsole": False,
         "creationTime": f"{creation_time:.3f}" if creation_time else "0",
+        # `datalessFilesOption`: 1 = "materialize then back up" (the
+        # safe default Arq.app v8 ships with for iCloud / Dropbox
+        # placeholders).
+        "datalessFilesOption": 1,
         "emailReportJSON": {
             "authenticationType": "none",
             "fromAddress": "",
@@ -171,13 +189,27 @@ def build_backupplan(
         "includeWiFiNetworks": False,
         "isEncrypted": is_encrypted,
         "keepDeletedFiles": False,
+        # `managed`: True iff the plan is centrally administered via
+        # Arq.app's Pro Console; False for ordinary user-driven plans.
+        "managed": False,
         "name": plan_name,
         "needsArq5Buckets": False,
         "noBackupsAlertDays": 5,
         "notifyOnError": True,
         "notifyOnSuccess": False,
+        # S3 Object Lock is unrelated to local destinations but Arq.app
+        # always emits the slot; default it off + use Arq.app's 30-day
+        # update interval so the schema agrees.
+        "objectLockAvailable": False,
+        "objectLockUpdateIntervalDays": 30,
         "pauseOnBattery": False,
         "planUUID": plan_uuid,
+        # `preventBackupOnConstrainedNetworks` /
+        # `preventBackupOnExpensiveNetworks`: macOS network-quality
+        # gates Arq.app respects; default off so the writer doesn't
+        # silently inherit a stricter policy than the user requested.
+        "preventBackupOnConstrainedNetworks": False,
+        "preventBackupOnExpensiveNetworks": False,
         "preventSleep": False,
         "retainAll": True,
         "retainDays": 30,

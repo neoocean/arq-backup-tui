@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import unittest
 
-from arq_writer.json_configs import build_backupfolders_json
+from arq_writer.json_configs import (
+    build_backupfolders_json,
+    build_backupplan,
+    build_folder_plan,
+)
 
 
 class BackupFoldersIndexTests(unittest.TestCase):
@@ -56,6 +60,86 @@ class BackupFoldersIndexTests(unittest.TestCase):
         )
         for k in self.EXPECTED_KEYS - {"standardObjectDirs"}:
             self.assertEqual(out[k], [], msg=k)
+
+
+class BackupPlanArqAppV8KeysTests(unittest.TestCase):
+    """``build_backupplan`` emits every key Arq.app v8 emits.
+
+    Pre-fix the writer's plan was missing these 10 keys (sampled
+    2026-05-10 against the operator's destination — see
+    ``docs/COMPAT-VERIFICATION.md`` §2.7.1). Defaults below match
+    Arq.app v8's freshly-provisioned-plan emit so a structural
+    schema diff against a real destination shows zero
+    ``a_only`` / ``b_only`` keys.
+    """
+
+    EXPECTED_DEFAULTS = {
+        "backupFolderPlanMountPointsAreInitialized": True,
+        "backupSetIsInitialized": True,
+        "budgetGB": 0,
+        "createdAtProConsole": False,
+        "datalessFilesOption": 1,
+        "managed": False,
+        "objectLockAvailable": False,
+        "objectLockUpdateIntervalDays": 30,
+        "preventBackupOnConstrainedNetworks": False,
+        "preventBackupOnExpensiveNetworks": False,
+    }
+
+    def _build(self) -> dict:
+        fp = build_folder_plan(
+            folder_uuid="FOLDER-UUID",
+            local_path="/some/path",
+            name="some-folder",
+        )
+        return build_backupplan(
+            plan_uuid="PLAN-UUID",
+            plan_name="some-plan",
+            folder_plans=[fp],
+        )
+
+    def test_all_ten_arq_app_keys_present(self) -> None:
+        plan = self._build()
+        for key in self.EXPECTED_DEFAULTS:
+            self.assertIn(
+                key, plan, msg=f"missing key {key!r}",
+            )
+
+    def test_default_values_match_arq_app_v8(self) -> None:
+        # If Arq.app drifts the default for one of these keys in a
+        # future version, the schema diff will catch it long before
+        # this test fails — but pinning the value matters because
+        # an int vs bool mismatch (e.g. budgetGB=False) would also
+        # surface as a type-level diff against a real destination.
+        plan = self._build()
+        for key, expected in self.EXPECTED_DEFAULTS.items():
+            self.assertEqual(
+                plan[key], expected,
+                msg=f"{key} default drifted",
+            )
+
+    def test_default_value_types_match(self) -> None:
+        plan = self._build()
+        for key, expected in self.EXPECTED_DEFAULTS.items():
+            self.assertIs(
+                type(plan[key]), type(expected),
+                msg=(
+                    f"{key} type drift: "
+                    f"got {type(plan[key]).__name__}, "
+                    f"expected {type(expected).__name__}"
+                ),
+            )
+
+    def test_plan_keeps_pre_existing_keys(self) -> None:
+        # Sanity that the new keys haven't displaced any structural
+        # keys the L4 audit already requires.
+        plan = self._build()
+        for k in (
+            "active", "isEncrypted", "name", "planUUID",
+            "scheduleJSON", "transferRateJSON", "emailReportJSON",
+            "version", "useBuzhash",
+        ):
+            self.assertIn(k, plan)
 
 
 if __name__ == "__main__":
