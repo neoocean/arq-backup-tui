@@ -160,17 +160,30 @@ silent), `skip` (drop restored bytes + emit `conflict_skipped`), or
 ### Writing (writer)
 
 ```sh
+# For Arq.app v8 plans with useBuzhash: True (Buzhash content-
+# defined chunking, mean ~64 KiB):
 arq-backup create ~/Documents \
     --dest /Volumes/arqbackup1 \
     --password "$ARQ_PW" \
-    --use-packs --chunker arq_v7_41 \
+    --use-packs --chunker arq_v7_41 --tree-version 4 \
     --exclude-glob '*.log' --max-file-bytes 1073741824
+
+# For Arq.app v8 plans with useBuzhash: False (fixed
+# 40,000,000-byte chunks — sampled directly from the operator's
+# real plan, see HANDOFF.md GAP-L):
+arq-backup create ~/Documents \
+    --dest /Volumes/arqbackup1 \
+    --password "$ARQ_PW" \
+    --use-packs --chunker fixed-40m --tree-version 4
 ```
 
-The destination produced is guaranteed to round-trip byte-identically with
-this verifier and reader; compatibility with the Arq.app GUI side is an area
-that requires manual operator verification, since our reader cannot
-distinguish it.
+Byte-perfect round-trip with this verifier and reader is
+guaranteed; compatibility with the Arq.app GUI side has now been
+verified at the byte level via four independent strategies
+(restore from Arq.app v8 destinations, restore through the BSD
+``arq_restore`` reference at Tree v3, schema parity for every
+JSON sidecar + plist, and cross-destination ``blob_id`` math). See
+``docs/COMPAT-VERIFICATION.md`` for the full evidence trail.
 
 ### TUI
 
