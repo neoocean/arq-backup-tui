@@ -189,6 +189,16 @@ def _load_prior_root_tree_loc(
         return None
 
 
+# Default upper bound on the number of decoded trees held in the
+# PriorTreeIndex cache. Tree objects are typically a few KB each
+# (small lists of child references), so 1024 ≈ low single-digit MB
+# in the worst case + comfortably covers most plan-walks. Operators
+# with truly massive destinations can override via the
+# ARQ_PRIOR_TREE_CACHE_MAX env var or the ``max_cache_trees`` ctor
+# kwarg.
+_DEFAULT_PRIOR_TREE_CACHE_MAX = 1024
+
+
 class PriorTreeIndex:
     """Lazy, path-keyed view over a prior backup's tree.
 
@@ -196,6 +206,14 @@ class PriorTreeIndex:
     requested ``folder_uuid`` and decrypts its envelope to learn
     the root tree's BlobLoc. Subsequent ``lookup_file`` calls walk
     down lazily, fetching exactly the tree blobs on the lookup path.
+
+    The decoded-tree cache is bounded LRU: once it reaches
+    ``max_cache_trees`` entries, the least-recently-used tree
+    is evicted on each new fetch. Without this, walking a backup
+    against a destination with hundreds of thousands of trees
+    would accumulate every Tree in memory for the duration of the
+    walk; with it, memory stays roughly proportional to the cap
+    regardless of destination size.
 
     Use as a context-free helper; the class only caches reads, it
     never writes.
@@ -211,6 +229,7 @@ class PriorTreeIndex:
         folder_uuid: Optional[str] = None,
         openssl_path: str = "openssl",
         backend=None,
+        max_cache_trees: Optional[int] = None,
     ) -> None:
         self.dest_root = Path(dest_root)
         self.computer_uuid = computer_uuid
@@ -218,7 +237,12 @@ class PriorTreeIndex:
         self.hmac_key = hmac_key
         self.openssl_path = openssl_path
         self.backend = backend
-        self._tree_cache: Dict[str, Tree] = {}
+        # LRU-bounded tree cache. OrderedDict gives O(1) move-to-end
+        # + popitem(last=False) for the eviction path.
+        from collections import OrderedDict
+        self._tree_cache: "OrderedDict[str, Tree]" = OrderedDict()
+        self._max_cache = self._resolve_cache_max(max_cache_trees)
+        self.cache_evictions = 0    # operator-facing diagnostic
         self._root_tree_loc: Optional[BlobLoc] = None
 
         recs = _list_record_paths_for_folder(
@@ -236,13 +260,38 @@ class PriorTreeIndex:
             backend=backend,
         )
 
+    @staticmethod
+    def _resolve_cache_max(override: Optional[int]) -> int:
+        """Pick the LRU cap. Explicit ctor arg wins; else the
+        ARQ_PRIOR_TREE_CACHE_MAX env var (so operators can tune
+        without a code change); else the module default. Values
+        <=0 disable the cap entirely (legacy unbounded behaviour
+        — useful as an escape hatch but not the default)."""
+        if override is not None:
+            return int(override)
+        env = os.environ.get("ARQ_PRIOR_TREE_CACHE_MAX")
+        if env:
+            try:
+                return int(env)
+            except ValueError:
+                pass
+        return _DEFAULT_PRIOR_TREE_CACHE_MAX
+
     @property
     def is_usable(self) -> bool:
         return self._root_tree_loc is not None
 
+    @property
+    def cache_size(self) -> int:
+        """Current number of decoded trees held in memory."""
+        return len(self._tree_cache)
+
     def _fetch_tree(self, loc: BlobLoc) -> Optional[Tree]:
         cached = self._tree_cache.get(loc.blobIdentifier)
         if cached is not None:
+            # LRU bookkeeping: bump to most-recent on hit so
+            # frequently-accessed trees stay resident.
+            self._tree_cache.move_to_end(loc.blobIdentifier)
             return cached
         try:
             from arq_reader.decrypt import (
@@ -282,6 +331,13 @@ class PriorTreeIndex:
         except Exception:
             return None
         self._tree_cache[loc.blobIdentifier] = tree
+        # Evict the oldest entry once we exceed the cap. The cap
+        # may be 0 / negative — interpreted as "unbounded" for
+        # operators who explicitly want legacy behaviour.
+        if self._max_cache > 0:
+            while len(self._tree_cache) > self._max_cache:
+                self._tree_cache.popitem(last=False)
+                self.cache_evictions += 1
         return tree
 
     def lookup_file(self, rel_path: str) -> Optional[FileNode]:
