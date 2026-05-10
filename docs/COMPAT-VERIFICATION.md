@@ -545,19 +545,24 @@ operator GUI action: every blob_id our writer would have computed
 for the operator's actual file content matches the blob_id
 Arq.app v8 actually wrote.
 
-### 5.5.3 What Strategy E does NOT prove
+### 5.5.3 What Strategy E does NOT prove (and what's been
+addressed since)
 
-- **Chunker boundary parity** for Buzhash: this destination's
-  plan has ``useBuzhash: False``, so Arq.app emitted fixed-size
-  40,000,000-byte chunks (max blob size cap). Our writer's
-  ``--chunker arq_v7_41`` uses Buzhash content-defined chunking
-  (mean ≈ 64 KiB, max 128 KiB). The chunker that matches
-  Arq.app's ``useBuzhash: False`` 40 MB-cap behaviour is a
-  separate emit-mode our writer doesn't currently expose
-  (HANDOFF.md GAP-L). Strategy E proved Arq.app's blob_id matches
-  ours **for the chunks Arq.app produced**; matching the
-  produce-the-same-chunks invariant requires a Buzhash-enabled
-  source destination, which the operator's current plan isn't.
+- **Chunker boundary parity** for the Buzhash mode: this
+  destination's plan has ``useBuzhash: False``, so Arq.app
+  emitted fixed-size 40,000,000-byte chunks. Strategy E proved
+  the blob_id math is correct **for the chunks Arq.app
+  produced**, but not that our writer would have produced the
+  same boundaries on the same source. Closed by **PR #58
+  (GAP-L): ``--chunker fixed-40m``** — the writer can now match
+  Arq.app's ``useBuzhash: False`` shape byte-for-byte (verified
+  on a 91 MB random input that splits to
+  ``(40 M, 40 M, 11.8 M)``, the exact split Arq.app emits on
+  the operator's actual ``anythingllm.db``). For
+  ``useBuzhash: True`` plans, ``--chunker arq_v7_41`` mirrors
+  the Buzhash parameters reverse-engineered from Arq.app v7.41
+  (``arq_writer/arq_chunker_params.py``). Together the two
+  modes cover both per-plan ``useBuzhash`` settings.
 
 - **Tree v4 binary parity beyond Node fields**: the trailing
   block (PR #41) is opaque between writer + reader. Arq.app v8

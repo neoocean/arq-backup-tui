@@ -35,7 +35,7 @@ Scope decisions (cumulative from prior decisions):
 | Source selection | Drive / WiFi exclusion | 🔴 | Policy layer |
 | Backup execution | Manual run | ✅ | CLI / TUI |
 | Backup execution | Scheduled run | 🔴 | External cron recommended |
-| Backup execution | Pause / resume | ❌ | Future (audit-drip pattern may be applicable) |
+| Backup execution | Pause / resume | ✅ | Cooperative checkpointing at blob boundaries (PR #30); subprocess workers forward via SIGUSR1/SIGUSR2. TUI `[p]` toggles state. |
 | Backup execution | Cooperative cancel | ✅ | `Backup.cancel()` |
 | Backup execution | CPU throttling | 🔴 | Policy layer |
 | Backup execution | Network throttling | ⚠️ | Only audit-drip can be throttled |
@@ -101,7 +101,6 @@ current state of truth, and the per-phase mapping is preserved as follows:
 **Parity items still unimplemented** (❌ / ⚠️ in the §1 table):
 
 - Backup plan editing UI (`v1.x`; workaround via wizard recreate + delete CLI)
-- Pause / resume (no checkpoint mechanism)
 - Multiple destinations per plan (`v1.x`)
 - Per-other-computer history isolation (`reader auto-discovers; writer is single`)
 - Plan settings export/import UI (currently worked around by copying `~/.config/arq-backup-tui/plans/<id>.json` directly)
