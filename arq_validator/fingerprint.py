@@ -59,7 +59,7 @@ from arq_writer.types import BlobLoc, FileNode, TreeNode
 
 from . import constants as C
 from .backend import Backend
-from .crypto import decrypt_keyset
+from .crypto import Keyset, decrypt_keyset
 from .layout import discover_layout, list_backuprecords
 
 
@@ -304,7 +304,7 @@ def compute_shape_fingerprint(
 def _schema_of_json(
     backend: Backend, path: str,
     *,
-    keyset: Optional["Keyset"] = None,  # noqa: F821 (forward ref)
+    keyset: Optional[Keyset] = None,
     openssl_path: str = "openssl",
 ) -> Dict[str, Any]:
     """Read a JSON sidecar (plain or ARQO-encrypted) and return its

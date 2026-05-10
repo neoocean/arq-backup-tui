@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional
 
 from . import constants as C
 from .backend import Backend
-from .crypto import decrypt_keyset
+from .crypto import Keyset, decrypt_keyset
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +420,7 @@ _BACKUPPLAN_REQUIRED = {
 def _check_backupplan(
     backend: Backend, root: str, cu: str, report: ComplianceReport,
     *,
-    keyset: Optional["Keyset"] = None,  # noqa: F821 (forward ref)
+    keyset: Optional[Keyset] = None,
     openssl_path: str = "openssl",
 ) -> None:
     # backupplan.json is ARQO-encrypted in Arq.app v8 (T1) — pass
@@ -542,7 +542,7 @@ _BACKUPFOLDER_REQUIRED = (
 def _check_per_folder(
     backend: Backend, root: str, cu: str, report: ComplianceReport,
     *,
-    keyset: Optional["Keyset"] = None,  # noqa: F821 (forward ref)
+    keyset: Optional[Keyset] = None,
     openssl_path: str = "openssl",
 ) -> List[str]:
     bf_root = f"{root.rstrip('/')}/{cu}/{C.BACKUPFOLDERS_DIR}"
