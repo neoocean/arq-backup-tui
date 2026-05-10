@@ -387,6 +387,76 @@ diff -r /tmp/compat-src /tmp/restore-arq_restore
 Paste `arq_restore`'s exit code + the `diff -r` output into the sandbox.
 Exit code 0 + empty diff output = **write compatibility proven**.
 
+### 4.3 Verification log
+
+| Date | Source | Tree version | `arq_restore` build | Result |
+|---|---|---|---|---|
+| 2026-05-10 | 4-file synthetic source (a.txt, b.txt, sub/c.txt, sub/d.bin) | **3** | Self-built from `arqbackup/arq_restore` master (commit at clone time), Xcode CLT + clang on macOS 15.7.3 | ✅ `diff -r` exit 0, every file SHA-256 matches |
+| 2026-05-10 | same | **4** | same | ❌ `missing blob identifier` — arq_restore's `Arq7Node` binary parser stops at `reparsePointIsDirectory` and does NOT read the 38-byte trailing block we emit (and that Arq.app v8 itself emits, per `docs/REAL-DATA-DISCOVERIES.md` §7) |
+
+#### 4.3.1 Tree-version reconciliation
+
+The two outcomes above sit at opposite ends of "byte-perfect
+compatibility with Arq 7+":
+
+- **Tree v3** is the version the published Arq 7 spec documents.
+  Our writer's Tree v3 emit is **byte-perfect compatible with
+  `arq_restore`** — the BSD reference implementation. This is
+  the strongest possible signal that the format we write is
+  **spec-correct** at the byte level.
+- **Tree v4** is the version Arq.app v8 actually emits on disk
+  (sampled across 9 backup folders × 21k+ xattr blobs on
+  `/Volumes/arqbackup1`). It adds a 38-byte trailing block per
+  Node. Our writer matches Arq.app's emit exactly; the
+  contemporary `arq_restore` source does NOT yet read the
+  trailing block, so it can't restore Tree v4 destinations
+  produced by **either** Arq.app v8 OR our writer.
+
+Two-way coverage therefore reads:
+
+| | Reads ours | We read theirs |
+|---|---|---|
+| **Arq.app v8 (Tree v4)** | not directly testable in this sandbox; format match proven via P3 §2.7 + this PR's 20/20 schema parity | ✅ verified at scale (PR #45 / §3.4: 127,222 files byte-perfect) |
+| **arq_restore BSD (Tree v3)** | ✅ verified (this section, §4.3) | (writer-side test only; restore is a no-op against the spec subset) |
+
+Practical guidance:
+
+- For **maximum interoperability with both Arq.app v8 GUI and
+  arq_restore**, write Tree v3 (`--tree-version 3`, the writer's
+  default). It loses the v4 timestamp metadata Arq.app v8 stores
+  in the trailing block but stays restorable by both reference
+  implementations.
+- For **identity with Arq.app v8's actual on-disk shape** (e.g.
+  to round-trip a destination Arq.app GUI manages), write Tree
+  v4 (`--tree-version 4`). It's not currently restorable by the
+  published `arq_restore` binary, but that's an `arq_restore`
+  staleness issue, not a format-correctness issue on our side.
+
+Building `arq_restore` from source on a stock macOS host with
+Xcode Command Line Tools (no full Xcode required):
+
+```sh
+git clone https://github.com/arqbackup/arq_restore.git
+cd arq_restore
+# Manually compile + link with clang (the project ships an
+# Xcode project but full Xcode + xcodebuild is not strictly
+# necessary for this binary). The build issues:
+#  - 5 SBJSON files compile with -fno-objc-arc; the rest with
+#    -fobjc-arc (per the pbxproj per-file COMPILER_FLAGS).
+#  - The vendored 3rdparty/openssl-1.1.1h provides universal
+#    libcrypto.a + libssl.a — link them statically.
+#  - Frameworks: Foundation, SystemConfiguration, Security,
+#    CoreFoundation, CoreServices, IOKit, AppKit.
+#  - Also link -lz for the GZip code paths.
+# A working invocation lives in this repo's commit history (see
+# the PR that added §4.3, which carries the exact clang flags).
+```
+
+The `arq_restore` binary uses interactive password prompts via
+``tcgetattr(STDIN_FILENO)`` which fails when stdin isn't a TTY.
+For automation, run it inside a pty (e.g. via Python's ``pty``
+module — see this PR's commit log for the wrapper script).
+
 ---
 
 ## 5. ✓ Strategy D — Chunker oracle (already implemented)

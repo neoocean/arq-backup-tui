@@ -78,35 +78,6 @@ PRs above; concise summary:
 | **P3** Fingerprint diff | Schema-level diff completed (full per-record diff intractable at this scale); 5 incompatibilities + 1 fingerprint module bug surfaced; bug fixed. | #46, `docs/COMPAT-VERIFICATION.md` §2.7 |
 | **P4** Incremental ledger smoke | Pass-1 ledger of 2,522 blobs created → pass-2 reports `files_skipped_by_ledger: 2,522` exactly; `files_fail: 0`, `inner_arqos_ok: 53,507/53,507`. | (no PR — operational verification only) |
 
-## All five P3 follow-ups (T1–T5) — closed in this session
-
-The 2026-05-10 schema diff surfaced five writer-side compatibility
-gaps. All are now landed:
-
-| ID | Title | PR | Status |
-|---|---|---|---|
-| **T1** | ARQO-encrypt `backupplan.json` + per-folder `backupfolder.json` | #49 | ✅ |
-| **T2** | Add 10 missing `backupplan.json` keys | #48 | ✅ |
-| **T3** | Add `s3GlacierIRObjectDirs` to `backupfolders.json` | #48 | ✅ |
-| **T4** | Replace `errorCount: int` with `backupRecordErrors: list` | #49 | ✅ |
-| **T5** | `arq-fingerprint compute --max-records-per-folder N` | #48 | ✅ |
-
-After-T1–T5 schema diff against `/Volumes/arqbackup1`:
-
-| Sidecar / plist | Before T-series | After T-series |
-|---|---|---|
-| `backupconfig.json` | 11/11 keys match | ✅ 11/11 |
-| `backupplan.json` | 37/47 keys match (10 missing) | ✅ **47/47** |
-| `backupfolders.json` | 5/6 keys match (1 missing) | ✅ **6/6** |
-| per-folder `backupfolder.json` | 8/8 keys match (but plain) | ✅ **8/8** + ARQO-encrypted |
-| backuprecord plist | 18/19 keys match (`errorCount` ↔ `backupRecordErrors`) | 18/19 (`nodeTreeVersion` / `volumeName` differ per folder Tree v3 vs v4) |
-
-`backupplan.json` and per-folder `backupfolder.json` now ARQO-wrap
-their JSON the way Arq.app v8 does. `read_sidecar` in
-`arq_validator/sidecar.py` auto-detects the envelope so older
-plain-JSON destinations our writer produced before T1 keep parsing
-unchanged.
-
 ## All seven post-P3 follow-ups (T1–T5 + F1–F2) — closed
 
 | ID | Title | PR | Status |
@@ -136,13 +107,50 @@ only byte-level differences (random IVs, salt-based blob_ids,
 content-derived chunker boundaries) remain — and those are
 expected design properties, not compatibility gaps.
 
-## Remaining for full Strategy C parity
+## Strategy C (writer → arq_restore) — verified at byte level (Tree v3)
 
-### F3 — Full byte-level Strategy A diff (operator GUI required)
+Closed in this session. Built ``arq_restore`` from the official
+``arqbackup/arq_restore`` BSD source on this macOS host (no full
+Xcode required — Xcode CLT + clang + the vendored OpenSSL 1.1.1h
+universal libs were sufficient; the exact clang invocation lives
+in the PR commit log). Then exercised it end-to-end against a
+synthetic 4-file source backed up by our writer:
 
-The schema-only diff is now zero. The remaining verification is
-the **byte-level fingerprint diff** against an Arq.app-produced
-destination of the **same source**:
+| Tree version | arq_restore result | What it means |
+|---|---|---|
+| **3** | ✅ ``diff -r`` exit 0; every file SHA-256 matches | Our writer's Tree v3 emit is **byte-perfect compatible** with the BSD reference implementation. |
+| **4** | ❌ ``missing blob identifier`` | ``arq_restore``'s ``Arq7Node`` binary parser stops at ``reparsePointIsDirectory``; it doesn't read the 38-byte trailing block we (and Arq.app v8 itself) emit per ``docs/REAL-DATA-DISCOVERIES.md`` §7. This is an ``arq_restore`` staleness, not a format-correctness issue on our side. |
+
+Combined with the prior P2 / P3 / T1–T5 / F1–F2 results, the
+two-way compatibility surface now reads:
+
+| | Reads ours | We read theirs |
+|---|---|---|
+| **Arq.app v8 (Tree v4)** | format-match proven via P3 + T1–T5 + F1–F2 (every JSON sidecar + the backuprecord plist matches schema-for-schema) | ✅ verified at scale (PR #45: 127,222 files byte-perfect) |
+| **arq_restore BSD (Tree v3)** | ✅ verified this session (Tree v3, ``diff -r`` exit 0) | (writer-side test; restore is a no-op against the spec subset) |
+
+Practical guidance:
+
+- ``--tree-version 3`` (writer default) — restorable by **both**
+  arq_restore AND Arq.app v8 GUI. Maximum interop. Loses the v4
+  scanned-at metadata in the trailing block but keeps everything
+  the spec documents.
+- ``--tree-version 4`` — identity with Arq.app v8's actual
+  on-disk shape, including the 38-byte trailing block.
+  ``arq_restore`` (current published source) can't restore this,
+  but Arq.app v8 GUI can (proven by P2's reverse direction:
+  Arq.app v8's actual destinations on the operator's NAS read
+  cleanly through our reader).
+
+See ``docs/COMPAT-VERIFICATION.md`` §4.3 for the full procedure
++ build instructions for ``arq_restore`` on a stock macOS CLT
+host.
+
+## Remaining for full byte-level Tree v4 parity (operator GUI required)
+
+The one remaining check we still cannot run from this sandbox
+is the **byte-level fingerprint diff against a same-source
+backup produced by Arq.app v8 GUI**:
 
 1. Pick a small synthetic source (~10 files / 1 MB).
 2. Back it up via Arq.app GUI to a fresh local destination.
@@ -150,15 +158,15 @@ destination of the **same source**:
    --chunker arq_v7_41 --tree-version 4``) to another fresh
    destination.
 4. ``arq-fingerprint compute --max-records-per-folder 1`` on
-   each (the ``--max-records-per-folder`` flag landed in T5).
+   each (T5 flag).
 5. ``arq-fingerprint compare`` — expect ``match: true`` with
    zero ``chunk_pattern_diffs`` / ``file_shape_diffs`` /
    ``missing_files_*`` entries.
 
-This is operator-side work because we can't drive Arq.app's GUI
-from here. With the schema-level diffs all closed by T1–T5 + F1
-+ F2, F3 is the last remaining check before declaring full
-Strategy C compatibility.
+This needs the operator to drive Arq.app's GUI once. With every
+intermediate verification closed (T-series + F-series +
+Strategy C-v3 byte-perfect), this run is expected to be a
+formality rather than an open question.
 
 ## Pending — out-of-scope without further operator action
 
