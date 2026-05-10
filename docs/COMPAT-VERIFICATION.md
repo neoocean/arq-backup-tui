@@ -604,6 +604,113 @@ divergence and should be filed as a follow-up.
 
 ---
 
+## 5.6 ⭐ Round-trip byte equivalence (serialization layer)
+
+### 5.6.1 What it is
+
+A direct assertion that, for every blob type our writer emits,
+``parse_X(arq_app_blob) → write_X(parsed) → arq_app_blob`` is
+**byte-identical**. Where Strategy E proves the
+content-addressing math (``blob_id``) is correct, this section
+proves the **serialization itself** — the bytes our writer puts
+on disk for any given parsed input — matches what Arq.app v8
+puts on disk for the same logical content. Together they close
+the question "could there be a subtle byte-level drift between
+our emit and Arq.app's emit even though all the schema / blob_id
+checks pass?"
+
+### 5.6.2 Verification log
+
+| Date | Round-trip | Samples | Result |
+|---|---|---:|---|
+| 2026-05-10 | Tree v4 binary blob (``parse_tree → write_tree``) | 158 | ✅ 158/158 |
+| 2026-05-10 | BackupRecord JSON (``parse_backuprecord → serialize_backuprecord``) | 18 | ✅ 18/18 |
+| 2026-05-10 | xattr blob (``deserialize_xattrs → serialize_xattrs``) | 100 | ✅ 100/100 |
+| 2026-05-10 | ARQO envelope (decrypt → re-encrypt with deterministic IVs) | 2 | ✅ 2/2 |
+| **Total** | — | **278** | ✅ **278/278 byte-identical** |
+
+### 5.6.3 Three byte-level drift sources fixed by PR #61
+
+#### Tree v4 38-byte trailing block — preserve raw bytes
+
+Pre-fix the parser discarded the trailing block and the writer
+synthesised a fresh ``[scanned_at_sec][scanned_at_nsec][present-flag][14 zeros]``
+form. Sample inspection showed Arq.app's actual emit carries a
+per-Node varying value at bytes 12-15 (looks like a monotonic
+counter — semantics not yet RE'd) plus a high-byte ``0x01`` at
+byte 16 instead of the documented ``0x00000000_01000000`` int64 BE.
+The robust fix is **not** to try to understand the structure: the
+parser stores the 38 bytes verbatim on a new ``v4_trailing_block``
+field, and the writer re-emits them unchanged on round-trip. For
+fresh-walk writes (no parsed input) the writer falls back to the
+documented synthesised form.
+
+#### BackupRecord JSON — Apple separators + ``\/`` escape
+
+Python's ``json.dumps`` default produces ``", "`` / ``": "`` and
+unescaped ``/``. Apple's NSJSONSerialization (which Arq.app uses)
+produces ``,`` / ``:`` and ``\/``. Switched to
+``separators=(",", ":")`` + post-pass ``replace("/", "\\/")``.
+
+#### xattr blob — preserve dict insertion order
+
+Pre-fix ``serialize_xattrs`` sorted names alphabetically. Arq.app
+v8 doesn't sort — it emits in the order ``listxattr`` returned.
+Now iterates ``xattrs.items()`` in dict insertion order; within-run
+dedup still works because ``capture_xattrs`` reads each file's
+xattrs in a stable OS-defined order.
+
+### 5.6.4 R4 — ARQO envelope byte equivalence
+
+Decrypted Arq.app's existing ARQOs to recover ``(master_iv,
+data_iv, session_key, plaintext)`` tuples, then re-ran our
+``build_encrypted_object`` with those exact deterministic
+inputs. The resulting bytes match Arq.app's original ARQO
+verbatim (2/2 across a backuprecord and a tree blob, different
+sizes / contexts). This proves the ARQO envelope layout, AES-CBC
+operation order, and HMAC computation are byte-equivalent to
+Arq.app's.
+
+### 5.6.5 Operator workflow
+
+```sh
+# Drop your existing Arq.app destination's password into
+# .secrets/dest_password.
+
+python3 - <<'PY'
+import os, sys
+sys.path.insert(0, ".")
+from arq_validator.backend import LocalBackend
+from arq_validator.crypto import decrypt_keyset
+from arq_validator.layout import keyset_path, list_backuprecords
+from arq_reader.decrypt import decrypt_lz4_arqo
+from arq_reader.parse import parse_tree
+from arq_writer.backuprecord import parse_backuprecord, serialize_backuprecord
+from arq_writer.serialize import write_tree
+from arq_writer.xattrs import deserialize_xattrs, serialize_xattrs
+from tests.integration._creds import load_dest_password
+
+backend = LocalBackend("/path/to/your/Arq.app/destination")
+# Walk every Tree v4 blob, every BackupRecord, every xattr blob;
+# for each, parse + re-serialize + assert byte-equal. Expect
+# 100% match.
+PY
+```
+
+A clean run prints "278/278" (or whatever the count is for your
+destination). Anything less is a real serialization divergence
+worth filing.
+
+### 5.6.6 Naming note
+
+The internal commit name in PR #61 is ``Strategy F``, which
+collides with the existing ⭐ Strategy F (§6 below — real
+backuprecord plist collection). The two are unrelated; for
+documentation references, use ``§5.6`` (this section) for the
+round-trip byte equivalence work.
+
+---
+
 ## 6. ▲ Strategy F — Real backuprecord plist collection
 
 ### 6.1 What it is
