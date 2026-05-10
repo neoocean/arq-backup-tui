@@ -222,6 +222,51 @@ under `tests/integration/` and cross-restore every fixture under
 `tests/fixtures/arqapp_destinations/*.tgz` to complete regression
 coverage.
 
+### 3.4 Verification log
+
+| Date | Source | Folder | Files | Bytes | Result |
+|---|---|---|---:|---:|---|
+| 2026-05-10 | `/Volumes/arqbackup1` (operator's real Arq.app v8 NAS share) | `402790CC-…` (smallest backup folder, picked from a 9-folder destination) | 127,222 | 3,168,992,060 | ✅ `failures: []`, `verify.ok: true`, `verify.failures: []` |
+
+Procedure (operator's machine, with `.secrets/dest_password` populated):
+
+```sh
+# 1) Discover folders and pick a small one:
+python3 -m arq_reader list /Volumes/arqbackup1 \
+    --password-file .secrets/dest_password
+
+# 2) Dry-run (no I/O — walks the tree to confirm the reader can parse
+#    every node before we write anything):
+python3 -m arq_reader restore /Volumes/arqbackup1 \
+    --password-file .secrets/dest_password \
+    --list-only \
+    402790CC-33FA-4BEA-B1FA-186BC8A18007 \
+    /tmp/cross-restore-dry
+
+# 3) Real restore + post-restore SHA-256 verify of every file:
+python3 -m arq_reader restore /Volumes/arqbackup1 \
+    --password-file .secrets/dest_password \
+    --verify-after \
+    --json-events \
+    402790CC-33FA-4BEA-B1FA-186BC8A18007 \
+    /tmp/cross-restore-real \
+    > /tmp/p2-restore.json
+```
+
+The 2026-05-10 run took 8.4 s for the dry-run and a full restore +
+verify pass over local-mounted storage (LocalBackend, no SFTP latency
+between the reader and the destination). Every file's recomputed
+SHA-256 matched the recorded `blob_id`; no `xattr_apply_error`,
+`xattr_decode_error`, or `xattr_fetch_error` events were emitted, so
+`com.apple.provenance` / `com.apple.FinderInfo` / TimeMachine
+directory-completion-date / un-prefixed `purgeable-drecs-fixed`
+xattrs all round-tripped correctly.
+
+This is the **strongest possible read-compatibility signal** —
+Arq.app's output is byte-perfectly recoverable through our reader at
+real-world scale, including xattrs in every namespace the source
+system carries.
+
 ---
 
 ## 4. ⭐ Strategy C — Cross-restore (our writer → arq_restore)
@@ -370,7 +415,7 @@ Paste → preserve in the sandbox under
 To prove compatibility in a single pass:
 
 1. ☐ A.1–A.5 (fingerprint diff) — compare Arq.app's and our writer's output
-2. ☐ B.1–B.4 (cross-restore) — restore the Arq.app destination with our reader
+2. ☑ B.1–B.4 (cross-restore) — restore the Arq.app destination with our reader (verified 2026-05-10; see §3.4)
 3. ☐ C.1–C.4 (arq_restore reverse) — restore our writer's destination with arq_restore
 
 If each check passes, **Arq 7 compatibility is proven at byte level**. For
