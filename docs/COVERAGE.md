@@ -14,14 +14,15 @@ deliberate trade-offs (Arq.app side concern, redundant with
 
 | Area              | Status                                                  |
 |-------------------|---------------------------------------------------------|
-| Read              | ✅ End-to-end restorer (standalone + packed objects, multi-folder, tree walk) |
-| Validate          | ✅ All four tiers (L0 / L1a / L1b / L2) + resumable audit-drip |
-| Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with tree-walk reuse |
-| Operate           | ⚠️ Schedule + notifications still deferred; TUI shipped (M1–M6 + maintenance), retention + blob GC shipped (PR #11), throttling still absent |
+| Read              | ✅ End-to-end restorer (standalone + packed objects, multi-folder, tree walk, dry-run preview, --paths filter, conflict policies) |
+| Validate          | ✅ All four tiers (L0 / L1a / L1b / L2) + resumable audit-drip + per-record walk + incremental ledger across both audit and record tiers |
+| Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with bounded LRU tree-walk reuse; walker emits explicit error events on per-file failures (no silent corruption) |
+| Operate           | ✅ Schedule (cron + launchd + auto-gc), notifications (notify_run_finished wired to RunWriter), TUI (M1–M6 + maintenance + activity), retention + blob GC, disk-precheck on backup start, macOS progress toasts, .secrets/ wizard checkbox; throttle controllable via audit-drip rate flags |
 
-The aggregate test count is **355 unit tests** at the time this
-table was last updated; the suite runs in ~140 s on a stdlib-only
-toolchain (``python -m unittest discover``). TUI tests
+The aggregate test count is **~720 unit tests** at the time this
+table was last updated (after PRs #36–#41); the suite runs in
+~140 s on a stdlib-only toolchain
+(``python -m unittest discover``). TUI tests
 (~50 / 355) require the optional ``textual`` dep; without it
 they auto-skip and the rest of the suite (library + RE +
 compatibility + GUI-parity + Unicode-stress) runs cleanly. **7
@@ -138,7 +139,7 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 |---------------------------------------------------------------|:------:|-------|
 | Plan creation (``backupplan.json``)                           |  ✅    | ``arq_writer.json_configs.build_backupplan`` |
 | Plan listing / show / delete                                  |  ✅    | ``arq-tui plans list/show/delete`` headless CLI |
-| Plan editing                                                  |  ❌    | Deferred to v1.x; recreate via wizard + ``arq-tui plans delete`` |
+| Plan editing                                                  |  ✅    | TUI: ``[e]`` on a plan row opens PlanWizardScreen pre-populated with the existing plan; saves overwrite the same ``plan_id``. Plan ``last_run_iso`` field stamped automatically on backup finish/fail (PR #38) |
 | Folder exclusions (file patterns / glob / regex / .gitignore) |  ✅    | ``ExclusionRules.of(wildcard=..., regex=..., gitignore_lines=...)`` passed via ``Backup(exclusions=...)`` / ``build_backup(..., exclusions=...)``; matched against full POSIX rel_path + basename |
 | File-size skip rules                                          |  ✅    | ``Backup(max_file_bytes=...)``; symlinks are exempted (only target-string size, not target file size) |
 | ``.gitignore``-style filters                                  |  ✅    | Minimal subset honored: ``# comments``, ``foo``, ``/foo``, ``foo/``, ``*.ext``, ``!negation``. Full ``**`` semantics absent — fall back to ``regex_excludes`` if needed |
@@ -151,12 +152,14 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 
 | Arq 7 capability                                              | Status | Notes |
 |---------------------------------------------------------------|:------:|-------|
-| Schedule-driven runs (cron-like)                              |  🔴   | Out of scope: lives in Arq.app's policy layer, not the on-disk format |
-| Bandwidth / CPU throttling                                    |  🔴   | Same |
-| Pause / resume mid-backup                                     |  ❌    | No checkpoint mechanism; a kill mid-run is unsafe |
+| Schedule-driven runs (cron-like)                              |  ✅    | ``arq_tui.scheduling`` writes cron / launchd entries for plans; auto-gc schedule (`install_gc_schedule`) bundles ``arq-tui runs gc`` so cron-driven backups don't accumulate state files indefinitely (Group 9 H4) |
+| Bandwidth / CPU throttling                                    |  ⚠️    | Audit-drip ``--rate-files-per-min`` throttles validator sweeps (Hetzner-friendly defaults); per-blob backup throttling not exposed yet |
+| Pause / resume mid-backup                                     |  ✅    | Cooperative: ``Backup.pause()`` / ``Backup.resume()`` checkpoint at blob boundaries. TUI ``[p]`` toggles state. Subprocess workers forward via SIGUSR1/SIGUSR2 to the writer CLI; both modes share the same Backup-level pause flag (PR #30, Group 3) |
 | Wake-from-sleep / sleep-prevention integration                |  🔴   | OS-specific concern |
-| Email or system notifications                                 |  🔴   | App-layer concern |
-| Activity log / status icons                                   |  🔴   | App-layer concern |
+| Email or system notifications                                 |  ✅    | ``arq_tui.notifications.notify_run_finished`` fires from ``RunWriter.__exit__`` on every run finish; auto-detects macOS osascript / Linux notify-send / operator-supplied shell hook. Defaults filter to status ∈ {failed, cancelled} (PR #36 wire-up of Group 7's F2). ``ARQ_BACKUP_TUI_DISABLE_NOTIFICATIONS=1`` for tests |
+| Disk-precheck before backup start                             |  ✅    | ``BackupRunScreen.on_mount`` calls ``estimate_for_plan`` (source bytes vs. destination free space + safety factor) and surfaces a warning notification if undersized — non-fatal so operator can override (PR #36 wire-up of Group 7's F3). ``ARQ_TUI_SKIP_DISK_PRECHECK=1`` opt-out |
+| macOS Notification Center toasts (per-milestone progress)     |  ✅    | ``arq_tui.macos_progress`` fires Notification Center toasts at start, every 10% milestone, and at completion. Pure ``osascript`` (no PyObjC); no-op on non-macOS (PR #36 wire-up of Group 7's F5) |
+| Activity log / status icons                                   |  ✅    | TUI ``RunsMonitorScreen`` (`[a]ctivity` / `:activity`) passively watches state files written by CLI / cron / TUI processes; ``arq-tui runs ls/show/cancel/gc`` is the headless equivalent |
 
 ### 6. Restore (read path)
 
@@ -174,10 +177,12 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 
 | Arq 7 capability                                              | Status | Notes |
 |---------------------------------------------------------------|:------:|-------|
-| Restore a specific historical commit (by date / index)        |  ❌    | ``Restore.restore`` always selects the latest backuprecord for the folder |
-| Restore a single path or pattern                              |  ❌    | Whole-folder restore only |
+| Restore a specific historical commit (by date / index)        |  ✅    | ``Restore.restore(backuprecord_path=…)`` accepts an explicit record path; ``Restore.list_records`` enumerates available history |
+| Restore a single path or pattern                              |  ✅    | ``Restore.restore(paths=[…])`` filters the walk; CLI ``--paths`` (repeatable) |
+| Dry-run / list-only restore                                   |  ✅    | ``Restore.dry_run_restore`` walks the tree + emits ``would_restore_file`` events without writing; CLI ``--list-only`` returns a ``DryRunRestoreResult`` JSON summary (PR #38) |
+| Conflict policy on existing destination files                 |  ✅    | ``Restore(on_conflict={overwrite,skip,rename})``; CLI ``--on-conflict``. Rename writes to ``name.restored-N``; skip emits ``conflict_skipped`` event |
 | Restore-as-mounted-filesystem (FUSE)                          |  ❌    | Out of scope; would require macFUSE / fusepy |
-| Browse-without-restore (TUI / GUI)                            |  ❌    | TUI not implemented; ``arq-reader list`` exists for CLI listing |
+| Browse-without-restore (TUI)                                  |  ✅    | RecordBrowserScreen + BackupSetListScreen in TUI; ``arq-reader list`` for CLI |
 
 #### 6.3 File metadata application
 
@@ -185,13 +190,14 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 |---------------------------------------------------------------|:------:|-------|
 | mtime / ctime preservation on restore                         |  ✅    | Restorer calls ``os.utime`` after each file write |
 | Unix mode (perm bits)                                         |  ✅    | Restorer calls ``os.chmod`` with ``S_IMODE(node.mac_st_mode)`` |
+| uid / gid preservation                                        |  ✅    | Restorer applies ``os.chown`` from FileNode mac_st_uid/gid (matches uid by name lookup, falls back to numeric); honours ``--no-chown`` |
 | Symlinks                                                      |  ✅    | Writer stores link target under ``S_IFLNK``; restorer recreates with ``os.symlink`` |
-| Hardlinks                                                     |  ❌    | Each file treated as a separate blob; matches Arq.app's behavior |
-| Extended attributes (xattrs)                                  |  ❌    | Parsed and exposed in ``Node`` but not applied to restored files |
-| ACLs (POSIX or NFSv4)                                         |  ❌    | Same |
+| Hardlinks                                                     |  ✅    | Writer caches ``(st_dev, st_ino) → FileNode``; subsequent links emit ``file_hardlinked`` event + share the FileNode. Restorer reads ``mac_st_ino`` to reconstruct via ``os.link`` |
+| Extended attributes (xattrs)                                  |  ✅    | ``XAttrSetV002`` binary format (RE'd in PR #25); writer emits via ``arq_writer.xattrs.serialize_xattrs``; restorer applies via ``apply_xattrs`` (cross-platform) |
+| ACLs (POSIX or NFSv4)                                         |  ✅    | macOS NFSv4 (``ACL_MACOS_NFSV4`` magic header, ``chmod +a`` / ``ls -le``); Linux POSIX (``ACL_LINUX_POSIX`` header, ``setfacl`` / ``getfacl``). Writer captures via ``arq_writer.acl.capture_acl`` per-FileNode + per-TreeNode |
 | macOS resource forks                                          |  ❌    | Out of scope (cross-platform stance) |
-| macOS Finder metadata (Spotlight comments, color labels, ...) |  ❌    | Out of scope |
-| Windows file attributes                                       |  ❌    | ``win_attrs`` field exists in ``FileNode``; not honored on restore |
+| macOS Finder metadata (Spotlight comments, color labels, ...) |  ⚠️    | Stored as xattrs (``com.apple.metadata:*``) — round-trips via the xattrs path automatically |
+| Windows file attributes                                       |  ⚠️    | ``win_attrs`` field on FileNode is preserved through round-trip but not actively applied on restore (Linux/macOS hosts have no equivalent) |
 
 ### 7. Validation
 
@@ -200,11 +206,13 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 | L0 — directory-layout shape check                             |  ✅    | ``arq_validator.tiers.run_layout_check`` |
 | L1a — ARQO magic-byte sample sweep                            |  ✅    | ``arq_validator.tiers.run_magic_check`` |
 | L1b — keyset decrypt + latest backuprecord HMAC               |  ✅    | ``arq_validator.tiers.run_backuprecord_check`` |
-| L2 — full HMAC sweep over every EncryptedObject               |  ✅    | ``arq_validator.tiers.run_full_audit`` |
+| L2 — full HMAC sweep over every EncryptedObject               |  ✅    | ``arq_validator.tiers.run_full_audit`` (+ ``ledger=`` for incremental) |
+| Per-record blob walk (``arq-validator record``)               |  ✅    | ``arq_validator.record_validator.validate_record`` walks every BlobLoc reachable from one backuprecord; ``--max-blobs`` for CI smoke; ``ledger=`` for incremental |
+| Incremental audit ledger (skip already-confirmed blob_ids)   |  ✅    | ``arq_validator.incremental_audit.AuditLedger``; CLI ``--incremental`` + ``--ledger-path`` + ``--ledger-prune-days``. Per-destination JSON under ``~/.local/state/arq-backup-tui/audit-ledgers/``. Failed blobs NEVER ledgered so the next sweep retries them. Used by audit + record tiers (PR #36, #39) |
 | Resumable audit-drip (cursor + throttle + state file)         |  ✅    | ``arq_validator.audit_drip`` |
 | Pluggable storage backend (read-side)                         |  ✅    | ``arq_validator.backend.Backend`` Protocol |
-| Verify a specific historical record                           |  ⚠️    | L1b verifies the latest record per folder; pointing at an older one needs manual code |
-| Cross-check restored bytes against backup checksum            |  🔴   | Validator and restorer are separate paths; round-trip tests cover this in CI |
+| Verify a specific historical record                           |  ✅    | ``arq-validator record --record-path <path>`` walks any record's full blob graph |
+| Cross-check restored bytes against backup checksum            |  ✅    | ``arq-reader restore --verify-after`` walks restore output + recomputes SHA-256 / blob-id chain |
 
 ### 8. Storage backends (where the destination lives)
 
@@ -228,9 +236,9 @@ the FUSE mount.
 
 | Component                                                     | Status | Notes |
 |---------------------------------------------------------------|:------:|-------|
-| ``arq-validator`` CLI (run validation tiers)                  |  ✅    | ``arq_validator.cli`` |
-| ``arq-backup`` CLI (one-shot backup)                          |  ✅    | ``arq_writer.cli``. Flags: ``--use-packs`` / ``--chunker {none,default,arq_v7_41}`` / ``--dedup-against-existing`` / ``--max-file-bytes`` / ``--exclude-glob`` / ``--exclude-regex`` / ``--exclude-from`` / ``--use-apfs-snapshot`` / ``--state-file`` (state-file IPC for TUI / cron monitoring) |
-| ``arq-reader`` CLI (one-shot restore + listing)               |  ✅    | ``arq_reader.cli``; ``--state-file`` for restore-side monitoring |
+| ``arq-validator`` CLI (run validation tiers)                  |  ✅    | ``arq_validator.cli``. Flags include ``--incremental`` + ``--ledger-path`` + ``--ledger-prune-days N`` (PR #36, #39) — incremental sweeps share a per-destination ledger of confirmed blob_ids |
+| ``arq-backup`` CLI (one-shot backup)                          |  ✅    | ``arq_writer.cli``. Flags: ``--use-packs`` / ``--chunker {none,default,arq_v7_41}`` / ``--dedup-against-existing`` / ``--max-file-bytes`` / ``--exclude-glob`` / ``--exclude-regex`` / ``--exclude-from`` / ``--use-apfs-snapshot`` / ``--state-file`` (state-file IPC for TUI / cron monitoring) / ``--debug [SUBSYSTEMS]`` |
+| ``arq-reader`` CLI (one-shot restore + listing)               |  ✅    | ``arq_reader.cli``; ``--state-file`` for restore-side monitoring; ``--list-only`` for dry-run preview without writing; ``--paths`` (repeatable) for selective restore; ``--on-conflict {overwrite,skip,rename}``; ``--verify-after`` for post-restore SHA-256 walk |
 | ``arq-buzhash-find`` CLI (RE toolkit subcommands)             |  ✅    | ``arq_writer.buzhash_re_cli`` |
 | ``arq-tui machine-info <root>``                               |  ✅    | Source-machine identification: print backupconfig.json/backupplan.json metadata + compare against current host (hostname / scutil / sw_vers). JSON output |
 | ``arq-tui runs ls/show/cancel/gc``                            |  ✅    | Headless equivalent of the Activity monitor screen — list active+recent runs, send SIGTERM, GC old terminal records |
@@ -276,36 +284,43 @@ the FUSE mount.
   anyone who wants a cloud target anyway.
 
 - **Schedule / throttling / notifications / wake-from-sleep**:
-  these belong to Arq.app's policy layer, not the on-disk format.
-  A standalone scheduler can wrap ``arq-backup`` if needed; the
-  format itself is unaffected.
+  most of these are now **implemented** as of PRs #29–#36. Schedule
+  via ``arq_tui.scheduling`` (cron + launchd + auto-gc); notifications
+  via ``arq_tui.notifications`` (osascript / notify-send / shell hook);
+  audit-side throttle via ``--rate-files-per-min``. Per-blob backup
+  throttling and wake-from-sleep integration remain out: both belong
+  closer to OS-policy than to backup-format code.
 
 - **Folder exclusions / size limits / ``.gitignore`` rules**:
-  the writer's ``Backup.add_folder`` walks the full source tree
-  unconditionally. A pre-filter pass (or an exclude argument to
-  ``add_folder``) would be the natural extension; not yet
-  implemented.
+  **implemented** (PR #10) via ``ExclusionRules.of(wildcard=,
+  regex=, gitignore_lines=)``; CLI ``--exclude-glob`` /
+  ``--exclude-regex`` / ``--exclude-from``; TUI plan wizard's
+  Advanced step exposes all three.
 
 - **Incremental backup**: cross-run dedup + tree-walk reuse
   cover the meaningful incremental case (no re-encryption +
-  no re-read of unchanged content). Pause / resume mid-backup
-  is the remaining gap; a kill mid-write leaves the destination
-  in a state that is still valid — partial pack files have a
-  flush boundary at their last successful ``add()`` — but the
-  current backuprecord wasn't yet emitted.
+  no re-read of unchanged content). **Pause / resume mid-backup
+  is now implemented** (PR #30, Group 3): cooperative checkpointing
+  at blob boundaries via ``Backup.pause()`` / ``resume()``; TUI ``[p]``
+  toggles state; subprocess workers forward via SIGUSR1/SIGUSR2.
+  A SIGKILL mid-write still leaves the destination valid (partial
+  packs have a flush boundary at their last ``add()``) but the
+  current backuprecord wasn't emitted.
 
 - **Restore selectivity (single path / single historical
-  commit)**: out today; the ``Restore.restore`` API hard-codes
-  "latest record, full folder". Both extensions would slot into
-  the existing API without format changes — pass an explicit
-  ``backuprecord_path`` instead of always finding the latest;
-  filter the tree walk by a path prefix.
+  commit)**: **fully implemented** (PRs #15, #38). ``Restore.restore``
+  accepts ``backuprecord_path=`` for historical records and
+  ``paths=[…]`` for path filtering; CLI mirrors as ``--paths``
+  (repeatable) + the new ``--list-only`` dry-run preview.
 
-- **TUI**: described in DESIGN.md as the project's eventual
-  primary interface. Not yet started; the library APIs
-  (``ProgressCb`` callbacks, the ``Restore`` / ``Backup`` classes,
-  the validator's tiered events) are designed to be embedded in
-  one without changes.
+- **TUI**: **shipped** (M1–M6 + maintenance + activity + plan-edit + console).
+  Reachable via ``./arq-tui.py`` or ``python -m arq_tui``. Backup /
+  restore / browse / validate / scheduling / maintenance / plan-edit
+  all integrated. Sidebar with section_for_screen() routing keeps
+  active highlight in lockstep with current screen. The library APIs
+  (``ProgressCb`` callbacks, ``Restore`` / ``Backup`` classes,
+  validator's tiered events) underpin the TUI without TUI-specific
+  coupling.
 
 - **``largeblobpacks/`` write routing**: the spec ships a
   ``maxPackedItemLength`` setting (default ~256 KiB) that

@@ -880,3 +880,102 @@ restore. The behavior of the two **maintenance tasks** added in PR #11 /
 The TUI's `MaintenanceScreen` (`arq_tui/screens/maintenance.py`) calls
 both in sibling threads, and marshals results back to the main loop via
 `call_from_thread`.
+
+## Appendix D. Operational hardening (PRs #36–#41)
+
+### D.1 Walker safety — surface OSError as events (PR #37)
+
+Earlier behaviour: when `read_bytes()` raised mid-walk, `_walk_file`
+silently substituted empty bytes (`data = b""`) and proceeded to write
+a 0-byte file blob. The backup looked successful but had invisible
+damage — the operator only discovered it on restore.
+
+New behaviour:
+- `file_read_error` event with `op={read_bytes,readlink,lstat}`
+  → walker emits the event AND skips the entry from the resulting
+  tree. The backup honestly omits files it couldn't read, instead of
+  silently including 0-byte versions.
+- `file_stat_error` / `dir_stat_error` event with
+  `op=post_{read,walk}_stat` → fired when the post-blob-write `stat()`
+  races against deletion. The blob bytes ARE captured (the read
+  succeeded), so the FileNode lands with **defaulted metadata**
+  (mtime=0, mode=0, uid/gid=0). The `recovery=defaulted_metadata`
+  field surfaces this clearly so the operator can re-run for the
+  affected file.
+- `Backup.files_with_errors` counter + `BackupResult.files_with_errors`
+  field surface the failure count to the run summary.
+
+### D.2 Incremental audit ledger (PR #36, #39)
+
+- `arq_validator.incremental_audit.AuditLedger` is a JSON-backed
+  set of blob_ids (and last-confirmed timestamps) that have already
+  passed audit.
+- Wired into BOTH `tiers.run_full_audit` (L2) AND
+  `record_validator.validate_record` (record-tier).
+- On call: if `ledger.contains(blob_id)`, skip fetch + HMAC and bump
+  the new `files_skipped_by_ledger` / `blobs_skipped_by_ledger`
+  counter. On success: `ledger.record(blob_id)` so subsequent sweeps
+  can skip it. **Failures are NEVER ledgered** — the next sweep
+  retries them.
+- Maintenance: `prune_older_than(ledger, age_sec)` drops aged entries.
+  CLI `--ledger-prune-days N` hooks this so an operator running monthly
+  pruning ensures a quietly-bad blob eventually gets re-audited.
+- File location: `~/.local/state/arq-backup-tui/audit-ledgers/<target>.json`
+  (XDG-compliant).
+
+### D.3 PriorTreeIndex LRU bound (PR #40)
+
+The `_tree_cache` attribute on
+`arq_writer.prior_tree.PriorTreeIndex` was previously a
+plain dict that grew unbounded. For a destination with hundreds of
+thousands of trees walked across a long backup, this accumulated every
+Tree in memory.
+
+New: OrderedDict with LRU eviction, default cap 1024 trees
+(`max_cache_trees=` ctor kwarg, `ARQ_PRIOR_TREE_CACHE_MAX` env override,
+`cache_evictions` counter for diagnostics, 0/negative cap restores
+legacy unbounded behaviour as an explicit escape hatch).
+
+### D.4 Restore dry-run preview (PR #38)
+
+`Restore.dry_run_restore()` walks the backuprecord's tree and emits
+one `would_restore_file` event per file (and `would_restore_dir`
+per directory) WITHOUT writing anything to disk. Tree blobs are
+fetched (cheap; trees are small) but no file blob is ever fetched —
+`itemSize` from the FileNode is the authoritative reported size.
+
+CLI: `arq-reader restore --list-only [--paths …] <folder-uuid> /tmp/dummy`.
+The dest argument stays positional (uniform parse) but is unused
+in dry-run mode.
+
+### D.5 Plan.last_run_iso stamping (PR #38)
+
+`PlanRegistry.mark_run(plan_id)` atomically stamps the plan's
+`last_run_iso` to "now" (UTC ISO-8601). Wired into BackupRunScreen's
+`on_worker_finished` + `on_worker_failed` so HomeScreen's plan row
+shows a fresh timestamp regardless of outcome — operators see "last
+attempt 2 hours ago, failed" surfaced just as much as a clean success.
+
+### D.6 Disk-precheck + macOS toasts on backup start (PR #36)
+
+- `BackupRunScreen.on_mount` calls `disk_estimator.estimate_for_plan`
+  (source bytes vs. destination free space + safety factor) and
+  surfaces a warning notification if undersized — non-fatal so
+  operator can override. SFTP destinations skipped (estimator is
+  local-only). `ARQ_TUI_SKIP_DISK_PRECHECK=1` opt-out.
+- macOS `show_start` fires on mount; `show_complete` on
+  worker_finished + worker_failed; `maybe_show_progress` per-event
+  fires Notification Center toast at every 10% milestone. All wrapped
+  in try/except — cheap no-op on non-macOS hosts.
+
+### D.7 Notifications + secrets-setup wire-up (PR #36)
+
+- `RunWriter.__exit__` now fires `notify_run_finished(record)` after
+  the final flush (best-effort; any exception swallowed). Default
+  config filters to status ∈ {failed, cancelled} so successful nightly
+  backups don't spam. `ARQ_BACKUP_TUI_DISABLE_NOTIFICATIONS=1`
+  silences for tests.
+- `DestinationModal` adds a "Save SFTP credentials to
+  .secrets/sftp.json (cron use)" checkbox. On submit, calls
+  `secrets_setup.write_sftp_json` so credentials operator just typed
+  also get persisted for the cron path without re-typing.

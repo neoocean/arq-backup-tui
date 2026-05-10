@@ -349,10 +349,25 @@ Fix:
   all-zero shape + structured shape + v3 binary-compat regression
 - (this PR) `scripts/probe_tree_v4_block.py` — a tool to collect more
   observed samples from the operator's destination
+- (PR #25) writer side: `_v4_trailing_block` emits the structured form
+  when called with `tree_version=4`
+- (PR #41) Mach-O RE against operator's installed Arq.app v8 confirms
+  `nodeTreeVersion = 4` is hard-coded in `-[BackupRecord init]`
+  (writes `movl $0x4, 0x1c(%rax)`). The Node initializer signatures
+  (visible as `initWithDataBlobLocs:…` and `initWithTreeBlobLoc:…`)
+  contain NO `scannedAt` or `lastVerifiedAt` parameter — confirming
+  the 38-byte trailing block is **serializer-only metadata**, not
+  a stored Node attribute the reader reconstructs into a property.
+  See `docs/C1-MACHO-RE-PLAN.md` §"Findings (2026-05-10 RE session)"
+  for the full transcript.
 
 Verification: all five operator folders (1 v3 + 4 v4) pass `parse_tree`.
-The exact field semantics of the 38-byte block remain follow-up work for
-Arq.app Mach-O RE.
+Arq.app v8 emits Tree v4 with hard-coded version stamp → our writer's
+`tree_version=4` choice is operator-confirmed compatible.
+Field-semantics rabbit hole partially closed: the only
+remaining unknown is the exact runtime source of the 0x01000000
+constant at bytes 16..23 (no `movabsq $0x1000000, …` writer found
+in static analysis).
 
 ## Impact matrix
 

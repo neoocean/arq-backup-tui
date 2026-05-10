@@ -21,7 +21,8 @@ controls that process. This project follows the same model.
 
 ## 1. Shipping outcomes
 
-Once this PR series is finished, the following becomes possible:
+The PR series listed in §6 is **complete** as of mid-2026-05.
+Every scenario below works today.
 
 ```sh
 # Scenario A — cron-friendly (no TUI)
@@ -29,6 +30,8 @@ arq-backup create ~/Documents \
     --dest /Volumes/arq --password "$ARQ_PW" \
     --state-file ~/.local/state/arq-backup-tui/runs/foo.json
 # → progress recorded to the state file; on exit status=completed/failed
+# → notify_run_finished() fires automatically (osascript / notify-send /
+#   shell hook depending on platform + ~/.config/arq-backup-tui/notifications.json)
 
 # Scenario B — operator monitors from a separate terminal
 ./arq-tui.py
@@ -39,11 +42,36 @@ arq-backup create ~/Documents \
 # Scenario C — start a new backup from inside the TUI (existing behavior + spawn mode)
 ./arq-tui.py → [n]ew plan → wizard → [r]un
 # Default is subprocess spawn (same IPC as the CLI); legacy in-process is also an option.
+# On worker finish/fail, plan.last_run_iso is stamped + macOS toast fires + notification dispatches.
 
 # Scenario D — post-mortem analysis of a finished run
 ./arq-tui.py → Activity → select a completed run
 # events log + final stats + failed entries from the state file are surfaced.
+
+# Scenario E — dry-run preview before committing to a restore
+arq-reader restore /Volumes/arq <folder-uuid> /tmp/dummy \
+    --password-env ARQ_PW --list-only --paths Documents/notes
+# → walks tree, emits would_restore_file events, prints
+#   {files_listed, bytes_would_restore, sample_paths} JSON; never writes.
+
+# Scenario F — incremental audit (skip already-confirmed blob_ids)
+arq-validator audit /Volumes/arq --password-env ARQ_PW --incremental
+# → first run walks everything; subsequent runs skip ledger-known blobs.
+arq-validator record --record-path /<cu>/backupfolders/<fu>/.../*.backuprecord \
+    /Volumes/arq --password-env ARQ_PW --incremental --ledger-prune-days 30
+# → record-tier accepts the same ledger; --ledger-prune-days drops aged entries.
 ```
+
+### Event kinds added by PRs #36–#41
+
+- ``would_restore_file`` / ``would_restore_dir`` /
+  ``dry_run_restore_started`` / ``dry_run_restore_finished`` /
+  ``dry_run_tree_error`` — emitted by ``Restore.dry_run_restore``.
+- ``file_read_error`` (with ``op={read_bytes,readlink,lstat}``)
+  + ``file_stat_error`` / ``dir_stat_error`` (with ``op=post_*_stat``,
+  ``recovery=defaulted_metadata``) — walker safety hardening (PR #37).
+- ``audit_file_skipped`` (with ``reason=ledger``) — incremental
+  audit short-circuit (PR #36, #39).
 
 ## 2. Process model
 
