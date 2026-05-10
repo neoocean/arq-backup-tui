@@ -141,30 +141,42 @@ def build_backuprecord_dict(
     computer_os_type: int = 1,
     storage_class: str = "STANDARD",
     volume_name: str = "",
-    version: int = 100,
+    version: Optional[int] = None,
     disk_identifier: str = "ROOT",
     backup_record_errors: Optional[List[Dict[str, Any]]] = None,
+    node_tree_version: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Assemble the top-level dict written into the backuprecord plist.
 
-    ``backup_record_errors`` (default ``None`` = empty list) carries
-    per-file errors collected during the walk. Each item is a dict
-    matching Arq.app v8's per-error schema:
+    ``node_tree_version`` (F2) is the binary tree-format version
+    used for the root + every nested tree. When set, it lands as
+    ``nodeTreeVersion`` and the record's ``version`` defaults to
+    ``101`` (Arq.app v8's marker for Tree v4 records). When
+    omitted, no ``nodeTreeVersion`` field is emitted and
+    ``version`` defaults to ``100`` (the legacy Tree v3 record
+    shape). Sampled 2026-05-10 against ``/Volumes/arqbackup1``:
+    out of 352 real records, 333 use ``version=100`` with
+    ``volumeName`` only and 18 use ``version=101`` with
+    ``nodeTreeVersion=4`` (HANDOFF.md F2).
+
+    ``backup_record_errors`` (default ``None`` = empty list)
+    carries per-file errors collected during the walk. Each item
+    is a dict matching Arq.app v8's per-error schema:
 
     - **required**: ``localPath: str``, ``errorMessage: str``,
       ``pathIsDirectory: bool``.
     - **optional** (set when the underlying error maps to an NSError):
       ``errorCode: int``, ``errorDomain: str``, ``severity: int``.
 
-    Pre-T4 the writer emitted ``errorCount: 0`` (a scalar) here. The
-    Arq.app v8 schema is a list-of-objects with the keys above —
-    surfaced by the 2026-05-10 schema diff (T4 in HANDOFF.md). The
-    structured form lets a restore UI surface every failed path,
-    not just a count.
+    Pre-T4 the writer emitted ``errorCount: 0`` (a scalar) here.
+    The Arq.app v8 schema is a list-of-objects with the keys above
+    — surfaced by the 2026-05-10 schema diff (T4 in HANDOFF.md).
     """
     if creation_date is None:
         creation_date = time.time()
-    return {
+    if version is None:
+        version = 101 if node_tree_version is not None else 100
+    rec: Dict[str, Any] = {
         "archived": False,
         "arqVersion": arq_version,
         "backupFolderUUID": backup_folder_uuid,
@@ -187,6 +199,9 @@ def build_backuprecord_dict(
         "version": int(version),
         "volumeName": volume_name,
     }
+    if node_tree_version is not None:
+        rec["nodeTreeVersion"] = int(node_tree_version)
+    return rec
 
 
 def serialize_backuprecord(

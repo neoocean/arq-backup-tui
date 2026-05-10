@@ -145,5 +145,121 @@ class BackupRecordErrorsFieldTests(unittest.TestCase):
         )
 
 
+class NodeTreeVersionFieldTests(unittest.TestCase):
+    """F2 (HANDOFF.md): the backuprecord plist's tree-version
+    coupling.
+
+    Sampled 2026-05-10 against ``/Volumes/arqbackup1`` (352 real
+    records):
+
+    - 333 records have ``version=100`` with ``volumeName`` only
+      (Tree v3 path).
+    - 18 records have ``version=101`` with
+      ``nodeTreeVersion=4`` (Tree v4 path).
+
+    This test pins the writer's emit to that mapping:
+    ``node_tree_version=N`` (when set) implies ``version=101``
+    and emits ``nodeTreeVersion=N``; omitting it keeps the
+    legacy ``version=100`` / no-``nodeTreeVersion`` shape.
+    """
+
+    def _build(self, **kwargs):
+        return build_backuprecord_dict(
+            backup_folder_uuid="FOLDER-UUID",
+            backup_plan_uuid="PLAN-UUID",
+            backup_plan_dict={},
+            root_node=_empty_node(),
+            local_path="/tmp/x",
+            **kwargs,
+        )
+
+    def test_default_emits_v100_no_nodeTreeVersion(self) -> None:
+        rec = self._build()
+        self.assertEqual(rec["version"], 100)
+        self.assertNotIn("nodeTreeVersion", rec)
+
+    def test_node_tree_version_4_implies_v101(self) -> None:
+        rec = self._build(node_tree_version=4)
+        self.assertEqual(rec["version"], 101)
+        self.assertEqual(rec["nodeTreeVersion"], 4)
+
+    def test_explicit_version_overrides_node_tree_version_default(
+        self,
+    ) -> None:
+        # An explicit ``version`` kwarg wins over the
+        # ``node_tree_version``-derived default — useful for
+        # callers writing legacy v100 records with v4 trees
+        # (rare but valid against older Arq destinations).
+        rec = self._build(node_tree_version=4, version=100)
+        self.assertEqual(rec["version"], 100)
+        self.assertEqual(rec["nodeTreeVersion"], 4)
+
+    def test_node_tree_version_int_coerced(self) -> None:
+        # Defensive: make sure callers passing a numeric-looking
+        # value don't end up with ``"4"`` as a string in the plist.
+        rec = self._build(node_tree_version="4")
+        self.assertEqual(rec["nodeTreeVersion"], 4)
+        self.assertIs(type(rec["nodeTreeVersion"]), int)
+
+    def _e2e_record(self, *, tree_version: int):
+        """Build a tiny backup with the given ``tree_version`` and
+        return the parsed backuprecord plist + dest dir for cleanup
+        helpers."""
+        import os
+        import tempfile
+        from pathlib import Path
+        from arq_writer import build_backup
+        from arq_validator.backend import LocalBackend
+        from arq_validator.crypto import decrypt_keyset
+        from arq_validator.layout import keyset_path
+        from arq_reader.decrypt import decrypt_lz4_arqo
+        from arq_writer.backuprecord import parse_backuprecord
+
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        tdp = Path(td.name)
+        src = tdp / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("alpha")
+        dest = tdp / "dest"
+        r = build_backup(
+            src, dest, encryption_password="pw",
+            tree_version=tree_version,
+        )
+        backend = LocalBackend(dest)
+        ks = decrypt_keyset(
+            backend.read_all(keyset_path("/", r.computer_uuid)),
+            "pw",
+        )
+        rel = "/" + str(
+            Path(r.backuprecord_path).resolve()
+            .relative_to(Path(dest).resolve())
+        ).replace(os.sep, "/")
+        return parse_backuprecord(decrypt_lz4_arqo(
+            backend.read_all(rel),
+            ks.encryption_key, ks.hmac_key,
+        ))
+
+    def test_writer_tree_v3_emits_v100_no_nodeTreeVersion(self) -> None:
+        # Legacy Tree v3 path: record version stays at 100 and
+        # ``nodeTreeVersion`` is omitted entirely. Matches the 333
+        # records in the operator's destination that emit
+        # ``version=100`` + ``volumeName`` only.
+        rec = self._e2e_record(tree_version=3)
+        self.assertEqual(rec["version"], 100)
+        self.assertNotIn("nodeTreeVersion", rec)
+
+    def test_writer_tree_v4_emits_v101_with_nodeTreeVersion(self) -> None:
+        # Modern Tree v4 path: record version bumps to 101 and
+        # ``nodeTreeVersion=4`` is emitted alongside ``volumeName``.
+        # This closes the F2 row in
+        # ``docs/COMPAT-VERIFICATION.md`` §2.7's schema diff against
+        # ``/Volumes/arqbackup1`` (where 18/352 records carry this
+        # exact shape).
+        rec = self._e2e_record(tree_version=4)
+        self.assertEqual(rec["version"], 101)
+        self.assertEqual(rec["nodeTreeVersion"], 4)
+
+
 if __name__ == "__main__":
     unittest.main()
