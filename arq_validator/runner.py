@@ -111,6 +111,7 @@ def validate(
     magic_concurrency: int = 4,
     openssl_path: str = "openssl",
     callback: Optional[ProgressCallback] = None,
+    audit_ledger=None,
 ) -> ValidationReport:
     """Run a full validation at ``tier`` against ``backend``.
 
@@ -198,6 +199,7 @@ def validate(
                 max_bytes=audit_max_bytes,
                 openssl_path=openssl_path,
                 callback=callback,
+                ledger=audit_ledger,
             )
 
     except Exception as exc:
