@@ -283,7 +283,29 @@ def serialize_backuprecord(
             f"unknown backuprecord format: {fmt!r}; "
             f"expected 'json' or 'binary-plist'"
         )
-    return json.dumps(record, ensure_ascii=False).encode("utf-8")
+    # Compact separators + Apple-style forward-slash escape match
+    # Arq.app's actual emit byte-for-byte (Strategy F-2 verified
+    # 2026-05-10 against /Volumes/arqbackup1):
+    #
+    # 1. Compact separators (``,`` and ``:`` with NO trailing space).
+    #    Python's default ``json.dumps`` inserts a space after each
+    #    delimiter, which is valid JSON but breaks per-blob byte
+    #    equivalence with Arq.app's emit.
+    # 2. ``/`` escaped as ``\/`` inside string values. Arq.app uses
+    #    Apple's NSJSONSerialization, which emits the forward-slash
+    #    escape (valid JSON, rarely seen elsewhere). Without the
+    #    escape pass, paths like ``\/2DAC24D1.../treepacks/...``
+    #    would land as ``/2DAC24D1.../treepacks/...`` and the byte
+    #    diff would surface inside any ``relativePath`` string.
+    #    The replacement is safe to do globally because ``/`` is
+    #    only a literal character inside JSON string values (it has
+    #    no meaning in keywords / structural tokens).
+    text = json.dumps(
+        record,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("/", r"\/")
+    return text.encode("utf-8")
 
 
 def build_backuprecord_arqo(

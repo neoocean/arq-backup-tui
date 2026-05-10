@@ -219,8 +219,18 @@ def parse_node(reader: BinaryReader, *, tree_version: int):
     # parsing continues to align with subsequent children. Tests in
     # ``tests/integration/test_arq_real_destination_deep.py``
     # exercise both shapes against the real destination.
+    # Tree v4 38-byte trailing block — preserved raw so the
+    # writer can re-emit it verbatim. Bytes 12-15 carry a
+    # per-Node-varying value our RE hasn't fully decoded yet
+    # (looks like a monotonic counter — see Strategy F-1 in
+    # ``docs/COMPAT-VERIFICATION.md``), so a structured
+    # parse-then-resynthesise approach can't reach byte parity
+    # for every real-world Node. Storing the raw bytes is
+    # sufficient for round-trip correctness regardless of
+    # the still-undecoded fields.
+    v4_trailing_block_bytes = b""
     if tree_version >= 4:
-        reader.read_raw(38)
+        v4_trailing_block_bytes = reader.read_raw(38)
 
     common = dict(
         itemSize=item_size,
@@ -240,6 +250,7 @@ def parse_node(reader: BinaryReader, *, tree_version: int):
         computerOSType=computer_os,
         aclBlobLoc=acl_loc,
         xattrsBlobLocs=xattr_locs,
+        v4_trailing_block=v4_trailing_block_bytes,
     )
     if is_tree:
         assert tree_blob_loc is not None

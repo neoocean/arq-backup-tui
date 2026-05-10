@@ -264,9 +264,15 @@ def serialize_xattrs(xattrs: Dict[str, bytes]) -> bytes:
     Empty input returns ``b""`` so the caller can short-circuit
     "no xattrs → no blob".
 
-    Names get a deterministic sort so identical-content nodes
-    produce identical blob_ids — within-run + cross-run dedup
-    relies on this.
+    Names are emitted in the input ``dict``'s **insertion order**,
+    matching Arq.app's emit (sampled 2026-05-10 against
+    ``/Volumes/arqbackup1`` — Arq.app v8 preserves the order
+    ``listxattr`` returned, not an alphabetic sort). The reader's
+    ``deserialize_xattrs`` returns a dict that preserves the
+    on-disk order, so a parse → serialize round-trip is
+    byte-identical (Strategy F-3 verified). Within-run dedup
+    still works because ``capture_xattrs`` reads the OS in a
+    stable order per file.
     """
     import struct
     if not xattrs:
@@ -274,8 +280,7 @@ def serialize_xattrs(xattrs: Dict[str, bytes]) -> bytes:
     out = bytearray()
     out += _XATTR_MAGIC
     out += struct.pack(">Q", len(xattrs))
-    for name in sorted(xattrs):
-        value = xattrs[name]
+    for name, value in xattrs.items():
         name_bytes = name.encode("utf-8")
         out.append(0x01)                          # isPresent
         out += struct.pack(">Q", len(name_bytes))

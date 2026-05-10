@@ -68,6 +68,27 @@ class FileNode:
     computerOSType: int = 1   # 1 = macOS, 2 = Windows
     aclBlobLoc: Optional[BlobLoc] = None
     xattrsBlobLocs: List[BlobLoc] = field(default_factory=list)
+    # Tree v4 38-byte trailing block. Preserved verbatim through
+    # parse so a round-trip ``parse_tree → write_tree`` is binary-
+    # identical to Arq.app v8's emit (Strategy F-1 verified
+    # 2026-05-10 against /Volumes/arqbackup1).
+    #
+    # The block's full structure is only partly understood — sec
+    # and nsec fields plus a ``0x01`` present-flag at byte 16 are
+    # documented in ``docs/REAL-DATA-DISCOVERIES.md`` §7, but
+    # bytes 12-15 carry a per-Node varying value (looks like a
+    # monotonic counter or sequence number from sample inspection)
+    # that doesn't fit a simple semantic mapping. Preserving raw
+    # bytes is therefore safer than re-synthesising structure.
+    #
+    # When the parser observed a non-zero block, ``v4_trailing_block``
+    # holds the exact 38 bytes. When it observed all zeros (the
+    # shape Arq.app uses for files freshly added to a pass),
+    # ``v4_trailing_block`` is ``b"\x00" * 38``. An empty bytes
+    # value means "no parser ran" — the writer's fresh-walk path
+    # then falls back to synthesising the structured form using
+    # ``create_time`` as a best-effort scanned-at proxy.
+    v4_trailing_block: bytes = b""
 
 
 @dataclass
@@ -100,6 +121,8 @@ class TreeNode:
     computerOSType: int = 1
     aclBlobLoc: Optional[BlobLoc] = None
     xattrsBlobLocs: List[BlobLoc] = field(default_factory=list)
+    # See FileNode for trailing-block field semantics.
+    v4_trailing_block: bytes = b""
 
 
 # Convenient union for "either kind of Node". Most APIs accept either

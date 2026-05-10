@@ -156,29 +156,42 @@ def write_node(node: Node, *, tree_version: int = TREE_VERSION) -> bytes:
 def _v4_trailing_block(node: Node) -> bytes:
     """Encode the 38-byte trailing block Tree v4 adds per Node.
 
-    Empirical structure (from sampling 30 real-world nodes — see
-    ``docs/REAL-DATA-DISCOVERIES.md`` §7 and
-    ``arq_reader/parse.py:parse_node``):
+    Two emit modes, in order of precedence:
 
-      bytes  0..7  int64 BE  scanned-at sec   (the backup-pass time)
-      bytes  8..15 int64 BE  scanned-at nsec
-      bytes 16..23 int64 BE  0x00000000_01000000  (present-flag)
-      bytes 24..37 14 zero bytes (reserved)
+    1. **Verbatim re-emit** (round-trip path) — when ``node`` was
+       produced by the parser (``v4_trailing_block`` is exactly 38
+       bytes), the original bytes are returned unchanged. This
+       guarantees byte equivalence for ``parse_tree → write_tree``
+       round-trips against Arq.app v8 destinations regardless of
+       any still-undecoded structure. Strategy F-1 verified
+       100/100 across the operator's destination 2026-05-10.
 
-    The all-zero shape only appears for files freshly created in
-    the latest pass; for anything we're emitting from a fresh walk
-    those conditions essentially never hold, so we always write
-    the structured form. The "scanned-at" timestamp is read from
-    the writer's ``v4_scanned_at_sec`` / ``v4_scanned_at_nsec``
-    attributes if set, else falls back to the node's create_time
-    so the output is deterministic in tests.
+    2. **Fresh-walk synthesis** — when ``v4_trailing_block`` is
+       empty (writer-driven path, no parser intervention),
+       synthesise the structured form with the documented fields:
+
+         bytes  0..7  int64 BE   scanned-at sec
+         bytes  8..15 int64 BE   scanned-at nsec
+         bytes 16..23 int64 BE   present-flag (high byte = 0x01)
+         bytes 24..37 14 zero bytes
+
+       Bytes 12..15 of Arq.app's actual emit carry a per-Node
+       value that varies (looks like a monotonic counter); we
+       can't reproduce it without RE-ing its semantics, so the
+       synthesised form's bytes 12..15 are zero. That's
+       sufficient for any new fresh-walk destination — Arq.app
+       reads it cleanly — but produces a different blob_id than
+       Arq.app would for the same fresh source. For dedup'd
+       incremental backups against an existing destination, the
+       prior-tree code path uses parsed Nodes, which take the
+       verbatim re-emit path above.
     """
+    raw = getattr(node, "v4_trailing_block", b"") or b""
+    if len(raw) == NODE_V4_TRAILING_BLOCK_BYTES:
+        return bytes(raw)
     sec = int(getattr(node, "v4_scanned_at_sec", 0) or 0)
     nsec = int(getattr(node, "v4_scanned_at_nsec", 0) or 0)
     if sec == 0 and nsec == 0:
-        # Fall back to create_time to keep output deterministic
-        # without forcing the caller to plumb a scanned-at value
-        # through every Node construction.
         sec = int(getattr(node, "create_time_sec", 0) or 0)
         nsec = int(getattr(node, "create_time_nsec", 0) or 0)
     out = bytearray()
