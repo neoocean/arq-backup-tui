@@ -261,3 +261,21 @@ def skip_reason() -> Optional[str]:
             "docs/COMPAT-SFTP-TESTING.md)"
         )
     return None
+
+
+def load_dest_password() -> Optional[str]:
+    """Return just the Arq destination encryption password, or ``None``.
+
+    Mirrors :func:`resolve_creds` precedence (``.secrets/`` > ``.env``
+    > ``os.environ``) but doesn't require any SFTP fields. Useful for
+    tools that drive a local destination via
+    :class:`arq_validator.backend.LocalBackend` — those have no network
+    credentials to resolve, just the keyset password.
+    """
+    secrets = _load_from_secrets_dir()
+    pw = secrets.get("dest_password")
+    if pw:
+        return str(pw)
+    _load_dotenv_if_present()
+    pw = os.environ.get("ARQ_TEST_DEST_PASSWORD")
+    return pw or None

@@ -24,8 +24,13 @@ decoded all M cleanly" or a list of anomalies. Pin findings to
 
 Usage::
 
+    # SFTP destination (.secrets/sftp.json + .secrets/dest_password):
     python3 scripts/probe_xattr_blob_bulk.py [--max-walk 1000]
                                               [--json]
+
+    # Local-filesystem destination (e.g. mounted NAS share):
+    python3 scripts/probe_xattr_blob_bulk.py \\
+        --local-root /Volumes/arqbackup1 [--max-walk 1000] [--json]
 """
 
 from __future__ import annotations
@@ -197,16 +202,34 @@ def _classify_one(blob: bytes) -> Dict[str, Any]:
 
 
 def _fetch_blob(backend, blob_loc) -> bytes:
-    """Resolve + return the on-disk bytes for a BlobLoc dataclass."""
-    rel = getattr(blob_loc, "relativePath", "") or ""
+    """Resolve + return the on-disk bytes for a BlobLoc.
+
+    Accepts both shapes the walker collects:
+
+    - dataclass (``FileNode.xattrsBlobLocs`` / ``TreeNode.xattrsBlobLocs``
+      from :func:`arq_reader.parse.parse_tree`) — attribute access.
+    - dict (``BackupRecord.node["xattrsBlobLocs"]`` from
+      :func:`arq_writer.backuprecord.parse_backuprecord`) — key access.
+
+    Treating both uniformly keeps the probe honest: ``getattr`` against
+    a dict silently returns the default, so an attribute-only
+    implementation would emit fake fetch failures for every root-level
+    xattr blob.
+    """
+    if isinstance(blob_loc, dict):
+        rel = blob_loc.get("relativePath") or ""
+        is_packed = bool(blob_loc.get("isPacked"))
+        offset = int(blob_loc.get("offset") or 0)
+        length = int(blob_loc.get("length") or 0)
+    else:
+        rel = getattr(blob_loc, "relativePath", "") or ""
+        is_packed = bool(getattr(blob_loc, "isPacked", False))
+        offset = int(getattr(blob_loc, "offset", 0))
+        length = int(getattr(blob_loc, "length", 0))
     if not rel:
         return b""
-    if getattr(blob_loc, "isPacked", False):
-        return backend.read_range(
-            rel,
-            int(getattr(blob_loc, "offset", 0)),
-            int(getattr(blob_loc, "length", 0)),
-        )
+    if is_packed:
+        return backend.read_range(rel, offset, length)
     return backend.read_all(rel)
 
 
@@ -214,21 +237,48 @@ def _main(argv=None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--max-walk", type=int, default=1000)
     p.add_argument("--json", action="store_true")
+    p.add_argument(
+        "--local-root", metavar="PATH", default=None,
+        help=(
+            "Probe a local-filesystem destination instead of SFTP. "
+            "PATH is the directory containing the <computer-uuid>/ "
+            "subdirectories (e.g. /Volumes/arqbackup1). The Arq "
+            "encryption password is loaded from .secrets/dest_password "
+            "or ARQ_TEST_DEST_PASSWORD; SFTP credentials are not used."
+        ),
+    )
     args = p.parse_args(argv)
 
     try:
         from tests.integration._creds import (
-            resolve_creds, skip_reason,
+            load_dest_password, resolve_creds, skip_reason,
         )
     except ImportError as exc:
         sys.exit(f"can't import creds helper: {exc}")
-    creds = resolve_creds()
-    if creds is None:
-        sys.exit(
-            f"creds unavailable: {skip_reason() or 'no creds'}"
-        )
 
-    backend = _open_backend(creds)
+    if args.local_root:
+        from arq_validator.backend import LocalBackend
+        try:
+            backend = LocalBackend(args.local_root)
+        except (NotADirectoryError, FileNotFoundError) as exc:
+            sys.exit(f"--local-root invalid: {exc}")
+        dest_password = load_dest_password()
+        if not dest_password:
+            sys.exit(
+                "dest_password unavailable: expected "
+                ".secrets/dest_password or ARQ_TEST_DEST_PASSWORD"
+            )
+        cleanup = None
+    else:
+        creds = resolve_creds()
+        if creds is None:
+            sys.exit(
+                f"creds unavailable: {skip_reason() or 'no creds'}"
+            )
+        backend = _open_backend(creds)
+        dest_password = creds.dest_password
+        cleanup = lambda: backend.__exit__(None, None, None)
+
     try:
         from arq_validator import discover_layout
         from arq_validator.crypto import decrypt_keyset
@@ -249,10 +299,10 @@ def _main(argv=None) -> int:
             cu = lay.computer_uuid
             keyset = decrypt_keyset(
                 backend.read_all(keyset_path("/", cu)),
-                creds.dest_password,
+                dest_password,
             )
             xattr_locs = _walk_collect(
-                backend, cu, creds.dest_password,
+                backend, cu, dest_password,
                 max_walk=args.max_walk,
             )
             for node_rel, loc in xattr_locs:
@@ -311,10 +361,11 @@ def _main(argv=None) -> int:
                     print(f"  {a}")
         return 1 if anomalies else 0
     finally:
-        try:
-            backend.__exit__(None, None, None)
-        except Exception:
-            pass
+        if cleanup is not None:
+            try:
+                cleanup()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

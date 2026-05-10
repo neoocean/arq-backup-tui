@@ -23,6 +23,10 @@ their machine.
 
 ## How to run it
 
+Two backend modes are supported.
+
+### A. SFTP destination
+
 Pre-requisite: `.secrets/sftp.json` + `.secrets/dest_password`
 configured (see `docs/COMPAT-SFTP-TESTING.md`).
 
@@ -34,6 +38,25 @@ python3 scripts/probe_xattr_blob_bulk.py --max-walk 1000 --json \
 # Or text summary:
 python3 scripts/probe_xattr_blob_bulk.py --max-walk 1000
 ```
+
+### B. Local-mounted destination (recommended for bulk runs)
+
+When the destination is reachable as a local filesystem path (NAS
+share, USB volume, locally-rsynced copy), `--local-root` skips
+SFTP entirely. Only `.secrets/dest_password` (or
+`ARQ_TEST_DEST_PASSWORD`) is needed; SFTP credentials are not
+read.
+
+```sh
+python3 scripts/probe_xattr_blob_bulk.py \
+    --local-root /Volumes/arqbackup1 \
+    --max-walk 1000 --json \
+    > /tmp/xattr-probe.json
+```
+
+`--local-root PATH` points at the destination root — the directory
+that contains the `<computer-uuid>/` subdirectories, not the
+computer-uuid directory itself.
 
 ## What to look for in the output
 
@@ -106,23 +129,34 @@ smaller `--max-walk` caps:
 | 10  | ~5min | completed; 0 xattr-bearing nodes in scope |
 
 The 10-node run finished cleanly. The "anomalies" reported
-were ARQO-too-short failures on the root nodes' xattr
-fetches — a benign signal that root nodes don't carry xattrs
-on this destination, NOT a format-hypothesis failure. To
-confirm the hypothesis at scale, the operator should rerun
-with `--max-walk 1000+` over a higher-throughput SFTP link
-or a local mount of the destination. The XAttrSetV002 format
-hypothesis remains untouched; we just don't have a 1000-node
-sample yet from THIS operator's destination.
+were ARQO-too-short failures on the root nodes' xattr fetches.
+We initially read these as a benign "root has no xattrs"
+signal; the 2026-05-10 local-mount run below disproved that —
+they were actually the dict-vs-dataclass `_fetch_blob` shape
+bug fixed in this PR. With the bug fixed, root xattrs decode
+correctly when present and are simply skipped (without an
+anomaly entry) when the BlobLoc list is empty.
 
-### Recommended next step for confirmation at scale
+### 2026-05-10 follow-up — local-mount run
 
-Either:
+Ran against the same destination via `--local-root
+/Volumes/arqbackup1` (a locally-mounted NAS share holding the
+real Arq.app v8 output). Two passes:
 
-1. **Local-mount the destination** (rsync the SFTP destination
-   to a local volume one-time, then point the probe at the
-   local path via a `LocalBackend` wrapper). This eliminates
-   the SFTP per-fetch latency that dominated the runs above.
-2. **Run the probe in `--max-walk 100` increments overnight**
-   (cron one fire per hour, accumulating to a 1000-node
-   sample over ~10 hours).
+| --max-walk | wall time | observed | decoded_cleanly | anomalies |
+|-----------:|----------:|---------:|----------------:|----------:|
+| 1,000      | <5s       | 11,874   | 11,874          | 0         |
+| 10,000     | 6m14s     | 21,318   | 21,318          | 0         |
+
+Both runs report `format_distribution: {"XAttrSetV002": N}`
+exclusively. The 10k-walk numbers stabilise on the rare-name
+counts (`com.apple.FinderInfo`: 4,
+`com.apple.timemachine.private.directorycompletiondate`: 3,
+`purgeable-drecs-fixed`: 2), indicating the BFS reached the
+edges of every backup folder's tree.
+
+**Hypothesis status: confirmed at n=21,318.** The single-blob
+RE finding from PR #25 generalises across the full diversity
+of xattrs the operator's macOS sources carry — single-attr
+and multi-attr blobs, `com.apple.*` and un-prefixed names,
+short (11-byte) and long (32-byte) values.
