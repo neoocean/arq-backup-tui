@@ -38,7 +38,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .backuprecord import (
     build_backuprecord_arqo,
@@ -368,6 +368,13 @@ class Backup:
         self.files_written = 0
         self.files_reused = 0          # tree-walk reuse counter
         self.files_with_errors = 0     # stat / readlink / read_bytes failures
+        # Structured per-file errors for the current ``add_folder``
+        # call, emitted into the backuprecord plist's
+        # ``backupRecordErrors`` list (schema sampled 2026-05-10
+        # against /Volumes/arqbackup1 — see HANDOFF.md F1). Reset
+        # at the top of every ``add_folder`` so each backuprecord
+        # carries only its own walk's failures.
+        self.backup_record_errors: List[Dict[str, Any]] = []
         self.trees_written = 0
         self.bytes_plaintext = 0
         self.bytes_on_disk = 0
@@ -475,6 +482,46 @@ class Backup:
             raise BackupCancelled(
                 "backup cancelled by Backup.cancel()"
             )
+
+    def _record_error(
+        self,
+        *,
+        src,
+        exc: BaseException,
+        op: str,
+        path_is_directory: bool,
+    ) -> None:
+        """Append one structured per-file error + bump
+        ``files_with_errors``.
+
+        Mirrors Arq.app v8's per-error schema sampled 2026-05-10
+        against ``/Volumes/arqbackup1`` (HANDOFF.md F1):
+
+        - required: ``localPath: str``, ``errorMessage: str``,
+          ``pathIsDirectory: bool``
+        - optional (set when the underlying exception carries an
+          errno — i.e. an ``OSError`` from a POSIX call):
+          ``errorCode: int``, ``errorDomain: "NSPOSIXErrorDomain"``,
+          ``severity: 3``
+
+        The emitted ``errorMessage`` follows Arq.app's "Failed to
+        <op>: <strerror>" pattern so a restore UI surfacing the
+        list reads naturally.
+        """
+        err: Dict[str, Any] = {
+            "localPath": str(src),
+            "errorMessage": f"Failed to {op}: {exc}",
+            "pathIsDirectory": bool(path_is_directory),
+        }
+        errno = getattr(exc, "errno", None)
+        if errno is not None:
+            err["errorCode"] = int(errno)
+            err["errorDomain"] = "NSPOSIXErrorDomain"
+            # Arq.app's records show severity=3 for POSIX-mapped
+            # errors. Until we have a richer signal, mirror that.
+            err["severity"] = 3
+        self.backup_record_errors.append(err)
+        self.files_with_errors += 1
 
     # ------------------------------------------------------------------
     # Plan-level setup
@@ -882,7 +929,10 @@ class Backup:
                 _emit(self.callback, "file_read_error",
                       path=str(src), error=str(exc),
                       op="readlink")
-                self.files_with_errors += 1
+                self._record_error(
+                    src=src, exc=exc, op="readlink",
+                    path_is_directory=False,
+                )
                 return None
             # lstat so we get the symlink's own metadata, not the
             # target's. Wrap because the symlink can disappear
@@ -893,7 +943,10 @@ class Backup:
                 _emit(self.callback, "file_read_error",
                       path=str(src), error=str(exc),
                       op="lstat")
-                self.files_with_errors += 1
+                self._record_error(
+                    src=src, exc=exc, op="lstat",
+                    path_is_directory=False,
+                )
                 return None
             locs = [self._write_blob(data)]
             uname, gname = _resolve_owner(
@@ -941,7 +994,10 @@ class Backup:
             _emit(self.callback, "file_read_error",
                   path=str(src), error=str(exc),
                   op="read_bytes")
-            self.files_with_errors += 1
+            self._record_error(
+                src=src, exc=exc, op="read_bytes",
+                path_is_directory=False,
+            )
             return None
         # When the Buzhash chunker is enabled, files larger than the
         # min-chunk threshold get split into multiple dataBlobLocs;
@@ -967,7 +1023,10 @@ class Backup:
                   path=str(src), error=str(exc),
                   op="post_read_stat",
                   recovery="defaulted_metadata")
-            self.files_with_errors += 1
+            self._record_error(
+                src=src, exc=exc, op="post_read_stat",
+                path_is_directory=False,
+            )
             # Fabricate a minimal stat-shape so the FileNode
             # constructor below doesn't crash. mac_st_mode=0 +
             # mtime=0 are the sentinels restore can detect.
@@ -1068,7 +1127,10 @@ class Backup:
                   path=str(src), error=str(exc),
                   op="post_walk_stat",
                   recovery="defaulted_metadata")
-            self.files_with_errors += 1
+            self._record_error(
+                src=src, exc=exc, op="post_walk_stat",
+                path_is_directory=True,
+            )
 
             class _DefaultDirStat:
                 st_size = 0
@@ -1134,6 +1196,13 @@ class Backup:
         source = Path(source).resolve()
         folder_uuid = folder_uuid or str(uuid.uuid4()).upper()
         folder_name = folder_name or source.name or "root"
+
+        # Reset per-folder structured-error accumulator so the
+        # backuprecord we emit at the end carries only this walk's
+        # failures (T4 / F1 — see HANDOFF.md). ``files_with_errors``
+        # stays as the cumulative count across folders for the
+        # ``BackupResult`` summary.
+        self.backup_record_errors = []
 
         # Materialize the folder dirs.
         bf_rel = self._cu_path(BACKUPFOLDERS_DIR, folder_uuid)
@@ -1265,6 +1334,15 @@ class Backup:
             local_mount_point=local_mount_point,
             relative_path=rec_relative,
             creation_date=float(creation_date),
+            backup_record_errors=self.backup_record_errors,
+            # F2: when writing Tree v4 records, surface
+            # ``nodeTreeVersion`` and bump the record version to
+            # 101 to match Arq.app v8's emit (HANDOFF.md F2).
+            # Tree v3 records continue to land as version=100
+            # with no nodeTreeVersion, matching the legacy shape.
+            node_tree_version=(
+                self.tree_version if self.tree_version >= 4 else None
+            ),
         )
         arqo = build_backuprecord_arqo(
             record_dict,
