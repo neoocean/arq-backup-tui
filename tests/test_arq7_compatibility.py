@@ -62,6 +62,62 @@ def _make_simple_tree(root: Path) -> None:
     (root / "subdir" / "gamma.txt").write_bytes(b"gamma\n")
 
 
+def _read_sidecar_dict(path: Path, dest: Path, cu: str, password: str) -> dict:
+    """Read a sidecar JSON file, transparently decrypting ARQO
+    envelopes via the destination's keyset. Mirrors what
+    ``arq_validator.sidecar.read_sidecar`` does, but inlined here so
+    the tests aren't testing a helper with the helper they're
+    asserting against."""
+    from arq_reader.decrypt import decrypt_encrypted_object
+    from arq_validator.crypto import decrypt_keyset
+
+    raw = path.read_bytes()
+    if raw[:4] == b"ARQO":
+        keyset = decrypt_keyset(
+            (dest / cu / "encryptedkeyset.dat").read_bytes(), password,
+        )
+        plain = decrypt_encrypted_object(
+            raw, keyset.encryption_key, keyset.hmac_key,
+        )
+    else:
+        plain = raw
+    return json.loads(plain.decode("utf-8"))
+
+
+def _mutate_encrypted_sidecar(
+    path: Path, dest: Path, cu: str, password: str, mutator,
+) -> None:
+    """Decrypt → mutate (caller-supplied) → re-encrypt → write back.
+    Required for tests that perturb a sidecar after a build_backup
+    call, since post-T1 the sidecars on disk are ARQO-wrapped."""
+    from arq_reader.decrypt import decrypt_encrypted_object
+    from arq_validator.crypto import decrypt_keyset
+    from arq_writer.crypto_write import build_encrypted_object
+
+    keyset = decrypt_keyset(
+        (dest / cu / "encryptedkeyset.dat").read_bytes(), password,
+    )
+    raw = path.read_bytes()
+    is_encrypted = raw[:4] == b"ARQO"
+    plain = (
+        decrypt_encrypted_object(
+            raw, keyset.encryption_key, keyset.hmac_key,
+        ) if is_encrypted else raw
+    )
+    data = json.loads(plain.decode("utf-8"))
+    data = mutator(data)
+    new_plain = json.dumps(
+        data, indent=2, ensure_ascii=False,
+    ).encode("utf-8")
+    if is_encrypted:
+        new_raw = build_encrypted_object(
+            new_plain, keyset.encryption_key, keyset.hmac_key,
+        )
+    else:
+        new_raw = new_plain
+    path.write_bytes(new_raw)
+
+
 # ---------------------------------------------------------------------------
 # Scenario coverage matrix
 # ---------------------------------------------------------------------------
@@ -336,10 +392,20 @@ class CheckerCatchesCorruption(unittest.TestCase):
             _make_simple_tree(src)
             dest = tdp / "dest"
             r = build_backup(src, dest, encryption_password="pw")
+            # backupplan.json is ARQO-encrypted (T1) — round-trip
+            # the field deletion through decrypt → mutate → encrypt
+            # so the L4 audit decrypts successfully and then sees
+            # the missing planUUID, not an opaque ARQO parse error.
             plan_path = dest / r.computer_uuid / "backupplan.json"
-            plan = json.loads(plan_path.read_text())
-            del plan["planUUID"]
-            plan_path.write_text(json.dumps(plan, indent=2))
+
+            def _drop_plan_uuid(plan: dict) -> dict:
+                del plan["planUUID"]
+                return plan
+
+            _mutate_encrypted_sidecar(
+                plan_path, dest, r.computer_uuid, "pw",
+                _drop_plan_uuid,
+            )
             backend = LocalBackend(dest)
             report = check_arq7_compatibility(
                 backend, "/", encryption_password="pw",
@@ -389,8 +455,11 @@ class SpecLevelFieldValues(unittest.TestCase):
             _make_simple_tree(src)
             dest = tdp / "dest"
             r = build_backup(src, dest, encryption_password="pw")
-            plan = json.loads(
-                (dest / r.computer_uuid / "backupplan.json").read_text()
+            # backupplan.json is ARQO-encrypted post-T1 — read via
+            # the keyset so we can inspect the structured values.
+            plan = _read_sidecar_dict(
+                dest / r.computer_uuid / "backupplan.json",
+                dest, r.computer_uuid, "pw",
             )
             self.assertEqual(plan["version"], 2)
             self.assertEqual(plan["isEncrypted"], True)
