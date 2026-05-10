@@ -61,6 +61,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Restrict to one computer subtree.",
     )
     compute.add_argument(
+        "--max-records-per-folder", type=int, default=None,
+        metavar="N",
+        help=(
+            "Per backup folder, fingerprint only the latest N "
+            "backuprecords instead of every one. Use against large "
+            "real-world destinations where a full walk is "
+            "intractable (e.g. --max-records-per-folder 1 for a "
+            "latest-only diff). Both sides of a comparison should "
+            "apply the same cap so record_count_diffs stays zero."
+        ),
+    )
+    compute.add_argument(
         "--openssl-path", default="openssl",
     )
     compute.add_argument(
@@ -102,6 +114,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        if (
+            args.max_records_per_folder is not None
+            and args.max_records_per_folder < 1
+        ):
+            print(
+                "error: --max-records-per-folder must be >= 1",
+                file=sys.stderr,
+            )
+            return 2
         password = _resolve_password(args)
         if not password:
             print(
@@ -116,6 +137,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 backend,
                 encryption_password=password,
                 computer_uuid=args.computer_uuid,
+                max_records_per_folder=args.max_records_per_folder,
                 openssl_path=args.openssl_path,
             )
         except Exception as exc:

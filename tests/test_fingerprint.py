@@ -293,6 +293,124 @@ class UuidKeyCollapseTests(unittest.TestCase):
             )
 
 
+class MaxRecordsPerFolderTests(unittest.TestCase):
+    """``compute_shape_fingerprint(max_records_per_folder=N)`` keeps
+    the latest N records per folder. Without it, fingerprinting
+    real-world destinations with hundreds of backuprecords per folder
+    is intractable (HANDOFF.md T5).
+
+    The latest record is the one operators actually care about for
+    a writer-vs-Arq.app comparison, so we cap from the end of
+    ``list_backuprecords`` (which returns chronological order).
+    """
+
+    def _build_with_n_records(self, n: int) -> tuple:
+        # build_backup names backuprecord files by an
+        # ``int(creationDate)`` second-resolution timestamp under a
+        # bucket directory; two runs in the same second overwrite the
+        # same path. To get N distinct records, sleep just over a
+        # second between calls and mutate the source so the content
+        # also differs (catches a future writer change that might
+        # use a non-time-based id). All records land under one
+        # pinned (computer_uuid, folder_uuid) tuple.
+        import time
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        tdp = Path(td.name)
+        src = tdp / "src"
+        src.mkdir()
+        _make_tree(src)
+        dest = tdp / "dest"
+        cu = "13237B8D-BDBF-43DB-B5A9-546EFB3852B5"
+        fu = "5EA84470-463D-4D4E-9085-9203B8E5EA32"
+        for i in range(n):
+            if i > 0:
+                time.sleep(1.05)
+            (src / f"marker-{i}.txt").write_bytes(
+                f"run {i}\n".encode("utf-8"),
+            )
+            build_backup(
+                src, dest, encryption_password="pw",
+                computer_uuid=cu, folder_uuid=fu,
+            )
+        return dest, cu
+
+    def test_no_cap_keeps_all_records(self) -> None:
+        dest, cu = self._build_with_n_records(3)
+        fp = compute_shape_fingerprint(
+            LocalBackend(dest),
+            encryption_password="pw",
+            computer_uuid=cu,
+        )
+        folders = fp["computers"][0]["folders"]
+        self.assertEqual(len(folders), 1)
+        self.assertEqual(len(folders[0]["records"]), 3)
+        self.assertNotIn(
+            "records_truncated_to_latest", folders[0],
+        )
+
+    def test_cap_keeps_only_latest(self) -> None:
+        dest, cu = self._build_with_n_records(3)
+        fp = compute_shape_fingerprint(
+            LocalBackend(dest),
+            encryption_password="pw",
+            computer_uuid=cu,
+            max_records_per_folder=1,
+        )
+        folder = fp["computers"][0]["folders"][0]
+        self.assertEqual(len(folder["records"]), 1)
+        self.assertEqual(
+            folder["records_truncated_to_latest"], 1,
+        )
+        self.assertEqual(
+            folder["records_total_in_destination"], 3,
+        )
+
+    def test_cap_above_total_keeps_all_no_truncation_marker(
+        self,
+    ) -> None:
+        # When the cap >= record count, every record is kept and the
+        # truncation markers stay absent (the operator can tell from
+        # their absence that nothing was dropped).
+        dest, cu = self._build_with_n_records(2)
+        fp = compute_shape_fingerprint(
+            LocalBackend(dest),
+            encryption_password="pw",
+            computer_uuid=cu,
+            max_records_per_folder=10,
+        )
+        folder = fp["computers"][0]["folders"][0]
+        self.assertEqual(len(folder["records"]), 2)
+        self.assertNotIn(
+            "records_truncated_to_latest", folder,
+        )
+
+    def test_capped_runs_diff_cleanly_at_same_cap(self) -> None:
+        # End-to-end: two destinations both fingerprinted at the
+        # same cap should diff cleanly (proving the cap is consistent
+        # — an operator running against /Volumes/arqbackup1 with
+        # --max-records-per-folder 1 won't see spurious record-count
+        # diffs against a synthetic-source fingerprint at the same
+        # cap).
+        dest_a, cu_a = self._build_with_n_records(3)
+        dest_b, cu_b = self._build_with_n_records(3)
+        fp_a = compute_shape_fingerprint(
+            LocalBackend(dest_a),
+            encryption_password="pw",
+            computer_uuid=cu_a,
+            max_records_per_folder=1,
+        )
+        fp_b = compute_shape_fingerprint(
+            LocalBackend(dest_b),
+            encryption_password="pw",
+            computer_uuid=cu_b,
+            max_records_per_folder=1,
+        )
+        diff = diff_fingerprints(fp_a, fp_b)
+        self.assertEqual(diff["record_count_diffs"], [])
+        self.assertTrue(diff["match"])
+
+
 class UnicodeFingerprintTests(unittest.TestCase):
     def test_unicode_paths_appear_verbatim(self) -> None:
         with tempfile.TemporaryDirectory() as td:
