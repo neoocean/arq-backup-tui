@@ -15,7 +15,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, RadioButton, RadioSet
+from textual.widgets import (
+    Button, Checkbox, Input, Label, RadioButton, RadioSet,
+)
 
 from ..state import Destination
 
@@ -95,6 +97,16 @@ class DestinationModal(ModalScreen[Optional[Tuple[Destination, dict]]]):
                 placeholder="~/.ssh/id_ed25519", id="sftp-identity",
             )
 
+            # Optional: persist these SFTP coords to .secrets/sftp.json
+            # so the cron / health-check workflows pick the same
+            # destination up. Off by default — the operator
+            # explicitly opts in. Local destinations don't surface
+            # this checkbox (no SFTP credentials to write).
+            yield Checkbox(
+                "Save SFTP credentials to .secrets/sftp.json (cron use)",
+                value=False, id="save-secrets",
+            )
+
             with Horizontal(id="buttons"):
                 yield Button("Cancel", id="cancel")
                 yield Button("Open", id="submit", variant="primary")
@@ -143,4 +155,27 @@ class DestinationModal(ModalScreen[Optional[Tuple[Destination, dict]]]):
             port=port, path=root, identity_file=identity,
         )
         auth = {"identity_file": identity} if identity else {}
+        # Operator opted in → write the SFTP coords to
+        # .secrets/sftp.json. Best-effort: any IO error surfaces
+        # as a notification but doesn't block the open.
+        try:
+            save = self.query_one("#save-secrets", Checkbox).value
+        except Exception:
+            save = False
+        if save:
+            try:
+                from ..secrets_setup import write_sftp_json
+                out = write_sftp_json(
+                    host=host, user=user, port=port, root=root,
+                    identity_file=identity or None,
+                )
+                self.notify(
+                    f"Wrote {out}",
+                    severity="information",
+                )
+            except OSError as exc:
+                self.notify(
+                    f"Could not save .secrets/sftp.json: {exc}",
+                    severity="warning",
+                )
         self.dismiss((dest, auth))
