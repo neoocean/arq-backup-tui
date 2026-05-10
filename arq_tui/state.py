@@ -258,6 +258,45 @@ class PlanRegistry:
         except FileNotFoundError:
             return False
 
+    def mark_run(
+        self, plan_id: str, *, when_iso: Optional[str] = None,
+    ) -> bool:
+        """Stamp a plan's ``last_run_iso`` to ``when_iso`` (or now,
+        UTC ISO-8601). Returns True if the plan existed + was
+        updated, False if not found.
+
+        Called by the BackupRunScreen when a worker reports
+        finished/failed so HomeScreen's plan list shows a fresh
+        timestamp instead of "never run" forever. Failures are
+        stamped too — operators want "last attempt 2 hours ago,
+        failed" surfaced just as much as a clean success."""
+        if when_iso is None:
+            from datetime import datetime, timezone
+            when_iso = datetime.now(timezone.utc).isoformat(
+                timespec="seconds",
+            )
+        path = self.plans_dir / f"{plan_id}.json"
+        if not path.is_file():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        data["last_run_iso"] = when_iso
+        # Atomic write — same write-tmp + os.replace pattern used
+        # everywhere else so a crash mid-update can't corrupt the
+        # plan file.
+        tmp = path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError:
+            return False
+        return True
+
 
 # ---------------------------------------------------------------------------
 # Recent destinations

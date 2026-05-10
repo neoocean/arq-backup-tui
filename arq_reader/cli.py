@@ -79,6 +79,31 @@ def _build_parser() -> argparse.ArgumentParser:
             "remain (with a 'conflict_renamed' event)."
         ),
     )
+    p_restore.add_argument(
+        "--list-only",
+        action="store_true",
+        help=(
+            "Walk the backuprecord's tree + emit one "
+            "would_restore_file event per file WITHOUT touching "
+            "the destination. Use to verify a --paths filter, "
+            "size a restore, or spot-check a snapshot's contents "
+            "before committing to the I/O. Exits 0 even when no "
+            "files match (the dry-run completed cleanly); the "
+            "JSON summary on stdout has files_listed + "
+            "bytes_would_restore + sample_paths."
+        ),
+    )
+    p_restore.add_argument(
+        "--paths",
+        action="append",
+        default=None,
+        help=(
+            "Restrict the (real or dry-run) restore to source-"
+            "relative POSIX paths, repeatable. A path that names "
+            "a directory recursively includes its subtree. "
+            "Without --paths, the full tree is restored."
+        ),
+    )
 
     for sp in (p, *sub.choices.values()):
         sp.add_argument("--quiet", action="store_true")
@@ -194,6 +219,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if args.command == "restore":
+        # --list-only short-circuits the whole restore path; we
+        # never open the destination, never fetch a file blob,
+        # never write a byte. The dest argument is still
+        # required positionally (so the CLI parses uniformly)
+        # but it's only used to echo back in the JSON summary.
+        if getattr(args, "list_only", False):
+            try:
+                dr = restorer.dry_run_restore(
+                    folder_uuid=args.folder_uuid,
+                    computer_uuid=args.computer_uuid,
+                    paths=getattr(args, "paths", None),
+                    callback=cb,
+                )
+            except Exception as exc:
+                print(
+                    f"error: dry-run failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                return 4
+            out = {
+                "src": str(dr.src),
+                "folder_uuid": dr.folder_uuid,
+                "backuprecord_path": dr.backuprecord_path,
+                "files_listed": dr.files_listed,
+                "dirs_listed": dr.dirs_listed,
+                "bytes_would_restore": dr.bytes_would_restore,
+                "sample_paths": list(dr.sample_paths),
+                "list_only": True,
+            }
+            print(json.dumps(out, indent=2, ensure_ascii=False))
+            return 0
         # Wrap in optional state-file IPC so cron / TUI can monitor.
         if getattr(args, "state_file", None) is not None:
             from arq_tui.runs import RunKind, run_writer_context
@@ -217,6 +274,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         folder_uuid=args.folder_uuid,
                         dest=args.dest,
                         computer_uuid=args.computer_uuid,
+                        paths=getattr(args, "paths", None),
                         callback=cb_with_state,
                     )
                     rw.set_result({
@@ -238,6 +296,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     folder_uuid=args.folder_uuid,
                     dest=args.dest,
                     computer_uuid=args.computer_uuid,
+                    paths=getattr(args, "paths", None),
                     callback=cb,
                 )
             except Exception as exc:
