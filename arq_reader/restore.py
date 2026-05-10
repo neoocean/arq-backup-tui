@@ -89,6 +89,31 @@ class RestoreResult:
 
 
 @dataclass
+class DryRunRestoreResult:
+    """Output of :meth:`Restore.dry_run_restore`.
+
+    No bytes were written to the destination — this is a
+    list-only walk over the backuprecord's tree. Use
+    ``files_listed + bytes_would_restore`` to size a real
+    restore; use ``sample_paths`` (first 10) to spot-check that
+    your ``paths=`` filter resolved the way you expected before
+    committing to the I/O.
+    """
+
+    src: Path
+    folder_uuid: str
+    backuprecord_path: str = ""
+    files_listed: int = 0
+    dirs_listed: int = 0
+    bytes_would_restore: int = 0
+    # First 10 paths the walk would restore — kept short so
+    # the dataclass round-trips cheaply through JSON. Operators
+    # who want the full list can capture the would_restore_file
+    # events from the callback.
+    sample_paths: List[str] = field(default_factory=list)
+
+
+@dataclass
 class _PathFilter:
     """Restrict the restore walk to a fixed list of source-relative
     POSIX paths.
@@ -884,6 +909,139 @@ class Restore:
                 f"{[m.computer_uuid for m in matches]}"
             )
         return matches[0].computer_uuid
+
+    def dry_run_restore(
+        self,
+        *,
+        folder_uuid: str,
+        computer_uuid: Optional[str] = None,
+        backuprecord_path: Optional[str] = None,
+        paths: Optional[List[str]] = None,
+        callback: Optional[ProgressCb] = None,
+    ) -> "DryRunRestoreResult":
+        """Walk the backuprecord's tree + emit one
+        ``would_restore_file`` event per file (and
+        ``would_restore_dir`` per directory) WITHOUT writing
+        anything to disk.
+
+        Operators use this to verify ``paths=`` filtering,
+        confirm a snapshot's contents before committing to a
+        full restore, and answer "how big is this restore?"
+        without paying for the file-blob reads.
+
+        The walk fetches every tree blob (cheap; trees are
+        small) but never fetches a file blob — the per-file
+        ``itemSize`` from the FileNode is used as the
+        authoritative reported size.
+
+        Returns a :class:`DryRunRestoreResult` with
+        ``files_listed`` / ``dirs_listed`` /
+        ``bytes_would_restore`` / sample of the first 10 paths
+        so a CLI can render a one-line summary without holding
+        every event in memory.
+        """
+        if computer_uuid is None:
+            computer_uuid = self._resolve_single_computer(folder_uuid)
+        keyset = self.keyset(computer_uuid)
+        if backuprecord_path is not None:
+            record_path = backuprecord_path
+        else:
+            record_path = find_latest_backuprecord(
+                self.backend, "/", computer_uuid, folder_uuid,
+            )
+        if record_path is None:
+            raise ValueError(
+                f"no backuprecord found for "
+                f"{computer_uuid}/{folder_uuid}"
+            )
+        record_arqo = self.backend.read_all(record_path)
+        record_plain = decrypt_lz4_arqo(
+            record_arqo, keyset.encryption_key, keyset.hmac_key,
+            openssl_path=self.openssl_path,
+        )
+        record = _parse_backuprecord(record_plain)
+        node_dict = record.get("node")
+        if not isinstance(node_dict, dict):
+            raise ValueError(
+                "backuprecord missing or malformed `node` field"
+            )
+        path_filter = _build_path_filter(paths)
+        result = DryRunRestoreResult(
+            src=self.src, folder_uuid=folder_uuid,
+            backuprecord_path=record_path,
+        )
+        _emit(callback, "dry_run_restore_started",
+              path=record_path,
+              computer=computer_uuid, folder=folder_uuid)
+        if node_dict.get("isTree"):
+            tree_loc = self._blobloc_from_dict(node_dict["treeBlobLoc"])
+            self._dry_run_walk_tree(
+                tree_loc, keyset, path_filter,
+                rel_path="", result=result, callback=callback,
+            )
+        else:
+            # Single-file root.
+            if (
+                path_filter is None
+                or path_filter.matches("")
+            ):
+                size = int(node_dict.get("itemSize") or 0)
+                result.files_listed += 1
+                result.bytes_would_restore += size
+                if len(result.sample_paths) < 10:
+                    result.sample_paths.append("")
+                _emit(callback, "would_restore_file",
+                      rel_path="", size=size)
+        _emit(callback, "dry_run_restore_finished",
+              files=result.files_listed,
+              dirs=result.dirs_listed,
+              bytes=result.bytes_would_restore)
+        return result
+
+    def _dry_run_walk_tree(
+        self,
+        tree_loc: BlobLoc,
+        keyset: Keyset,
+        path_filter: "Optional[_PathFilter]",
+        *,
+        rel_path: str,
+        result: "DryRunRestoreResult",
+        callback: Optional[ProgressCb],
+    ) -> None:
+        if path_filter is not None and not path_filter.descend(rel_path):
+            return
+        try:
+            tree_bytes = self._fetch_tree_blob_cached(tree_loc, keyset)
+        except Exception as exc:
+            _emit(callback, "dry_run_tree_error",
+                  rel_path=rel_path, error=str(exc))
+            return
+        tree = parse_tree(tree_bytes)
+        for child in tree.children:
+            child_rel = (
+                f"{rel_path}/{child.name}" if rel_path else child.name
+            )
+            if isinstance(child.node, TreeNode):
+                result.dirs_listed += 1
+                _emit(callback, "would_restore_dir",
+                      rel_path=child_rel)
+                self._dry_run_walk_tree(
+                    child.node.treeBlobLoc, keyset, path_filter,
+                    rel_path=child_rel, result=result, callback=callback,
+                )
+            elif isinstance(child.node, FileNode):
+                if (
+                    path_filter is not None
+                    and not path_filter.matches(child_rel)
+                ):
+                    continue
+                size = int(child.node.itemSize or 0)
+                result.files_listed += 1
+                result.bytes_would_restore += size
+                if len(result.sample_paths) < 10:
+                    result.sample_paths.append(child_rel)
+                _emit(callback, "would_restore_file",
+                      rel_path=child_rel, size=size)
 
     def restore(
         self,

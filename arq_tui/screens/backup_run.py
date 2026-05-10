@@ -256,6 +256,7 @@ class BackupRunScreen(Screen):
                 f"trees={event.result.get('trees_written')} "
                 f"bytes_on_disk={event.result.get('bytes_on_disk')}"
             )
+        self._stamp_plan_last_run()
 
     def on_worker_failed(self, event: WorkerFailed) -> None:
         panel = self.query_one(ProgressPanel)
@@ -267,6 +268,23 @@ class BackupRunScreen(Screen):
             panel.failed = True
             panel.error_message = event.error
             panel.append_log(f"FAILED: {event.error}")
+        # Stamp on failure too — operators want "last attempt
+        # 2 hours ago, failed" surfaced on the plan list, same
+        # as a successful run. The status itself isn't stored
+        # on the plan; that's what runs.json + the activity
+        # screen are for.
+        self._stamp_plan_last_run()
+
+    def _stamp_plan_last_run(self) -> None:
+        """Update the plan's ``last_run_iso`` so HomeScreen's
+        plan row shows a fresh timestamp instead of "never run"
+        forever. Best-effort: any I/O error swallowed because
+        we never want a registry-update hiccup to mask a
+        worker outcome the operator already sees on screen."""
+        try:
+            self.app.plan_registry.mark_run(self.plan.plan_id)
+        except Exception:
+            pass
 
     def action_cancel(self) -> None:
         if self.worker is not None and not (
