@@ -15,8 +15,8 @@ what to do first.
 
 ## Current state (2026-05-10 session end)
 
-- **Main branch:** `bfb9edc` "T1 + T4: ARQO-encrypt sidecars +
-  backupRecordErrors structured field (#49)"
+- **Main branch:** `a1a7d27` "F1 + F2: per-file structured error
+  collection + Tree v4 record shape (#51)"
 - **Recent merge sequence (this session):**
   - #44 Probe — `--local-root` + dict-shape `_fetch_blob` fix
         (P1 unblocker; surfaced a hidden bulk-probe bug while
@@ -34,6 +34,10 @@ what to do first.
   - #49 T1 + T4 — ARQO-encrypt `backupplan.json` + per-folder
         `backupfolder.json`, replace `errorCount: int` with
         `backupRecordErrors: list`.
+  - #50 HANDOFF — record T1–T5 closure + queue F1–F3.
+  - #51 F1 + F2 — per-file structured error collection +
+        backuprecord ``version=101``/``nodeTreeVersion=4``
+        coupling with Tree v4.
 - **CI baseline:** all 4 checks green on every recent PR
   (Python 3.9 + 3.11 + 3.12 + GitGuardian).
 - **P4 sync:** runs at the git-mirror machine after each merge.
@@ -41,17 +45,18 @@ what to do first.
 Quick verification:
 
 ```sh
-git log --oneline -7
-# expected first line: bfb9edc T1 + T4: ARQO-encrypt sidecars...
+git log --oneline -8
+# expected first line: a1a7d27 F1 + F2: per-file structured error...
 
 export ARQ_BACKUP_TUI_DISABLE_NOTIFICATIONS=1 ARQ_TUI_SKIP_DISK_PRECHECK=1
 python3 -m unittest \
     tests.test_sidecar_encryption \
     tests.test_backuprecord_errors \
+    tests.test_walker_safety \
     tests.test_json_configs \
     tests.test_fingerprint \
     tests.test_probe_xattr_blob_bulk
-# 46 tests, all PASS
+# all PASS
 
 python3 scripts/check_doc_links.py
 # scanned 21 markdown files with 349 code-shaped references
@@ -102,59 +107,58 @@ their JSON the way Arq.app v8 does. `read_sidecar` in
 plain-JSON destinations our writer produced before T1 keep parsing
 unchanged.
 
+## All seven post-P3 follow-ups (T1–T5 + F1–F2) — closed
+
+| ID | Title | PR | Status |
+|---|---|---|---|
+| **T1** | ARQO-encrypt `backupplan.json` + per-folder `backupfolder.json` | #49 | ✅ |
+| **T2** | Add 10 missing `backupplan.json` keys | #48 | ✅ |
+| **T3** | Add `s3GlacierIRObjectDirs` to `backupfolders.json` | #48 | ✅ |
+| **T4** | Replace `errorCount: int` with `backupRecordErrors: list` | #49 | ✅ |
+| **T5** | `arq-fingerprint compute --max-records-per-folder N` | #48 | ✅ |
+| **F1** | Per-file structured error collection (5 walk sites) | #51 | ✅ |
+| **F2** | Tree v4 → record `version=101` + `nodeTreeVersion=4` | #51 | ✅ |
+
+After-T1–T5 + F1–F2 schema parity vs `/Volumes/arqbackup1`:
+
+| Sidecar / plist | Status |
+|---|---|
+| `backupconfig.json` | ✅ 11/11 keys |
+| `backupplan.json` | ✅ **47/47 keys** + ARQO-encrypted |
+| `backupfolders.json` | ✅ **6/6 keys** |
+| per-folder `backupfolder.json` | ✅ **8/8 keys** + ARQO-encrypted |
+| backuprecord plist (v101 / Tree v4) | ✅ **20/20 keys** |
+
+Every top-level JSON sidecar AND the backuprecord plist match
+Arq.app v8 schema-for-schema when the writer uses Tree v4.
+Strategy C (writer → arq_restore) is **schema-level unblocked**;
+only byte-level differences (random IVs, salt-based blob_ids,
+content-derived chunker boundaries) remain — and those are
+expected design properties, not compatibility gaps.
+
 ## Remaining for full Strategy C parity
 
-These are the next items to work on if/when the user wants to
-unblock Strategy C (writer → arq_restore) at the byte level:
+### F3 — Full byte-level Strategy A diff (operator GUI required)
 
-### F1 — Per-file structured error collection
-
-T4 fixed the **schema** (``backupRecordErrors: list``) but the
-writer still emits an empty list because per-file errors aren't
-collected during the walk. The writer's existing
-``files_with_errors`` increments at ~5 sites in ``arq_writer/backup.py`` (readlink/lstat/stat
-failures during the source walk). Each site has access to:
-
-- ``path`` (the failing source path)
-- the exception (``OSError`` carrying ``errno``)
-- whether the path is a directory (from the surrounding code)
-
-Convert each ``self.files_with_errors += 1`` site into a
-``self._record_error(path=..., error=exc, pathIsDirectory=...)``
-that appends an Arq.app-shaped dict to a new
-``self.backup_record_errors: list`` and threads it into
-``build_backuprecord_dict(backup_record_errors=...)``. Per-error
-schema (sampled 2026-05-10):
-
-- required: ``localPath: str``, ``errorMessage: str``,
-  ``pathIsDirectory: bool``
-- optional (when ``isinstance(error, OSError) and
-  error.errno is not None``): ``errorCode: errno``,
-  ``errorDomain: "NSPOSIXErrorDomain"``, ``severity: 3``
-
-### F2 — Backuprecord plist field reconciliation
-
-The 2026-05-10 follow-up validation showed our writer emits
-``volumeName`` while Arq.app sometimes emits ``nodeTreeVersion``
-instead (and vice-versa, depending on the folder's Tree
-version). Investigate whether the two fields are mutually
-exclusive across Arq.app's records and align our writer either
-to always emit both or to switch based on ``tree_version``.
-
-### F3 — Full byte-level Strategy A diff
-
-`arq-fingerprint compute --max-records-per-folder 1` (T5) makes
-this tractable now. Procedure (operator side):
+The schema-only diff is now zero. The remaining verification is
+the **byte-level fingerprint diff** against an Arq.app-produced
+destination of the **same source**:
 
 1. Pick a small synthetic source (~10 files / 1 MB).
 2. Back it up via Arq.app GUI to a fresh local destination.
 3. Back up the same source via our writer (``--use-packs
-   --chunker arq_v7_41``) to another fresh destination.
+   --chunker arq_v7_41 --tree-version 4``) to another fresh
+   destination.
 4. ``arq-fingerprint compute --max-records-per-folder 1`` on
-   each.
-5. ``arq-fingerprint compare`` — expect ``match: true`` modulo
-   F1 (errorCount-vs-empty-list — handled by structured
-   collection there) and F2 (volumeName / nodeTreeVersion).
+   each (the ``--max-records-per-folder`` flag landed in T5).
+5. ``arq-fingerprint compare`` — expect ``match: true`` with
+   zero ``chunk_pattern_diffs`` / ``file_shape_diffs`` /
+   ``missing_files_*`` entries.
+
+This is operator-side work because we can't drive Arq.app's GUI
+from here. With the schema-level diffs all closed by T1–T5 + F1
++ F2, F3 is the last remaining check before declaring full
+Strategy C compatibility.
 
 ## Pending — out-of-scope without further operator action
 
