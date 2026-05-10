@@ -158,24 +158,24 @@ class TreeV4TrailingBlockPreservationTests(unittest.TestCase):
         self,
     ) -> None:
         # A node from a fresh writer-side walk has no parsed
-        # bytes, so the synthesis path runs. The synthesised form
-        # has the documented structure (sec/nsec from create_time
-        # + present-flag at byte 16 + 14 reserved zeros) even if
-        # bytes 12..15 don't reproduce Arq.app's per-Node value.
+        # bytes, so the synthesis path runs. Strategy K established
+        # that bytes 0..15 are a backup-engine *scan time*, not a
+        # file-metadata field, so the writer uses an explicit
+        # ``v4_scanned_at_*`` override when provided.
         from arq_writer.serialize import _v4_trailing_block
         node = FileNode(
             itemSize=0,
-            create_time_sec=0x12345678,
-            create_time_nsec=0xABCDEF,
+            v4_scanned_at_sec=0x12345678,
+            v4_scanned_at_nsec=0xABCDEF,
         )
         out = _v4_trailing_block(node)
         self.assertEqual(len(out), 38)
-        # bytes 0..7 = create_time_sec int64 BE
+        # bytes 0..7 = scanned-at sec int64 BE
         self.assertEqual(
             out[0:8],
             (0x12345678).to_bytes(8, "big", signed=True),
         )
-        # bytes 8..15 = create_time_nsec int64 BE
+        # bytes 8..15 = scanned-at nsec int64 BE
         self.assertEqual(
             out[8:16],
             (0xABCDEF).to_bytes(8, "big", signed=True),
@@ -186,6 +186,43 @@ class TreeV4TrailingBlockPreservationTests(unittest.TestCase):
         ))
         # bytes 24..37 = 14 reserved zeros
         self.assertEqual(out[24:], b"\x00" * 14)
+
+    def test_deterministic_fallback_preserves_dedup(self) -> None:
+        # Two emits of the same node must produce byte-identical
+        # trailing blocks — otherwise blob-level dedup breaks.
+        # Strategy K explored a wall-clock fallback that would
+        # match Arq.app's emit semantically (per-Node walk time)
+        # but breaks determinism. The writer uses ``create_time``
+        # instead; this test pins that behaviour.
+        from arq_writer.serialize import _v4_trailing_block
+        node = FileNode(
+            itemSize=42,
+            create_time_sec=0x6644abcd,
+            create_time_nsec=0x12345,
+        )
+        first = _v4_trailing_block(node)
+        second = _v4_trailing_block(node)
+        self.assertEqual(first, second, "fresh-walk fallback must be deterministic")
+        # And the value should mirror create_time when no
+        # explicit v4_scanned_at_* is provided.
+        self.assertEqual(first[0:8], (0x6644abcd).to_bytes(8, "big", signed=True))
+        self.assertEqual(first[8:16], (0x12345).to_bytes(8, "big", signed=True))
+
+    def test_v4_scanned_at_override_takes_precedence(self) -> None:
+        # When the caller has a real scan timestamp (e.g. from a
+        # backup engine that records walk times), setting
+        # ``v4_scanned_at_*`` overrides the create_time fallback.
+        from arq_writer.serialize import _v4_trailing_block
+        node = FileNode(
+            itemSize=0,
+            create_time_sec=0x1111,
+            create_time_nsec=0x2222,
+            v4_scanned_at_sec=0xAAAA,
+            v4_scanned_at_nsec=0xBBBB,
+        )
+        out = _v4_trailing_block(node)
+        self.assertEqual(out[0:8], (0xAAAA).to_bytes(8, "big", signed=True))
+        self.assertEqual(out[8:16], (0xBBBB).to_bytes(8, "big", signed=True))
 
     def test_full_tree_round_trip_byte_identical(self) -> None:
         # End-to-end through write_tree + parse_tree: emit a

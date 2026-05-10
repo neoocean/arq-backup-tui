@@ -711,6 +711,139 @@ round-trip byte equivalence work.
 
 ---
 
+## 5.7 ⭐ Strategy K — Differential fuzz of Tree v4 fresh-walk synthesis
+
+### 5.7.1 What it answers
+
+§5.6 proved ``parse → emit`` is byte-identical for Tree v4
+blobs emitted by Arq.app v8 — i.e. the **round-trip** path.
+The **fresh-walk** path (writer emits a Tree v4 blob from
+scratch, no parser input) was untested because Strategy C /
+``arq_restore`` can't read v4 (the published
+``Arq7Node.m::initWithBufferedInputStream:`` has no
+``theTreeVersion >= 4`` branch — see §4.3). Strategy K closes
+that gap by characterising **how close** our fresh-walk
+synthesis comes to Arq.app's actual v4 emit, byte by byte,
+across thousands of real nodes.
+
+### 5.7.2 Experiment
+
+Sample: a representative v4 BackupRecord on
+``/Volumes/arqbackup1`` (arqVersion ``7.40.1``). Walked
+transitively to collect every reachable v4 sub-tree, sampled
+N=30 with shape stratification. Total **21,519 child Nodes**
+inspected (2026-05-11).
+
+For each Node ``c`` of each sub-tree ``T``:
+
+1. Take its parsed shape (every field except the 38-byte
+   trailing block).
+2. Force ``v4_trailing_block = b""`` to invoke the writer's
+   fresh-walk synthesis path.
+3. Compare the synthesised 38 bytes against the original
+   trailing-block bytes Arq.app emitted, position-by-position.
+
+### 5.7.3 Per-position byte agreement
+
+| Bytes | Field (documented) | Match rate | Behaviour |
+|---|---|---:|---|
+| 0..3 | sec int64 BE — high half | **100%** | Both are 0 (current Unix epoch fits in low 4 bytes) |
+| 4..7 | sec int64 BE — low half | 33–72% | Our fallback (``create_time_sec``) matches when btime==ctime; ``ctime_sec`` alone matches **91.7%** |
+| 8..11 | nsec int64 BE — high half | **100%** | Both 0 (nsec < 2³⁰) |
+| 12..15 | nsec int64 BE — low half | 28–30% | **No file-metadata field reproduces these bytes** — Arq.app's nsec here is a separately-recorded event time |
+| 16..23 | present-flag int64 BE | **100%** | ``0x0000000001000000`` exact |
+| 24..37 | reserved 14 zeros | **100%** | Exact |
+
+### 5.7.4 What bytes 0..15 actually are
+
+Pre-K we hypothesised "bytes 12..15 are a per-Node monotonic
+counter". K disproved this: those bytes are the **low 4 bytes
+of an int64 BE nsec** — plausible nanosecond values in the
+0..10⁹ range (``0x243b5f8e`` = 0.608 sec, ``0x3afa1bd4`` =
+0.989 sec, …) that never match any of the node's
+btime/mtime/ctime nsec. Across the 21,516 non-zero nodes:
+
+| Hypothesis | sec match | nsec match | both match |
+|---|---:|---:|---:|
+| trailing == ctime | 91.7% | 0.0% | 0.0% |
+| trailing == btime (creation_time) | 47.5% | 47.4% | 47.0% |
+| trailing == mtime | 45.6% | 0.0% | 0.0% |
+
+The 47% btime match is exactly the population of nodes where
+``btime == ctime == mtime`` (file created in the same operation
+that backed it up, never modified) — i.e. coincidence. The
+real signal: bytes 0..7 align with ``ctime_sec`` ~92%, but
+bytes 8..15 don't align with any file timestamp.
+
+Sample of a node where the divergence is unmistakable:
+
+```
+data:    trailing[0:8]=1753271053 (≈2025-07-23 12:24:13 UTC)
+         trailing[8:16]= 694195671
+         btime          (1753264467,  312409366)
+         mtime          (1777610748,   97817803)
+         ctime          (1777610748,   97817803)
+```
+
+Trailing sec is 6586 seconds *before* btime_sec — earlier than
+*any* file metadata. The cluster of trailing_sec values
+(``1753271053``, ``1753271057``, ``1753271059``, …) close to
+each other within one BackupRecord points to **a backup-engine
+wall-clock timestamp captured per Node when arq.app walked
+this directory entry**, not a file-metadata field.
+
+### 5.7.5 Writer-side decision
+
+Synthesising the real "scan timestamp" semantically would need
+``time.time_ns()`` at every emit. That matches Arq.app's
+behaviour but **breaks blob-level dedup** (every re-emit of an
+unchanged file produces a new blob_id). Arq.app sidesteps the
+issue with reference reuse — its parent tree at scan T₂ keeps
+pointing at the prior emit's tree blob for an unchanged file
+rather than emitting a new tree blob — but our writer's model
+is content-addressed, so the fallback **must** be a function
+of file metadata only.
+
+The writer therefore uses:
+
+1. Explicit ``v4_scanned_at_sec`` / ``v4_scanned_at_nsec`` if
+   the caller sets them (e.g. an integration test asserting
+   byte equivalence against a known Arq.app emit, or a future
+   scan-loop integration capturing real walk times).
+2. Else ``create_time_sec`` / ``create_time_nsec`` —
+   deterministic, preserves dedup. Documented to differ from
+   Arq.app's emit at bytes 0..15 (∼47% match) by design.
+
+### 5.7.6 Compatibility consequence
+
+| Path | Match against Arq.app emit | Dedup-safe |
+|---|---|:---:|
+| **Round-trip** (§5.6, parse → re-emit) | 100% byte-equal | ✅ |
+| **Fresh-walk** (writer-only, no parser input) | 100% on bytes 0..3, 8..11, 16..37 + 47% on bytes 4..7 & 12..15 | ✅ |
+
+100% of every Node field outside the trailing block matches,
+and 100% of trailing-block bytes 16..37 match. The residual
+~50% gap is concentrated in the 8 bytes that encode Arq.app's
+internal scan timestamp — a value our writer can't reproduce
+without instrumenting Arq.app's exact walk loop. Whether this
+breaks compatibility hinges entirely on whether Arq.app's
+reader **validates** those bytes (vs. reads them as opaque
+state). Strategy I (Arq.app GUI restore of a fresh-walk
+destination) remains the definitive test of that question;
+**patching ``arq_restore`` to handle Tree v4** is the
+autonomous alternative for the byte-equivalence side of the
+same question (see §5.8).
+
+### 5.7.7 Regression test
+
+``tests/test_serialization_round_trip.py``:
+``TreeV4TrailingBlockPreservationTests.test_deterministic_fallback_preserves_dedup``
+pins the determinism contract;
+``test_v4_scanned_at_override_takes_precedence`` pins the
+explicit-override hook.
+
+---
+
 ## 6. ▲ Strategy F — Real backuprecord plist collection
 
 ### 6.1 What it is
