@@ -176,7 +176,10 @@ class WalkerStatRaceFallbackTests(unittest.TestCase):
                     post_read_for_racey["flag"] = True
                 return content
 
-            def patched_stat(self, *, follow_symlinks=True):
+            def patched_stat(self, *args, **kwargs):
+                # Python 3.10+ passes follow_symlinks as a kwarg;
+                # Python 3.9 doesn't. Accept both via *args/**kwargs
+                # so the mock works on both interpreter versions.
                 if (
                     self.name == "racey.txt"
                     and post_read_for_racey["flag"]
@@ -188,7 +191,17 @@ class WalkerStatRaceFallbackTests(unittest.TestCase):
                     raise FileNotFoundError(
                         "simulated source-deleted-mid-walk",
                     )
-                return real_stat(self, follow_symlinks=follow_symlinks)
+                # Forward only kwargs the running Python supports;
+                # on 3.9 forwarding follow_symlinks raises TypeError.
+                if (
+                    sys.version_info >= (3, 10)
+                    and "follow_symlinks" in kwargs
+                ):
+                    return real_stat(
+                        self,
+                        follow_symlinks=kwargs["follow_symlinks"],
+                    )
+                return real_stat(self)
 
             with mock.patch.object(Path, "read_bytes", patched_read), \
                     mock.patch.object(Path, "stat", patched_stat):
