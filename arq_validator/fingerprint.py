@@ -182,6 +182,7 @@ def compute_shape_fingerprint(
     encryption_password: str,
     root: str = "/",
     computer_uuid: Optional[str] = None,
+    max_records_per_folder: Optional[int] = None,
     openssl_path: str = "openssl",
 ) -> Dict[str, Any]:
     """Walk ``backend`` rooted at ``root`` and return a JSON-
@@ -189,6 +190,14 @@ def compute_shape_fingerprint(
 
     The dict is salt-independent: same source + same tool
     settings → identical dict regardless of encryption keys.
+
+    ``max_records_per_folder`` (default ``None`` = walk every record)
+    caps the number of records fingerprinted per backup folder,
+    keeping the latest N. Useful against large operator destinations
+    where a full per-record walk is intractable (e.g. 350+ records ×
+    millions of files): set to ``1`` for a "latest-only" fingerprint.
+    Both sides of any comparison should apply the same cap so
+    record-count diffs stay zero.
     """
     # Local imports to keep module-load deps lean.
     from arq_reader.decrypt import (
@@ -262,6 +271,17 @@ def compute_shape_fingerprint(
             rec_paths = list_backuprecords(
                 backend, root, cu, folder_uuid,
             )
+            # Latest-N cap (T5). list_backuprecords returns paths
+            # in chronological order, so the tail is the freshest.
+            if (
+                max_records_per_folder is not None
+                and len(rec_paths) > max_records_per_folder
+            ):
+                folder["records_truncated_to_latest"] = (
+                    max_records_per_folder
+                )
+                folder["records_total_in_destination"] = len(rec_paths)
+                rec_paths = rec_paths[-max_records_per_folder:]
             for rec_path in rec_paths:
                 folder["records"].append(_record_fingerprint(
                     backend, rec_path, keyset,
