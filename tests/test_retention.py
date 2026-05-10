@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import sys
 import time
 import tempfile
 import unittest
@@ -293,6 +294,26 @@ class PruneAndRestoreTests(unittest.TestCase):
 
 
 class PackedModeRetentionTests(unittest.TestCase):
+    @unittest.skipIf(
+        sys.platform == "darwin",
+        # macOS Sequoia ≥ auto-attaches ``com.apple.provenance`` to
+        # every kernel-observed write with the SAME value across all
+        # files on the machine. Two consequences for this test:
+        #
+        # 1. The xattr blob (one shared blob_id) lives in run-1's
+        #    pack. Run 2 dedups against it (correct), so v2's
+        #    record still references run-1's pack via the xattr.
+        # 2. ``xattr -c`` / ``xattr -d com.apple.provenance`` are
+        #    no-ops on Sequoia — the attribute is kernel-protected.
+        #
+        # ⇒ Pack-1 cannot be GC'd while v2's record exists, so
+        #    the "GC deletes ≥1 pack" assertion can't hold on
+        #    macOS. Linux CI (Python 3.9 + 3.11 + 3.12) covers the
+        #    intended path. Listed under HANDOFF.md "Known
+        #    landmines"; tracked as L2.
+        "com.apple.provenance shared across files prevents per-run "
+        "pack GC on macOS Sequoia; covered by Linux CI matrix.",
+    )
     def test_pack_files_collected_correctly(self) -> None:
         # packed mode: pack files survive only if some referenced
         # BlobLoc points into them.

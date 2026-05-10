@@ -431,6 +431,18 @@ def reuse_file_node_for(
     serializes Trees whose binary differs from run 1 only in the
     owner-name strings → fresh tree blob_id → no dedup at the
     Tree level.
+
+    Also carries over ``xattrsBlobLocs`` and ``aclBlobLoc`` —
+    omitting them was a real correctness bug (a re-run via
+    ``dedup_against_existing`` would silently drop the file's
+    xattrs from the restored copy) AND a dedup-defeating bug
+    (fresh-walk FileNode carries those refs, reused FileNode
+    didn't → different serialized bytes → different tree blob_id).
+    The bug only surfaced on macOS in unit tests because Sequoia ≥
+    auto-attaches ``com.apple.provenance`` to every file the
+    kernel sees written, so test files always have a non-empty
+    xattr blob; Linux test files typically had no xattrs at all
+    so the fields were both empty either way.
     """
     from .backup import _resolve_owner
     uid = int(src_stat.st_uid) if hasattr(src_stat, "st_uid") else 0
@@ -438,6 +450,8 @@ def reuse_file_node_for(
     uname, gname = _resolve_owner(uid, gid)
     return FileNode(
         dataBlobLocs=list(prior.dataBlobLocs),
+        xattrsBlobLocs=list(prior.xattrsBlobLocs or []),
+        aclBlobLoc=prior.aclBlobLoc,
         itemSize=int(prior.itemSize),
         containedFilesCount=1,
         mtime_sec=int(src_stat.st_mtime),
