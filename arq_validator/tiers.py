@@ -76,6 +76,12 @@ class ObjectAuditResult:
     files_fail: int = 0
     files_error: int = 0
     files_skipped: int = 0
+    # Counted separately from ``files_skipped`` (size cap) so an
+    # operator's incremental sweep summary distinguishes "the
+    # blob was huge, we skipped it" from "the ledger says we
+    # already audited this blob recently". See
+    # arq_validator.incremental_audit.AuditLedger.
+    files_skipped_by_ledger: int = 0
     inner_arqos_total: int = 0
     inner_arqos_ok: int = 0
     inner_arqos_fail: int = 0
@@ -519,12 +525,23 @@ def run_full_audit(
     progress_every: int = 100,
     openssl_path: str = "openssl",
     callback: Optional[ProgressCallback] = None,
+    ledger=None,
 ) -> ObjectAuditResult:
     """L2: HMAC-verify every EncryptedObject across all object families.
 
     Soft caps (``max_runtime_sec``, ``max_bytes``) abort the run with
     ``aborted_reason`` populated and partial counters preserved — the
     operator can resume from a fresh invocation later.
+
+    Pass ``ledger`` (an
+    :class:`arq_validator.incremental_audit.AuditLedger`) to enable
+    incremental mode — files whose ``file_name`` (Arq's content-
+    addressed filename) is already in the ledger get skipped + counted
+    in ``files_skipped_by_ledger``, and successful audits register
+    themselves in the ledger so the next sweep can skip them too.
+    The caller is responsible for ``save_ledger(ledger, path)`` after
+    the run; we don't persist on every sweep so a failed sweep can
+    be re-run without losing prior state.
     """
     emit(callback, EventKind.TIER_STARTED, "L2 full audit", tier="L2")
     result = ObjectAuditResult()
@@ -573,11 +590,35 @@ def run_full_audit(
                 abs_path = L.object_path(
                     root, lay.computer_uuid, kind, shard, file_name,
                 )
+                # Incremental skip: if the operator passed a ledger
+                # AND we've successfully audited this exact file_name
+                # before, skip the network read + HMAC.
+                if ledger is not None and ledger.contains(file_name):
+                    result.files_total += 1
+                    result.files_skipped_by_ledger += 1
+                    emit(
+                        callback, EventKind.AUDIT_FILE_SKIPPED,
+                        f"ledger-skipped (audited previously)",
+                        computer=lay.computer_uuid, family=kind,
+                        shard=shard, file_name=file_name,
+                        reason="ledger",
+                    )
+                    continue
+                files_ok_before = result.files_ok
                 _audit_one_file(
                     backend, keyset, lay.computer_uuid,
                     kind, shard, file_name, abs_path,
                     skip_larger_than, result, callback,
                 )
+                # Successful audit → record in the ledger so
+                # subsequent sweeps can skip it. Failures are NOT
+                # ledgered — the operator wants the next sweep to
+                # re-audit them.
+                if (
+                    ledger is not None
+                    and result.files_ok > files_ok_before
+                ):
+                    ledger.record(file_name)
                 if result.files_total % progress_every == 0:
                     emit(
                         callback, EventKind.AUDIT_PROGRESS,
@@ -594,15 +635,22 @@ def run_full_audit(
                     )
         del keyset
 
+    # Bump sweep_count + last_sweep_finished_at on the ledger so the
+    # operator can ``cat`` the file later + see how many sweeps ran.
+    if ledger is not None:
+        ledger.sweep_count += 1
+        ledger.last_sweep_finished_at = time.time()
     emit(
         callback, EventKind.TIER_FINISHED,
         (f"L2 audit finished: {result.files_ok}/{result.files_total} OK, "
-         f"{result.files_fail + result.files_error} fail/err"),
+         f"{result.files_fail + result.files_error} fail/err, "
+         f"{result.files_skipped_by_ledger} ledger-skipped"),
         tier="L2",
         files_total=result.files_total,
         files_ok=result.files_ok,
         files_fail=result.files_fail,
         files_error=result.files_error,
         files_skipped=result.files_skipped,
+        files_skipped_by_ledger=result.files_skipped_by_ledger,
     )
     return result

@@ -48,6 +48,18 @@ from ..workers import (
 )
 
 
+def _fmt_bytes(n: int) -> str:
+    """Operator-facing human size. Matches the units the wizard
+    dry-run preview uses so log lines + notifications read the
+    same."""
+    n = max(0, int(n))
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if n < 1024 or unit == "PB":
+            return f"{n:.1f}{unit}" if unit != "B" else f"{n}{unit}"
+        n = n / 1024
+    return f"{n}B"
+
+
 class BackupRunScreen(Screen):
     """Drive ``arq_writer.Backup`` for a saved Plan.
 
@@ -95,6 +107,12 @@ class BackupRunScreen(Screen):
         self._backend: Any = None
         self._dest: Optional[Destination] = None
         self._mode: str = "subprocess"   # set in on_mount
+        # macOS progress-toast tracker. ``maybe_show_progress``
+        # mutates this state to dedupe per-milestone fires; on
+        # non-macOS hosts the maybe_show_progress call is a cheap
+        # no-op (is_supported() short-circuits).
+        from ..macos_progress import _ProgressState
+        self._mac_progress = _ProgressState(plan_name=plan.name)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -105,6 +123,21 @@ class BackupRunScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        # macOS toast at start (no-op elsewhere).
+        try:
+            from ..macos_progress import show_start
+            show_start(self.plan.name)
+        except Exception:
+            pass
+        # Disk-space precheck (best-effort): estimate destination
+        # bytes vs. free space + warn the operator before kicking
+        # off the worker. SFTP destinations are skipped — the
+        # estimator only handles local paths cheaply, and the SFTP
+        # case typically wants a separate du-over-ssh tool anyway.
+        # Skipped silently when ARQ_TUI_SKIP_DISK_PRECHECK=1 so
+        # tests + non-interactive operators can opt out.
+        self._maybe_run_disk_precheck()
+
         # Multi-destination plans take priority: we always run
         # them in-process via the multi_destination runner so
         # per-destination outcomes are observable in one place.
@@ -133,6 +166,44 @@ class BackupRunScreen(Screen):
             self._start_subprocess_worker()
         else:
             self._start_in_process_worker()
+
+    def _maybe_run_disk_precheck(self) -> None:
+        """Run :func:`arq_writer.disk_estimator.estimate_for_plan`
+        + surface a warning toast if the destination looks too
+        small. Best-effort: any error swallowed (we don't want a
+        flaky stat() to abort a backup the operator wanted)."""
+        if os.environ.get("ARQ_TUI_SKIP_DISK_PRECHECK"):
+            return
+        # SFTP-only destinations: skip — the estimator works on a
+        # local filesystem (shutil.disk_usage). The operator can
+        # add a remote-side check later.
+        if self.plan.destination_kind != "local":
+            return
+        panel = self.query_one(ProgressPanel)
+        try:
+            from arq_writer.disk_estimator import estimate_for_plan
+            est = estimate_for_plan(self.plan)
+        except Exception as exc:
+            # Estimator errors are diagnostic only — log + carry on.
+            panel.append_log(
+                f"disk precheck skipped: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+        msg = (
+            f"disk precheck: source≈{_fmt_bytes(est.source_bytes)} "
+            f"→ est dest≈{_fmt_bytes(est.estimated_dest_bytes)}, "
+            f"free≈{_fmt_bytes(est.free_space_bytes)}"
+        )
+        panel.append_log(msg)
+        if not est.will_fit:
+            self.notify(
+                f"Destination may be undersized: short by "
+                f"{_fmt_bytes(est.shortfall_bytes)}. Backup "
+                f"will still attempt to run.",
+                severity="warning",
+                timeout=8.0,
+            )
 
     def _start_multi_dest_worker(self) -> None:
         """Spawn a MultiDestBackupWorker covering every destination
@@ -244,10 +315,30 @@ class BackupRunScreen(Screen):
     def on_worker_event(self, event: WorkerEvent) -> None:
         panel = self.query_one(ProgressPanel)
         panel.consume_event(event.kind, event.payload)
+        # macOS-only: fire a Notification Center toast at every
+        # ~10% milestone so an operator with the TUI in a hidden
+        # tab still sees forward progress. Cheap no-op on Linux /
+        # other hosts. ProgressPanel exposes plaintext + total
+        # under names that don't depend on a "scope already set"
+        # — both default to 0 until the first byte_written / scope
+        # event lands, at which point this fires from the next
+        # event onward.
+        bd = getattr(panel, "bytes_plaintext", 0)
+        bt = getattr(panel, "total_bytes", 0)
+        if bd and bt:
+            try:
+                from ..macos_progress import maybe_show_progress
+                maybe_show_progress(
+                    self._mac_progress,
+                    bytes_done=int(bd), bytes_total=int(bt),
+                )
+            except Exception:
+                pass
 
     def on_worker_finished(self, event: WorkerFinished) -> None:
         panel = self.query_one(ProgressPanel)
         panel.finished = True
+        summary = ""
         if isinstance(event.result, dict):
             panel.append_log(
                 f"Backup finished: "
@@ -256,6 +347,14 @@ class BackupRunScreen(Screen):
                 f"trees={event.result.get('trees_written')} "
                 f"bytes_on_disk={event.result.get('bytes_on_disk')}"
             )
+            summary = (
+                f"{event.result.get('files_written') or 0} written"
+            )
+        try:
+            from ..macos_progress import show_complete
+            show_complete(self.plan.name, ok=True, summary=summary)
+        except Exception:
+            pass
         self._stamp_plan_last_run()
 
     def on_worker_failed(self, event: WorkerFailed) -> None:
@@ -268,6 +367,14 @@ class BackupRunScreen(Screen):
             panel.failed = True
             panel.error_message = event.error
             panel.append_log(f"FAILED: {event.error}")
+        try:
+            from ..macos_progress import show_complete
+            show_complete(
+                self.plan.name, ok=False,
+                summary=event.error[:80],
+            )
+        except Exception:
+            pass
         # Stamp on failure too — operators want "last attempt
         # 2 hours ago, failed" surfaced on the plan list, same
         # as a successful run. The status itself isn't stored
