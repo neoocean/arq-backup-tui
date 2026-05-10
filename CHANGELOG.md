@@ -6,6 +6,10 @@ Auto-generated from the git log by `scripts/build_changelog.py`. Each entry show
 
 ### Features
 
+- Group 9: final polish — H1+H3+H4+H5+sidebar tracking+A1-(b) [0ad9ebc](https://github.com/neoocean/arq-backup-tui/commit/0ad9ebc)
+- Group 8: cross-snapshot dedup (E2) + incremental audit ledger (E3) + crypto property tests (G3) [0d59afc](https://github.com/neoocean/arq-backup-tui/commit/0d59afc)
+- Group 7: notifications (F2) + disk estimator (F3) + macOS progress UI (F5) [57e3b9b](https://github.com/neoocean/arq-backup-tui/commit/57e3b9b)
+- Group 6: D9 — CHANGELOG.md auto-generation from git history [76612ca](https://github.com/neoocean/arq-backup-tui/commit/76612ca)
 - Group 4: restore conflict resolution (E6) + backup safety scenario tests (G2) [e358159](https://github.com/neoocean/arq-backup-tui/commit/e358159)
 - Group 3: multi-dest cancel + subprocess pause/resume precision [309707f](https://github.com/neoocean/arq-backup-tui/commit/309707f)
 - Group 2: --debug logging (F4) + .secrets/ wizard helper (F1) [3102808](https://github.com/neoocean/arq-backup-tui/commit/3102808)
@@ -26,6 +30,7 @@ Auto-generated from the git log by `scripts/build_changelog.py`. Each entry show
 
 ### Fixes
 
+- Fix CI: skip git-driver smoke test on shallow clones [0bf9125](https://github.com/neoocean/arq-backup-tui/commit/0bf9125)
 - Fix CI: skip race-during-walk test on Python 3.9 (pathlib differs) [55292f9](https://github.com/neoocean/arq-backup-tui/commit/55292f9)
 - Fix CI: SchedulingStagedPlan tests need a running App on Python 3.9 [96f065b](https://github.com/neoocean/arq-backup-tui/commit/96f065b)
 - Fix all 14 stale doc references found by D1's checker + wire it into CI [a352920](https://github.com/neoocean/arq-backup-tui/commit/a352920)
@@ -49,11 +54,18 @@ Auto-generated from the git log by `scripts/build_changelog.py`. Each entry show
 
 ### Tests
 
+- Walker safety test: Python 3.9 compat for stat() mock signature [98d64c8](https://github.com/neoocean/arq-backup-tui/commit/98d64c8)
 - Deflake macho-finder tests by seeding the planted T table [8ab01b0](https://github.com/neoocean/arq-backup-tui/commit/8ab01b0)
 - Make tests discoverable via 'unittest discover -s tests' [e2760dd](https://github.com/neoocean/arq-backup-tui/commit/e2760dd)
 
 ### Internal
 
+- C1 Mach-O RE: resumed against operator's local Arq.app v8 [dc1a9d9](https://github.com/neoocean/arq-backup-tui/commit/dc1a9d9)
+- PriorTreeIndex: bound _tree_cache via LRU eviction [7a9b939](https://github.com/neoocean/arq-backup-tui/commit/7a9b939)
+- Validator record-tier: incremental_audit ledger integration [e9782cf](https://github.com/neoocean/arq-backup-tui/commit/e9782cf)
+- Restore --list-only dry-run + Plan.last_run_iso stamping [e13405e](https://github.com/neoocean/arq-backup-tui/commit/e13405e)
+- Walker safety: surface OSError as events instead of silent corruption [469eedb](https://github.com/neoocean/arq-backup-tui/commit/469eedb)
+- Wire-up bundle 2: E3+F1+F2+F3+F5+Sidebar tracking integrations [eb32827](https://github.com/neoocean/arq-backup-tui/commit/eb32827)
 - Wire up four completed-but-unreachable modules (G1-b + A4-b + B9-c + H2) [d2e7132](https://github.com/neoocean/arq-backup-tui/commit/d2e7132)
 - Loosen pyright config: demote pre-existing dict-spread / dynamic-dispatch errors to warnings [cb3e8da](https://github.com/neoocean/arq-backup-tui/commit/cb3e8da)
 - B8+B9+D1+D2+D3+D4: TUI sidebar, uid/gid restore, doc link checker, coverage, API docs, nightly CI [e306f48](https://github.com/neoocean/arq-backup-tui/commit/e306f48)

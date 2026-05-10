@@ -91,6 +91,14 @@ The 4 tiers:
 - **L1a** (`quick`): sample sweep of ARQO magic bytes (default 5%)
 - **L1b** (`deep`): keyset decryption + HMAC of the latest backuprecord per backup folder
 - **L2** (`audit`): HMAC of every EncryptedObject (+ resumable audit-drip mode)
+- **`record`**: walk every BlobLoc reachable from one backuprecord (catches missing/corrupt deep blobs that L0–L2 don't)
+
+**Incremental audit ledger** (`audit` + `record` tiers): pass `--incremental`
+to skip blobs already confirmed in a per-destination ledger; pass
+`--ledger-prune-days N` to drop entries older than N days so a quietly-bad
+blob eventually gets re-audited. Ledger lives at
+`~/.local/state/arq-backup-tui/audit-ledgers/<target>.json`. See
+`arq_validator/incremental_audit.py`.
 
 ### Restore (reader)
 
@@ -102,6 +110,23 @@ python -m arq_reader restore /Volumes/arqbackup1 \
 
 A specific historical record / specific path / specific source folder can
 each be designated. Read is supported for Arq 5/6/7 alike.
+
+**Dry-run preview** (`--list-only`): walk the backuprecord's tree + emit
+`would_restore_file` events without touching the destination. Use to
+verify a `--paths` filter, size a restore, or spot-check a snapshot's
+contents before paying the I/O cost. The dest argument is still
+positional but unused in dry-run mode.
+
+```sh
+python -m arq_reader restore /Volumes/arqbackup1 \
+    --password "$ARQ_PW" \
+    --list-only --paths Documents/notes \
+    <folder-uuid> /tmp/dummy
+```
+
+**Conflict policy** (`--on-conflict`): choose `overwrite` (default,
+silent), `skip` (drop restored bytes + emit `conflict_skipped`), or
+`rename` (write to `name.restored-N` so both versions remain).
 
 ### Writing (writer)
 

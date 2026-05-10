@@ -482,6 +482,23 @@ summarized below.
 | --- | --- | --- |
 | Shape fingerprint helpers | #7 | `tests/test_fingerprint.py` (salt-independent structural comparison) |
 | Real Arq.app SFTP integration test harness | #9 | `tests/integration/`, `.env.example`, `docs/COMPAT-SFTP-TESTING.md` |
+| Arq.app v8 Mach-O RE confirms Tree v4 + Node init signatures | #41 | `docs/C1-MACHO-RE-PLAN.md` §"Findings (2026-05-10 RE session)", `tests/test_arq_app_tree_version_pin.py` |
+
+### 9.5 Operational hardening (PRs #36–#41)
+
+The following six PRs landed after the 9-group autonomous chain
+(#28–#35) closed; together they connect previously-built modules to
+their actual call sites and harden the walker against silent
+corruption.
+
+| PR | Feature | Location |
+| --- | --- | --- |
+| #36 | Wire-up bundle 2: AuditLedger → `run_full_audit`, `notify_run_finished` → `RunWriter.__exit__`, `estimate_for_plan` → `BackupRunScreen` precheck, `macos_progress` toasts → BackupRun lifecycle, `secrets_setup` → DestinationModal checkbox, sidebar `section_for_screen` helper | `arq_tui/runs.py:347`, `arq_tui/screens/backup_run.py:170`, `arq_tui/widgets/destination_modal.py`, `arq_validator/tiers.py:_audit_one_file`, `arq_validator/cli.py` (`--incremental`, `--ledger-path`) |
+| #37 | Walker safety: silent 0-byte corruption → explicit `file_read_error` / `file_stat_error` events + `Backup.files_with_errors` counter + `BackupResult.files_with_errors` field | `arq_writer/backup.py:_walk_file`, `arq_writer/backup.py:BackupResult`, `tests/test_walker_safety.py` |
+| #38 | Restore `--list-only` dry-run (`Restore.dry_run_restore` + `DryRunRestoreResult`) + `PlanRegistry.mark_run` stamping last_run_iso on worker finish/fail | `arq_reader/restore.py`, `arq_reader/cli.py`, `arq_tui/state.py:PlanRegistry`, `arq_tui/screens/backup_run.py:_stamp_plan_last_run` |
+| #39 | Validator record-tier ledger integration: `validate_record(ledger=…)` + `_check_one_loc` short-circuit on `ledger.contains(blob_id)` + `--ledger-prune-days N` flag | `arq_validator/record_validator.py`, `arq_validator/cli.py` |
+| #40 | `PriorTreeIndex._tree_cache` LRU-bounded (default 1024 trees, `max_cache_trees=` ctor kwarg, `ARQ_PRIOR_TREE_CACHE_MAX` env override). 100k-tree destinations: ~100× memory reduction. | `arq_writer/prior_tree.py`, `tests/test_prior_tree_cache_bound.py` |
+| #41 | C1 Mach-O RE findings against operator's Arq.app v8: `nodeTreeVersion = 4` confirmed hard-coded in `-[BackupRecord init]`; `scannedAt` is NOT a Node property (38-byte trailing block is serializer-only metadata). | `docs/C1-MACHO-RE-PLAN.md`, `tests/test_arq_app_tree_version_pin.py` |
 
 ## 10. Future work (currently unimplemented)
 

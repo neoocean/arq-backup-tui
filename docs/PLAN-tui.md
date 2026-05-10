@@ -548,7 +548,32 @@ At this point the user can **create a new backup + execute**.
 - Keyring integration (optional)
 - Empty-state messages, loading spinners, and other micro-UX
 
-**Total estimate: 8–9 days**.
+### M7 — Advanced features (subsequently shipped)
+
+Originally not in the M1–M6 plan, the following landed in PRs
+following the M-series:
+
+- `MaintenanceScreen` (`[m]` from backup-set browser): retention apply
+  + dry-run toggle, blob GC toggle, password rotation
+- `RunsMonitorScreen` (`[a]ctivity` / `:activity`): passively watches
+  state files written by CLI / cron / TUI processes
+- Plan editing on `[e]`: PlanWizardScreen pre-populated with existing
+  plan; saves overwrite same `plan_id`
+- Slash-command console (quake-style slide-down): `:browse`, `:activity`,
+  `:validate`, `:plan`, …
+- `Sidebar` widget with `section_for_screen()` helper: Arq.app-style
+  left rail with active-section highlight in lockstep with the open screen
+- `SchedulingScreen`: install/remove cron + launchd entries for plans
+  + auto-gc schedule for finished-runs cleanup
+- `BackupRunScreen` integrations (PR #36): disk-precheck on mount,
+  macOS Notification Center toasts at start / 10% milestones / completion,
+  `_stamp_plan_last_run` on worker finish/fail
+- `DestinationModal` "Save SFTP credentials to .secrets/sftp.json"
+  checkbox (PR #36): one-click sync of typed credentials so cron
+  workflows can reuse them
+
+**Total estimate: 8–9 days for M1–M6.** M7 features were added
+incrementally across ~30 subsequent PRs.
 
 ## 9. Test strategy
 

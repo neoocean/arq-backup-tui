@@ -134,16 +134,39 @@ the report.
 
 ## Limits of this verification
 
-- **No live Arq.app round-trip**: the checker validates
+- **No live Arq.app round-trip in CI**: the checker validates
   conformance to the documented format, not behavioral
   compatibility with a specific Arq.app build. A
   byte-for-byte-conforming destination should be acceptable to
-  Arq.app, but this project doesn't bundle Arq.app to prove it.
+  Arq.app, but CI does not run Arq.app to prove it. (The operator
+  has done a static Mach-O RE pass against Arq.app v8 confirming
+  the Tree v4 emit choice — see below.)
 - **Sampling for ID2 / A1**: standalone-object checks sample up
   to 32 blobs per run; full-suite verification is the L2 audit
   in `arq_validator.tiers.run_full_audit`, which HMACs every object.
+  An incremental ledger
+  (`arq_validator.incremental_audit.AuditLedger`) lets sweeps after
+  the first skip already-confirmed blob_ids, surfaced via
+  `--incremental` on both audit + record tiers (PRs #36, #39).
 - **No cryptographic guarantees beyond what the checker tests**:
   e.g. PBKDF2 iteration count is asserted indirectly by C3
   (decryption succeeds with the same iteration count the writer
   emits). A future revision should pin the iteration count
   explicitly.
+
+## Operator-side cross-checks against Arq.app
+
+The operator has independently verified two binary-level
+invariants by inspecting their installed Arq.app v8 (see
+`docs/C1-MACHO-RE-PLAN.md` §"Findings (2026-05-10 RE session)"):
+
+- **`nodeTreeVersion = 4` is hard-coded** in `-[BackupRecord init]`
+  (`movl $0x4, 0x1c(%rax)`). Confirms our writer's
+  `TREE_VERSION_V4_TRAILING_BLOCK = 4` matches Arq.app v8's emit
+  default. Pinned via `tests/test_arq_app_tree_version_pin.py`.
+- **`scannedAt` / `lastVerifiedAt` is NOT a stored Node property**
+  on either `initWithDataBlobLocs:` or `initWithTreeBlobLoc:`.
+  This means the 38-byte trailing block in Tree v4 is
+  serializer-only metadata (writer-side data not propagated back
+  into a Node attribute on read) — our reader's "treat as opaque"
+  approach is correct.
