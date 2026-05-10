@@ -119,6 +119,13 @@ def build_folder_plan(
         "relativePath": relative_path,
         "skipDuringBackup": False,
         "skipIfNotMounted": False,
+        # Time Machine excludes — Arq.app v8 honours
+        # ``com.apple.metadata:com_apple_backup_excludeItem`` xattr
+        # by default; set ``skipTMExcludes=True`` to override and
+        # back up TM-excluded paths anyway. Default mirrors Arq.app
+        # v8 (False = obey TM excludes). Sampled 2026-05-10 against
+        # ``/Volumes/arqbackup1`` (HANDOFF.md GAP-A).
+        "skipTMExcludes": False,
         "useDiskIdentifier": False,
         "wildcardExcludes": [],
     }

@@ -62,6 +62,55 @@ class BackupFoldersIndexTests(unittest.TestCase):
             self.assertEqual(out[k], [], msg=k)
 
 
+class FolderPlanArqAppV8KeysTests(unittest.TestCase):
+    """``build_folder_plan`` emits every key Arq.app v8 emits in
+    ``backupFolderPlansByUUID``'s value dict.
+
+    Sampled 2026-05-10 against ``/Volumes/arqbackup1`` (HANDOFF.md
+    GAP-A): real folder plans carry a 16-key set; pre-fix our
+    writer's emit was 15. The missing key — ``skipTMExcludes`` —
+    is the macOS Time Machine exclude-xattr override toggle.
+    """
+
+    EXPECTED_KEYS = frozenset({
+        "allDrives",
+        "backupFolderUUID",
+        "blobStorageClass",
+        "diskIdentifier",
+        "excludedDrives",
+        "ignoredRelativePaths",
+        "localMountPoint",
+        "localPath",
+        "name",
+        "regexExcludes",
+        "relativePath",
+        "skipDuringBackup",
+        "skipIfNotMounted",
+        "skipTMExcludes",
+        "useDiskIdentifier",
+        "wildcardExcludes",
+    })
+
+    def _build(self) -> dict:
+        return build_folder_plan(
+            folder_uuid="FOLDER-UUID",
+            local_path="/some/path",
+            name="some-folder",
+        )
+
+    def test_emits_all_sixteen_arq_app_v8_keys(self) -> None:
+        plan = self._build()
+        self.assertEqual(set(plan.keys()), self.EXPECTED_KEYS)
+
+    def test_includes_skipTMExcludes(self) -> None:
+        # Regression for the 2026-05-10 schema diff: Arq.app v8
+        # emits this as ``False`` by default (obey TM excludes).
+        plan = self._build()
+        self.assertIn("skipTMExcludes", plan)
+        self.assertEqual(plan["skipTMExcludes"], False)
+        self.assertIs(type(plan["skipTMExcludes"]), bool)
+
+
 class BackupPlanArqAppV8KeysTests(unittest.TestCase):
     """``build_backupplan`` emits every key Arq.app v8 emits.
 
