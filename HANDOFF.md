@@ -15,8 +15,8 @@ what to do first.
 
 ## Current state (2026-05-10 session end)
 
-- **Main branch:** `50bdb35` "Fingerprint: collapse UUID-keyed
-  maps + log P3 findings (#46)"
+- **Main branch:** `bfb9edc` "T1 + T4: ARQO-encrypt sidecars +
+  backupRecordErrors structured field (#49)"
 - **Recent merge sequence (this session):**
   - #44 Probe — `--local-root` + dict-shape `_fetch_blob` fix
         (P1 unblocker; surfaced a hidden bulk-probe bug while
@@ -27,6 +27,13 @@ what to do first.
   - #46 Fingerprint — collapse UUID-keyed maps + log P3 findings
         under Strategy A §2.7 (fixes a salt-independence bug
         surfaced by the P3 schema-level diff).
+  - #47 HANDOFF — record P1–P4 closure + writer-side roadmap.
+  - #48 T2 + T3 + T5 — `backupplan.json` 10 missing keys,
+        `backupfolders.json` `s3GlacierIRObjectDirs`,
+        `arq-fingerprint compute --max-records-per-folder N`.
+  - #49 T1 + T4 — ARQO-encrypt `backupplan.json` + per-folder
+        `backupfolder.json`, replace `errorCount: int` with
+        `backupRecordErrors: list`.
 - **CI baseline:** all 4 checks green on every recent PR
   (Python 3.9 + 3.11 + 3.12 + GitGuardian).
 - **P4 sync:** runs at the git-mirror machine after each merge.
@@ -34,12 +41,17 @@ what to do first.
 Quick verification:
 
 ```sh
-git log --oneline -5
-# expected first line: 50bdb35 Fingerprint: collapse UUID-keyed maps...
+git log --oneline -7
+# expected first line: bfb9edc T1 + T4: ARQO-encrypt sidecars...
 
 export ARQ_BACKUP_TUI_DISABLE_NOTIFICATIONS=1 ARQ_TUI_SKIP_DISK_PRECHECK=1
-python3 -m unittest tests.test_fingerprint tests.test_probe_xattr_blob_bulk
-# 20 tests, all PASS in <2s
+python3 -m unittest \
+    tests.test_sidecar_encryption \
+    tests.test_backuprecord_errors \
+    tests.test_json_configs \
+    tests.test_fingerprint \
+    tests.test_probe_xattr_blob_bulk
+# 46 tests, all PASS
 
 python3 scripts/check_doc_links.py
 # scanned 21 markdown files with 349 code-shaped references
@@ -61,78 +73,88 @@ PRs above; concise summary:
 | **P3** Fingerprint diff | Schema-level diff completed (full per-record diff intractable at this scale); 5 incompatibilities + 1 fingerprint module bug surfaced; bug fixed. | #46, `docs/COMPAT-VERIFICATION.md` §2.7 |
 | **P4** Incremental ledger smoke | Pass-1 ledger of 2,522 blobs created → pass-2 reports `files_skipped_by_ledger: 2,522` exactly; `files_fail: 0`, `inner_arqos_ok: 53,507/53,507`. | (no PR — operational verification only) |
 
-## Pending — writer-side compatibility fixes from P3 §2.7.3
+## All five P3 follow-ups (T1–T5) — closed in this session
 
-Each is small, independent, has a clear before/after in `docs/COMPAT-VERIFICATION.md`, and ships as a separate PR with a regression test. Together they're the work needed to unblock Strategy C (writer → arq_restore).
+The 2026-05-10 schema diff surfaced five writer-side compatibility
+gaps. All are now landed:
 
-### T1 — ARQO-encrypt sidecar JSON
+| ID | Title | PR | Status |
+|---|---|---|---|
+| **T1** | ARQO-encrypt `backupplan.json` + per-folder `backupfolder.json` | #49 | ✅ |
+| **T2** | Add 10 missing `backupplan.json` keys | #48 | ✅ |
+| **T3** | Add `s3GlacierIRObjectDirs` to `backupfolders.json` | #48 | ✅ |
+| **T4** | Replace `errorCount: int` with `backupRecordErrors: list` | #49 | ✅ |
+| **T5** | `arq-fingerprint compute --max-records-per-folder N` | #48 | ✅ |
 
-`backupplan.json` and per-folder `backupfolder.json` must be wrapped in an `ARQO` envelope on write. Arq.app v8 does this; our writer emits plain JSON. The decrypt side already exists (`arq_reader.decrypt.decrypt_encrypted_object`). Note: the inner payload is **plain UTF-8 JSON, NOT LZ4-compressed** — distinct from the `decrypt_lz4_arqo` path used for tree blobs.
+After-T1–T5 schema diff against `/Volumes/arqbackup1`:
 
-```sh
-# To validate the discovery for yourself:
-python3 -c "
-import os, sys; sys.path.insert(0, '.')
-from arq_validator.backend import LocalBackend
-from arq_validator.crypto import decrypt_keyset
-from arq_validator.layout import keyset_path
-from arq_reader.decrypt import decrypt_encrypted_object
-from tests.integration._creds import load_dest_password
-b = LocalBackend('/Volumes/arqbackup1')
-cu = '2DAC24D1-DA89-46C4-8B26-DE7A4D1DE019'
-ks = decrypt_keyset(b.read_all(keyset_path('/', cu)), load_dest_password())
-blob = b.read_all(f'/{cu}/backupplan.json')
-print('magic:', blob[:4])  # b'ARQO'
-print('decrypted head:', decrypt_encrypted_object(blob, ks.encryption_key, ks.hmac_key)[:60])
-"
-```
+| Sidecar / plist | Before T-series | After T-series |
+|---|---|---|
+| `backupconfig.json` | 11/11 keys match | ✅ 11/11 |
+| `backupplan.json` | 37/47 keys match (10 missing) | ✅ **47/47** |
+| `backupfolders.json` | 5/6 keys match (1 missing) | ✅ **6/6** |
+| per-folder `backupfolder.json` | 8/8 keys match (but plain) | ✅ **8/8** + ARQO-encrypted |
+| backuprecord plist | 18/19 keys match (`errorCount` ↔ `backupRecordErrors`) | 18/19 (`nodeTreeVersion` / `volumeName` differ per folder Tree v3 vs v4) |
 
-### T2 — Add 10 missing `backupplan.json` keys
+`backupplan.json` and per-folder `backupfolder.json` now ARQO-wrap
+their JSON the way Arq.app v8 does. `read_sidecar` in
+`arq_validator/sidecar.py` auto-detects the envelope so older
+plain-JSON destinations our writer produced before T1 keep parsing
+unchanged.
 
-Compared to Arq.app v8, our writer's plan template omits:
-`backupFolderPlanMountPointsAreInitialized`,
-`backupSetIsInitialized`, `budgetGB`, `createdAtProConsole`,
-`datalessFilesOption`, `managed`, `objectLockAvailable`,
-`objectLockUpdateIntervalDays`,
-`preventBackupOnConstrainedNetworks`,
-`preventBackupOnExpensiveNetworks`. Most are `bool` or `int` with
-obvious defaults; `objectLockUpdateIntervalDays` is the only
-ambiguous one (operator-side it's `0`).
+## Remaining for full Strategy C parity
 
-Edit `arq_writer/json_configs.py`'s plan template + add them to the
-fingerprint's expected schema.
+These are the next items to work on if/when the user wants to
+unblock Strategy C (writer → arq_restore) at the byte level:
 
-### T3 — Add `s3GlacierIRObjectDirs` to `backupfolders.json`
+### F1 — Per-file structured error collection
 
-Single missing key on our side — Arq.app v8 emits it as an empty
-list `[]`. Companion to the existing
-`s3DeepArchiveObjectDirs` / `s3GlacierObjectDirs` /
-`standardIAObjectDirs` / `onezoneIAObjectDirs` keys.
+T4 fixed the **schema** (``backupRecordErrors: list``) but the
+writer still emits an empty list because per-file errors aren't
+collected during the walk. The writer's existing
+``files_with_errors`` increments at ~5 sites in ``arq_writer/backup.py`` (readlink/lstat/stat
+failures during the source walk). Each site has access to:
 
-### T4 — Replace `errorCount: int` with `backupRecordErrors: list`
+- ``path`` (the failing source path)
+- the exception (``OSError`` carrying ``errno``)
+- whether the path is a directory (from the surrounding code)
 
-Arq.app v8's backuprecord plist tracks errors as a structured list
-of error objects; ours emits a single integer count. Other 18/19
-keys agree, so this is a focused diff. Need to verify the
-per-error structure (operator's records have `backupRecordErrors:
-[]` for the latest folder we sampled, so the schema-of-empty-list
-isn't enough — sample a record from a folder where errors actually
-occurred, e.g. by introducing one in a synthetic test).
+Convert each ``self.files_with_errors += 1`` site into a
+``self._record_error(path=..., error=exc, pathIsDirectory=...)``
+that appends an Arq.app-shaped dict to a new
+``self.backup_record_errors: list`` and threads it into
+``build_backuprecord_dict(backup_record_errors=...)``. Per-error
+schema (sampled 2026-05-10):
 
-### T5 — Plan: full per-record fingerprint diff (when feasible)
+- required: ``localPath: str``, ``errorMessage: str``,
+  ``pathIsDirectory: bool``
+- optional (when ``isinstance(error, OSError) and
+  error.errno is not None``): ``errorCode: errno``,
+  ``errorDomain: "NSPOSIXErrorDomain"``, ``severity: 3``
 
-The 2026-05-10 attempt at a full fingerprint of
-`/Volumes/arqbackup1` was killed at 1h22min still walking — too
-slow for a single session at 350+ records × ~23k files each. The
-schema-only extractor was used as a workaround. To enable a future
-full diff:
+### F2 — Backuprecord plist field reconciliation
 
-- Add `--max-records-per-folder N` (or `--latest-record-only`) to
-  `arq_validator.fingerprint_cli compute`.
-- Or land record-level `--include-paths`/`--exclude-paths` so the
-  extractor can target a synthetic source the operator backed up
-  via Arq.app GUI to a fresh small destination (Strategy A.1–A.5
-  workflow).
+The 2026-05-10 follow-up validation showed our writer emits
+``volumeName`` while Arq.app sometimes emits ``nodeTreeVersion``
+instead (and vice-versa, depending on the folder's Tree
+version). Investigate whether the two fields are mutually
+exclusive across Arq.app's records and align our writer either
+to always emit both or to switch based on ``tree_version``.
+
+### F3 — Full byte-level Strategy A diff
+
+`arq-fingerprint compute --max-records-per-folder 1` (T5) makes
+this tractable now. Procedure (operator side):
+
+1. Pick a small synthetic source (~10 files / 1 MB).
+2. Back it up via Arq.app GUI to a fresh local destination.
+3. Back up the same source via our writer (``--use-packs
+   --chunker arq_v7_41``) to another fresh destination.
+4. ``arq-fingerprint compute --max-records-per-folder 1`` on
+   each.
+5. ``arq-fingerprint compare`` — expect ``match: true`` modulo
+   F1 (errorCount-vs-empty-list — handled by structured
+   collection there) and F2 (volumeName / nodeTreeVersion).
 
 ## Pending — out-of-scope without further operator action
 
