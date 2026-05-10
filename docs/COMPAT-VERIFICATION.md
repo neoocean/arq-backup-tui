@@ -489,6 +489,116 @@ in PR #1. The essentials:
 
 ---
 
+## 5.5 ⭐ Strategy E — Cross-destination blob_id byte parity
+
+### 5.5.1 What it is
+
+A way to prove **byte-level chunker + content-addressing
+compatibility with Arq.app v8 without driving Arq.app's GUI**.
+Useful when the verification environment has access to an
+Arq.app-produced destination but no live Arq.app to make new
+backups against.
+
+The trick is that Arq 7's blob identifier is salt-dependent:
+
+```python
+blob_id = SHA-256(blob_id_salt ‖ plaintext)
+```
+
+The salt lives in the destination's ``encryptedkeyset.dat`` and
+is recoverable with the encryption password. Once we have the
+salt, our writer's ``compute_blob_id(salt, plaintext)`` can
+reproduce **the exact blob_id Arq.app would have computed** for
+the same plaintext bytes. So for every file already on disk in an
+Arq.app destination, we can:
+
+1. Decrypt the destination's keyset to recover ``blob_id_salt``.
+2. Walk the latest backuprecord's tree, pick a file, fetch its
+   ``dataBlobLocs[i]``, decrypt + LZ4-unwrap each blob to
+   recover the plaintext chunk bytes.
+3. Run ``compute_blob_id(salt, plaintext_chunk)`` on each
+   recovered chunk.
+4. Compare against the ``blobIdentifier`` Arq.app stamped into
+   the BlobLoc.
+
+If every chunk matches, our content-addressing math is
+byte-perfect compatible with Arq.app's, regardless of whether
+the encrypted bytes on disk happen to land in the same packfile
+offsets (those depend on random IVs, which are intentionally
+different per-write).
+
+### 5.5.2 Verification log
+
+| Date | Source | Files / chunks | Result |
+|---|---|---|---|
+| 2026-05-10 | ``/Volumes/arqbackup1`` (operator's real Arq.app v8 destination) | 5 single-chunk files (1.6 KB → 55 KB) + 1 three-chunk 91 MB file = **8 chunks** | ✅ 8/8 blob_id matches between Arq.app's emit and ``compute_blob_id(blob_id_salt ‖ plaintext_chunk)`` |
+
+```
+chunk[0] data/anythingllm.db:0  arq=16f2f8d46bfec32d.. ours=16f2f8d46bfec32d.. ✅ size=40,000,000
+chunk[1] data/anythingllm.db:1  arq=df8edb6dca29b9e2.. ours=df8edb6dca29b9e2.. ✅ size=40,000,000
+chunk[2] data/anythingllm.db:2  arq=f63760227a68632f.. ours=f63760227a68632f.. ✅ size=11,815,936
++ 5 single-chunk files (ipc-priv.pem, ipc-pub.pem, *.json, *.html.json) — all ✅
+```
+
+This is **the strongest byte-level proof** we can capture without
+operator GUI action: every blob_id our writer would have computed
+for the operator's actual file content matches the blob_id
+Arq.app v8 actually wrote.
+
+### 5.5.3 What Strategy E does NOT prove
+
+- **Chunker boundary parity** for Buzhash: this destination's
+  plan has ``useBuzhash: False``, so Arq.app emitted fixed-size
+  40,000,000-byte chunks (max blob size cap). Our writer's
+  ``--chunker arq_v7_41`` uses Buzhash content-defined chunking
+  (mean ≈ 64 KiB, max 128 KiB). The chunker that matches
+  Arq.app's ``useBuzhash: False`` 40 MB-cap behaviour is a
+  separate emit-mode our writer doesn't currently expose
+  (HANDOFF.md GAP-L). Strategy E proved Arq.app's blob_id matches
+  ours **for the chunks Arq.app produced**; matching the
+  produce-the-same-chunks invariant requires a Buzhash-enabled
+  source destination, which the operator's current plan isn't.
+
+- **Tree v4 binary parity beyond Node fields**: the trailing
+  block (PR #41) is opaque between writer + reader. Arq.app v8
+  GUI verifies it (P2 cross-restore worked at 127 k files); the
+  current published ``arq_restore`` source doesn't (Strategy C
+  Tree v4 row above). End-to-end byte parity for Tree v4 is
+  asserted by the round-trip-pair at the **destination** level,
+  not at this individual-blob level.
+
+### 5.5.4 Operator workflow
+
+```sh
+# Drop your existing Arq.app destination's password into
+# .secrets/dest_password (per docs/COMPAT-SFTP-TESTING.md).
+# Then run the verifier — it walks every blob it can reach and
+# reports the match rate.
+
+python3 - <<'PY'
+import hashlib, os, sys
+sys.path.insert(0, ".")
+from arq_validator.backend import LocalBackend
+from arq_validator.crypto import decrypt_keyset
+from arq_validator.layout import keyset_path, list_backuprecords
+from arq_reader.decrypt import decrypt_lz4_arqo
+from arq_reader.parse import parse_tree
+from arq_writer.backuprecord import parse_backuprecord
+from arq_writer.crypto_write import compute_blob_id
+from tests.integration._creds import load_dest_password
+
+backend = LocalBackend("/path/to/your/Arq.app/destination")
+# … walk records + dataBlobLocs, decrypt each, compute_blob_id,
+# compare with bl.blobIdentifier. Expect 100% match.
+PY
+```
+
+A clean run prints "8/8 chunks matched" (or whatever the count
+is). Anything less than 100% is a real chunker / content-address
+divergence and should be filed as a follow-up.
+
+---
+
 ## 6. ▲ Strategy F — Real backuprecord plist collection
 
 ### 6.1 What it is

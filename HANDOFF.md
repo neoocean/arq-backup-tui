@@ -146,14 +146,63 @@ See ``docs/COMPAT-VERIFICATION.md`` §4.3 for the full procedure
 + build instructions for ``arq_restore`` on a stock macOS CLT
 host.
 
-## Remaining for full byte-level Tree v4 parity (operator GUI required)
+## Strategy E (cross-destination blob_id byte parity) — verified
 
-The one remaining check we still cannot run from this sandbox
-is the **byte-level fingerprint diff against a same-source
-backup produced by Arq.app v8 GUI**:
+Closed in this session **without any GUI interaction** by
+exploiting Arq 7's salt-dependent content addressing:
+``blob_id = SHA-256(blob_id_salt ‖ plaintext)``. Recovering the
+salt from the operator's ``encryptedkeyset.dat`` lets our writer
+reproduce the exact blob_id Arq.app would compute for any
+plaintext we hand it.
+
+Sampled 8 chunks across 6 files on ``/Volumes/arqbackup1``:
+
+```
+chunk[0] data/anythingllm.db:0  arq=16f2f8d46bfec32d.. ours=16f2f8d46bfec32d.. ✅ 40,000,000 B
+chunk[1] data/anythingllm.db:1  arq=df8edb6dca29b9e2.. ours=df8edb6dca29b9e2.. ✅ 40,000,000 B
+chunk[2] data/anythingllm.db:2  arq=f63760227a68632f.. ours=f63760227a68632f.. ✅ 11,815,936 B
+chunk[3] data/comkey/ipc-priv.pem            ✅ 1,675 B
+chunk[4] data/comkey/ipc-pub.pem             ✅   426 B
+chunk[5] data/direct-uploads/RX_-.docx-...   ✅ 41,134 B
+chunk[6] blog.woojinkim.org_limitbreak.html  ✅ 55,022 B
+chunk[7] blog.woojinkim.org_.html.json       ✅  3,938 B
+```
+
+8/8. Our content-addressing math is **byte-identical** to
+Arq.app v8's for every plaintext sampled. See
+``docs/COMPAT-VERIFICATION.md`` §5.5 for the full procedure.
+
+## Remaining for full byte-level Tree v4 parity
+
+### GAP-L — Fixed-size chunking for ``useBuzhash: False`` plans
+
+Arq.app v8 honours the per-plan ``useBuzhash`` flag: when
+``False`` (which the operator's plan #1 is), it emits fixed-size
+40,000,000-byte chunks rather than running Buzhash. Our writer's
+``--chunker`` flag offers ``none / default / arq_v7_41``;
+``arq_v7_41`` is Buzhash with mean-64-KiB / max-128-KiB
+parameters — it cannot reproduce Arq.app's ``useBuzhash: False``
+behaviour. Implementing a fourth ``--chunker fixed-40MB`` mode
+(or honouring a ``--max-blob-bytes 40000000`` cap with no
+boundary detection) closes this gap and lets our writer
+byte-match against destinations with ``useBuzhash: False`` plans.
+Estimated scope: small — add the constant + a slicing helper +
+a test that 91 MB of input produces (40 MB, 40 MB, 11.8 MB)
+chunks just like Arq.app does. Strategy E confirms blob_id
+math is correct once chunk boundaries align.
+
+### Same-source byte-level diff against an Arq.app GUI backup
+*(operator action required)*
+
+The one remaining verification we genuinely cannot run from this
+sandbox is the **byte-level fingerprint diff against a fresh
+same-source backup produced by Arq.app v8 GUI**:
 
 1. Pick a small synthetic source (~10 files / 1 MB).
-2. Back it up via Arq.app GUI to a fresh local destination.
+2. Back it up via Arq.app GUI (or ``arqc startBackupPlan
+   <UUID>`` — Arq.app v8 ships a CLI helper at
+   ``/Applications/Arq.app/Contents/Resources/arqc``) to a fresh
+   local destination.
 3. Back up the same source via our writer (``--use-packs
    --chunker arq_v7_41 --tree-version 4``) to another fresh
    destination.
@@ -163,10 +212,9 @@ backup produced by Arq.app v8 GUI**:
    zero ``chunk_pattern_diffs`` / ``file_shape_diffs`` /
    ``missing_files_*`` entries.
 
-This needs the operator to drive Arq.app's GUI once. With every
-intermediate verification closed (T-series + F-series +
-Strategy C-v3 byte-perfect), this run is expected to be a
-formality rather than an open question.
+After GAP-L is closed, this becomes a formality. Until then, the
+chunk-pattern row will surface the buzhash-vs-fixed-40MB
+divergence — which is real but already understood.
 
 ## Pending — out-of-scope without further operator action
 
