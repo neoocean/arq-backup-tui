@@ -49,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import json
 import plistlib
+import re
 import stat as stat_mod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -111,10 +112,46 @@ def _python_type_name(v: Any) -> str:
     return type(v).__name__
 
 
+_UUID_KEY_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
+
+
 def _schema_of_dict(d: Dict[str, Any], depth: int = 2) -> Dict[str, Any]:
     """Return a {key: type-name} skeleton for ``d``. Recurses into
     nested dicts up to ``depth`` levels; deeper layers are summarized
-    by their type only."""
+    by their type only.
+
+    Salt-independence: when ``d`` is a UUID-keyed map whose values all
+    share the same recursive schema (e.g. ``backupplan.json``'s
+    ``backupFolderPlansByUUID``), the result collapses to a single
+    ``{"<uuid>": <schema>}`` entry. Without this, two backups of the
+    same source produce different fingerprints just because their
+    randomly assigned folder UUIDs differ — which makes the
+    schema-level comparison between Arq.app's destination and our
+    writer's output spurious as soon as either side uses a different
+    UUID. The collapse only triggers when *every* key is UUID-shaped
+    and *every* value's nested schema is identical, so legitimate
+    per-key schema differences are preserved.
+    """
+    keys = list(d.keys())
+    if (
+        keys
+        and all(_is_uuid_key(k) for k in keys)
+        and all(isinstance(d[k], dict) for k in keys)
+    ):
+        sub_schemas = [
+            _schema_of_dict(d[k], depth=depth - 1) if depth > 0
+            else _python_type_name(d[k])
+            for k in keys
+        ]
+        # all(...) on a 1-element trailing iter is trivially true,
+        # so a UUID-keyed map with a single entry collapses to
+        # ``{"<uuid>": <schema>}`` just like a multi-entry one.
+        if all(s == sub_schemas[0] for s in sub_schemas[1:]):
+            return {"<uuid>": sub_schemas[0]}
+
     out: Dict[str, Any] = {}
     for k in sorted(d.keys()):
         v = d[k]
@@ -125,6 +162,13 @@ def _schema_of_dict(d: Dict[str, Any], depth: int = 2) -> Dict[str, Any]:
         else:
             out[k] = _python_type_name(v)
     return out
+
+
+def _is_uuid_key(s: Any) -> bool:
+    """True iff ``s`` is a UUID-shaped string. The match is
+    deliberately strict (8-4-4-4-12 hex with dashes) so we don't
+    misidentify non-UUID keys that happen to look hex-y."""
+    return isinstance(s, str) and bool(_UUID_KEY_RE.match(s))
 
 
 # ---------------------------------------------------------------------------

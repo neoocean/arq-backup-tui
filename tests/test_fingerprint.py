@@ -175,6 +175,124 @@ class FingerprintDiffTests(unittest.TestCase):
             self.assertTrue(diff["match"])
 
 
+class UuidKeyCollapseTests(unittest.TestCase):
+    """``_schema_of_dict`` must collapse UUID-keyed maps whose values
+    share the same nested schema down to a single ``"<uuid>"``
+    placeholder. Without this, two backups of the same source
+    fingerprint differently solely because they assigned different
+    folder UUIDs — making the salt-independent diff unusable for
+    its intended purpose (writer-vs-Arq.app comparison).
+    """
+
+    def test_single_uuid_key_collapses(self) -> None:
+        from arq_validator.fingerprint import _schema_of_dict
+
+        schema = _schema_of_dict({
+            "5EA84470-463D-4D4E-9085-9203B8E5EA32": {
+                "name": "alpha", "size": 12, "active": True,
+            },
+        })
+        self.assertEqual(
+            schema,
+            {"<uuid>": {
+                "active": "bool", "name": "str", "size": "int",
+            }},
+        )
+
+    def test_multi_uuid_keys_with_uniform_schema_collapse(self) -> None:
+        from arq_validator.fingerprint import _schema_of_dict
+
+        schema = _schema_of_dict({
+            "5EA84470-463D-4D4E-9085-9203B8E5EA32": {"x": 1, "y": "a"},
+            "FA21E3B6-926C-46E0-A3EB-BDAB1984FB51": {"x": 2, "y": "b"},
+            "CA0D1896-B097-46A2-B0B8-BED9DC8FCE50": {"x": 3, "y": "c"},
+        })
+        self.assertEqual(
+            schema, {"<uuid>": {"x": "int", "y": "str"}},
+        )
+
+    def test_uuid_keys_with_heterogeneous_schema_do_not_collapse(
+        self,
+    ) -> None:
+        # If the per-UUID values disagree on schema, that's a real
+        # difference worth surfacing — keep the per-key entries so
+        # diffing still pinpoints which UUID's payload diverges.
+        from arq_validator.fingerprint import _schema_of_dict
+
+        schema = _schema_of_dict({
+            "5EA84470-463D-4D4E-9085-9203B8E5EA32": {"x": 1},
+            "FA21E3B6-926C-46E0-A3EB-BDAB1984FB51": {"x": 1, "y": "a"},
+        })
+        self.assertNotIn("<uuid>", schema)
+        self.assertEqual(set(schema.keys()), {
+            "5EA84470-463D-4D4E-9085-9203B8E5EA32",
+            "FA21E3B6-926C-46E0-A3EB-BDAB1984FB51",
+        })
+
+    def test_non_uuid_keys_preserve_per_key_schema(self) -> None:
+        # Regular field names must not be mistaken for UUIDs even
+        # when they look hex-y.
+        from arq_validator.fingerprint import _schema_of_dict
+
+        schema = _schema_of_dict({
+            "alpha": {"x": 1},
+            "abcdef01": {"x": 1},  # 8 hex but no dashes — not a UUID
+        })
+        self.assertEqual(set(schema.keys()), {"alpha", "abcdef01"})
+
+    def test_uuid_keys_with_non_dict_values_do_not_collapse(self) -> None:
+        # The collapse only applies to ``UUID -> dict`` maps. UUID
+        # keys mapping to scalars stay as-is.
+        from arq_validator.fingerprint import _schema_of_dict
+
+        schema = _schema_of_dict({
+            "5EA84470-463D-4D4E-9085-9203B8E5EA32": "string-value",
+            "FA21E3B6-926C-46E0-A3EB-BDAB1984FB51": "another-value",
+        })
+        self.assertEqual(
+            sorted(schema.keys()),
+            sorted([
+                "5EA84470-463D-4D4E-9085-9203B8E5EA32",
+                "FA21E3B6-926C-46E0-A3EB-BDAB1984FB51",
+            ]),
+        )
+
+    def test_two_runs_with_random_uuids_match(self) -> None:
+        # End-to-end: two writer runs against the same source assign
+        # independent random UUIDs. With the collapse in place, the
+        # comparison must report ``match: True`` — which is the whole
+        # point of the salt-independent fingerprint.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            src = tdp / "src"
+            src.mkdir()
+            _make_tree(src)
+            d_a = tdp / "a"
+            d_b = tdp / "b"
+            r_a = build_backup(src, d_a, encryption_password="pw")
+            r_b = build_backup(src, d_b, encryption_password="pw")
+            self.assertNotEqual(r_a.folder_uuid, r_b.folder_uuid)
+            fp_a = compute_shape_fingerprint(
+                LocalBackend(d_a),
+                encryption_password="pw",
+                computer_uuid=r_a.computer_uuid,
+            )
+            fp_b = compute_shape_fingerprint(
+                LocalBackend(d_b),
+                encryption_password="pw",
+                computer_uuid=r_b.computer_uuid,
+            )
+            diff = diff_fingerprints(fp_a, fp_b)
+            self.assertTrue(
+                diff["match"],
+                msg=(
+                    "two runs of the same source must fingerprint "
+                    "identically modulo random UUIDs; got: "
+                    f"{diff}"
+                ),
+            )
+
+
 class UnicodeFingerprintTests(unittest.TestCase):
     def test_unicode_paths_appear_verbatim(self) -> None:
         with tempfile.TemporaryDirectory() as td:

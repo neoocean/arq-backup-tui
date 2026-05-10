@@ -153,17 +153,92 @@ structural compatibility** is proven. If any category is non-zero:
 
 ### 2.6 Automated regression tests (run in the sandbox)
 
-Six tests in `tests/test_fingerprint.py`:
+Twelve tests in `tests/test_fingerprint.py`:
 
-- Same source → same fingerprint
+- Same source → same fingerprint (including with random per-run UUIDs)
 - Different chunker → chunk_pattern_diffs appear
 - File omissions show up in missing_files_*
 - Unicode path names appear verbatim in the fingerprint
 - The diff `match` field is True for identical fingerprints
+- UUID-keyed maps with uniform value-schemas collapse to a single
+  `<uuid>` placeholder so independently-randomized UUIDs don't
+  produce spurious sidecar_schema_diffs
 
 These tests guarantee that our writer + reader are compatible with
 themselves. **Arq.app compatibility** is proven by the operator-paste
 output of the §A.1–A.5 procedure.
+
+### 2.7 Verification log
+
+| Date | Source | Result |
+|---|---|---|
+| 2026-05-10 | `/Volumes/arqbackup1` (Arq.app v8) vs synthetic source via our writer | Schema-level diff completed; **5 incompatibilities surfaced + 1 fingerprint module bug fixed** (see §2.7.1) |
+
+#### 2.7.1 Schema-level findings
+
+A full per-record fingerprint of a 415k-standardobject Arq.app v8
+destination is intractable for a single session (350+ records ×
+~23k files each). To still get an actionable comparison, a
+schema-only extractor (`arq_validator/fingerprint.py`'s
+`_schema_of_dict` + `_schema_of_json`) was applied to every JSON /
+plist sidecar at the destination root + a sampled latest record per
+folder. Comparing these against the schemas our writer emits for an
+arbitrary synthetic source (the source differs, but the **schema**
+should not — keys + types come from the writer, not the input)
+surfaced these:
+
+| Sidecar | Arq.app v8 | Our writer | Incompatibility |
+|---|---|---|---|
+| `backupconfig.json` | plain JSON, 11 keys | plain JSON, 11 keys | ✅ identical |
+| `backupplan.json` | **ARQO-encrypted** (plain JSON inside, no LZ4) | plain JSON | **encryption + 10 missing keys** |
+| `backupfolders.json` | plain JSON, 6 keys | plain JSON, 5 keys | missing `s3GlacierIRObjectDirs` |
+| `backupfolders/<UUID>/backupfolder.json` | **ARQO-encrypted** (plain JSON inside) | plain JSON | **encryption only** (8/8 keys match once decrypted) |
+| Backuprecord plist | 19 keys incl. `backupRecordErrors` (list) | 19 keys incl. `errorCount` (int) | error-tracking schema diverges |
+| Tree v4 binary blob | parses cleanly | — | ✅ confirmed via P2 cross-restore (127k files, 0 failures) |
+
+Missing `backupplan.json` keys (Arq.app v8 only):
+`backupFolderPlanMountPointsAreInitialized`,
+`backupSetIsInitialized`, `budgetGB`, `createdAtProConsole`,
+`datalessFilesOption`, `managed`, `objectLockAvailable`,
+`objectLockUpdateIntervalDays`,
+`preventBackupOnConstrainedNetworks`,
+`preventBackupOnExpensiveNetworks`.
+
+#### 2.7.2 Fingerprint module bug found + fixed
+
+The same workflow surfaced a bug in `_schema_of_dict`: UUID-keyed
+maps (e.g. `backupplan.json`'s `backupFolderPlansByUUID`) leaked
+the per-run-random UUIDs into the schema, so two backups of the
+same source via the same writer produced different fingerprints.
+This commit normalizes UUID-keyed-with-uniform-value-schema dicts
+to a single `<uuid>` placeholder. With the fix, our writer's
+self-consistency test (writer→destA + writer→destB on the same
+source, fresh UUIDs) reports `match: True` cleanly.
+
+#### 2.7.3 Compatibility roadmap
+
+The five incompatibilities above are the writer-side gaps to close
+before Strategy C (writer → arq_restore) can work. They split into
+small, independent fixes:
+
+- **Sidecar encryption** — wrap `backupplan.json` +
+  per-folder `backupfolder.json` in an `ARQO` envelope on write
+  using the same keyset/HMAC path the writer already uses for blob
+  encryption. The decrypt side already exists
+  (`decrypt_encrypted_object` in `arq_reader/decrypt.py`); we just
+  need the inverse on emit.
+- **Missing plan keys** — add the 10 keys above to
+  `arq_writer/json_configs.py`'s plan template with sensible
+  defaults (most are bool / int).
+- **Missing folders-index key** — add
+  `s3GlacierIRObjectDirs: []` to the index template.
+- **Backuprecord error tracking** — replace the integer
+  `errorCount` with a list-of-error-objects `backupRecordErrors`
+  populated by the writer's error path.
+
+Each is a separate PR with its own regression test. None of these
+is blocking for Strategy B (cross-restore Arq.app → our reader),
+which is already verified at scale (see §3.4).
 
 ---
 
