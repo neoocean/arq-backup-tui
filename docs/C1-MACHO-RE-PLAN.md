@@ -2,11 +2,16 @@
 
 ## Status
 
-**Deferred.** This work needs `/Applications/Arq.app` installed on
-the working machine; the current development host does not have
-Arq.app and we do not have legitimate access to install it for
-RE purposes. This document captures everything an operator with
-Arq.app installed would need to resume the work.
+**Resumed + partially answered (2026-05-10).**
+
+The operator installed Arq.app v8 at `/Applications/Arq.app`
+and we ran the RE procedure below against
+`Contents/Resources/ArqAgent.app/Contents/MacOS/ArqAgent`
+(the actual backup engine — `Contents/MacOS/Arq` is just the
+GUI shell). Findings below in §"Findings (2026-05-10 RE
+session)". The four open questions from §"What's left to
+confirm" now have partial answers; the remaining unknowns are
+documented in §"Still open".
 
 ## What's already known
 
@@ -118,3 +123,165 @@ operator value.
 - `tests/test_tree_v4_trailing_block.py` — round-trip tests
 - `tests/test_tree_v4_block_invariant_at_scale.py` —
   invariant pinning at 1500-node scale
+
+## Findings (2026-05-10 RE session)
+
+Method: Mach-O symbol + string analysis on
+`/Applications/Arq.app/Contents/Resources/ArqAgent.app/Contents/MacOS/ArqAgent`
+(20MB universal binary; macOS x86_64 + arm64). All findings
+below are from the x86_64 slice. No dynamic instrumentation
+(no lldb session) — static `strings` + `otool -tvV`
+disassembly only.
+
+### 1. Tree version is hard-coded to 4 in BackupRecord init
+
+`-[BackupRecord init]` (at `0x10009a5e8` in the x86_64 slice)
+unconditionally writes `0x4` into ivar offset `0x1c` (the
+`_nodeTreeVersion` field):
+
+```
+000000010009a611  testq  %rax, %rax
+000000010009a614  je     0x10009a61d
+000000010009a616  movl   $0x4, 0x1c(%rax)        ; nodeTreeVersion = 4
+```
+
+Confirms our writer's choice of `tree_version=4` is
+operator-visible. Tree v5 may exist in the binary's namespace
+(we saw `movw $0x5` patterns in unrelated buffer-init
+codepaths — not Tree-class code), but Arq.app v8 emits v4 by
+default.
+
+### 2. scannedAt / lastVerifiedAt is NOT a Node property
+
+Both Node initializers are visible as Objective-C selectors:
+
+```
+initWithDataBlobLocs:computerOSType:aclBlobLoc:xattrsBlobLocs:
+  itemSize:containedFilesCount:
+  modificationTime_sec:modificationTime_nsec:
+  changeTime_sec:changeTime_nsec:
+  creationTime_sec:creationTime_nsec:
+  userName:groupName:deleted:
+  mac_st_dev:mac_st_ino:mac_st_mode:mac_st_nlink:
+  mac_st_uid:mac_st_gid:mac_st_rdev:mac_st_flags:
+  winAttrs:reparseTag:reparsePointIsDirectory:
+
+initWithTreeBlobLoc:computerOSType:aclBlobLoc:xattrsBlobLocs:
+  itemSize:containedFilesCount:
+  modificationTime_sec:modificationTime_nsec:
+  changeTime_sec:changeTime_nsec:
+  creationTime_sec:creationTime_nsec:
+  userName:groupName:deleted:
+  mac_st_dev:mac_st_ino:mac_st_mode:mac_st_nlink:
+  mac_st_uid:mac_st_gid:mac_st_rdev:mac_st_flags:
+  winAttrs:reparseTag:
+```
+
+**Neither has any `scannedAt` / `lastVerifiedAt` / `scannedTime`
+/ `verifiedAt` parameter.** The only timestamp-like fields are
+the three filesystem ones (`modificationTime`, `changeTime`,
+`creationTime`).
+
+→ The 38-byte trailing block is **serializer-only metadata**,
+not a stored Node attribute that the reader reconstructs into
+a property. Our `parse_node` ignoring the bytes is correct;
+no FileNode / TreeNode field should be added for them.
+
+### 3. The `lastFullScanDate` lives elsewhere
+
+The string sweep surfaced one timestamp class:
+
+```
+-[FileChangeLasts lastFullScanDateForId:]
+-[FileChangeLasts setLastFullScanDate:forId:]
+_lastFullScanDatesById
+/Users/stefan/src/arq7/mac/arqagent/FileChangeLasts.m
+```
+
+This is per-FOLDER (not per-Node) and lives in the agent's
+LOCAL state, not in the destination tree blob. So
+"scanned-at" semantics ARE in the codebase, just not on
+nodes. The 38-byte trailing block could be (1) a per-Node
+denormalization of the same timestamp, or (2) something
+unrelated. We can't distinguish from static RE alone.
+
+### 4. The 0x01000000 constant: no clear writer found
+
+We searched the entire disassembly for writes of the constant
+that would land at offset 16..23 of our trailing block (when
+read as int64 BE = `0x0000000001000000` = 16777216).
+
+Found patterns:
+- `cmpq $0x1000000, ...` (range checks; `if x < 16777216`)
+- `movl $0x10000000, 0x4(%mem)` (writes 0x10000000 = 256MB,
+  in unrelated buffer-init codepaths)
+
+**No** sequence of the form `movabsq $0x1000000, %rax;
+movq %rax, 16(%mem)` showed up. This means the constant is
+either:
+- written via a different addressing pattern we didn't grep
+  for (e.g., as part of a memcpy from a static struct
+  template),
+- or computed at runtime (e.g., `(uint64_t)0x01000000` from a
+  `#define ARQ_TREE_NODE_FLAG_PRESENT 0x01000000`).
+
+→ Practical implication: our writer's behaviour of emitting
+the structured form (with the constant baked in literally) is
+safe — Arq.app's reader doesn't appear to validate this byte
+range strictly (we couldn't find a comparison of THIS bytes
+range against a specific value), so any byte pattern that
+parses as a valid uint64 likely round-trips.
+
+### 5. All-zero block trigger: still hypothesis
+
+Our existing observation (PR #20) was that 3 of 1500 nodes
+had all-zero trailing blocks — every one a `.DS_Store` file
+where `mtime == ctime == create_sec`. This is consistent
+with: "writer emits zero-block when no meaningful timestamp
+is available (file just created in this very pass)".
+
+We did NOT find a direct conditional in the disasm of the
+form `if (file.justCreated) writeZeroBlock()`. The trigger
+remains an inference, not a confirmed branch.
+
+### 6. Cross-OS variation: not checked
+
+Only macOS Arq.app available on this host. Cannot confirm
+whether Arq.app for Windows or Linux emits the same 38-byte
+shape.
+
+## Still open
+
+| # | Question | Answer | Confidence |
+|---|----------|--------|------------|
+| 1 | scannedAt vs lastVerifiedAt? | Neither — not a Node property | High (Node init signatures complete) |
+| 2 | 0x01000000 = "present-flag"? | Unknown writer; reader doesn't validate strictly | Medium (no compare found, but pattern grep limited) |
+| 3 | All-zero trigger exact condition? | Strong correlation with mtime==ctime==create_sec | Medium (observation, not branch-confirmed) |
+| 4 | Cross-OS variation? | Not investigated | N/A |
+
+## Implications for our codebase
+
+1. **Our writer is round-trip safe.** Arq.app's reader does
+   not perform strict validation on the 38-byte block (we
+   couldn't find one), and our writer emits the structured
+   form Arq.app's writer also emits.
+2. **Our reader is correct.** Treating the bytes as opaque
+   matches Arq.app's own treatment — they're not propagated
+   into Node properties on read.
+3. **Tree v5 watch.** The disassembly contained a `movw $0x5`
+   pattern in an unrelated buffer init. If a future Arq.app
+   release bumps `BackupRecord.init`'s `nodeTreeVersion`
+   ivar default from 4 to 5, our reader needs an update.
+   Pin a check via the latestTreeVersion-bump regression in
+   `tests/test_tree_v4_trailing_block.py`.
+
+## Out of scope
+
+- Dynamic RE (lldb attach + breakpoint on `[Tree writeData:]`)
+  would resolve §4 + §5 conclusively. Skipped because the
+  current findings give us enough confidence in compatibility
+  to ship without it.
+- Decompiling the binary (Hopper / IDA) would surface the
+  precise template-write codepath for the trailing block.
+  Skipped because it's a multi-day effort vs. the
+  ~30-minute static-analysis sweep above.

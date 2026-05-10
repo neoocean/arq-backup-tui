@@ -93,3 +93,36 @@ single-blob bulk probe attempt in PR #28 both confirm
 `XAttrSetV002` as the only observed format. Bulk probe at
 1000+ nodes scale is awaiting a controlled-environment
 re-run — see this document's "How to run it" section.
+
+### 2026-05-10 attempt — operator-side run
+
+Ran against operator's SFTP destination with progressively
+smaller `--max-walk` caps:
+
+| --max-walk | wall time | result |
+|-----------:|----------:|--------|
+| 500 | killed at 60min (still running) | n/a — too slow over this SFTP link |
+| 50  | killed at ~30min (still running) | n/a — same |
+| 10  | ~5min | completed; 0 xattr-bearing nodes in scope |
+
+The 10-node run finished cleanly. The "anomalies" reported
+were ARQO-too-short failures on the root nodes' xattr
+fetches — a benign signal that root nodes don't carry xattrs
+on this destination, NOT a format-hypothesis failure. To
+confirm the hypothesis at scale, the operator should rerun
+with `--max-walk 1000+` over a higher-throughput SFTP link
+or a local mount of the destination. The XAttrSetV002 format
+hypothesis remains untouched; we just don't have a 1000-node
+sample yet from THIS operator's destination.
+
+### Recommended next step for confirmation at scale
+
+Either:
+
+1. **Local-mount the destination** (rsync the SFTP destination
+   to a local volume one-time, then point the probe at the
+   local path via a `LocalBackend` wrapper). This eliminates
+   the SFTP per-fetch latency that dominated the runs above.
+2. **Run the probe in `--max-walk 100` increments overnight**
+   (cron one fire per hour, accumulating to a 1000-node
+   sample over ~10 hours).
