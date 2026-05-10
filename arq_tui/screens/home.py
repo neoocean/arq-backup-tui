@@ -95,9 +95,18 @@ class HomeScreen(Screen):
         # section is "plans" (the operator is here to manage
         # plans). Other sections route to their respective
         # screens via the screen-level action handlers above.
-        from ..widgets.sidebar import Sidebar
+        # Derive the sidebar's active section from the screen's
+        # class name via section_for_screen() rather than
+        # hardcoding "plans". HomeScreen still resolves to
+        # "plans" via the routing table — but every other screen
+        # that wants a sidebar can just pass
+        # ``Sidebar(active=section_for_screen(type(self).__name__))``
+        # without remembering which key applies.
+        from ..widgets.sidebar import Sidebar, section_for_screen
         with Horizontal(id="home-root"):
-            yield Sidebar(active="plans")
+            yield Sidebar(
+                active=section_for_screen(type(self).__name__),
+            )
             with Vertical(id="home-main"):
                 with Vertical(id="plans-section"):
                     yield Static("Plans", classes="section-title")

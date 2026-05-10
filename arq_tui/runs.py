@@ -358,6 +358,19 @@ class RunWriter:
             self.record.status = RunStatus.FAILED.value
             self.record.error = f"{exc_type.__name__}: {exc}"
         self._force_flush()
+        # Fire the operator-facing notification (notify-send /
+        # osascript / shell hook) per the loaded NotificationConfig.
+        # Best-effort: any exception here is swallowed because we
+        # never want a notification daemon hiccup to corrupt the
+        # caller's exit path. Tests can suppress the hook entirely
+        # via ``ARQ_BACKUP_TUI_DISABLE_NOTIFICATIONS=1`` so the
+        # full unit-test run stays silent.
+        if not os.environ.get("ARQ_BACKUP_TUI_DISABLE_NOTIFICATIONS"):
+            try:
+                from .notifications import notify_run_finished
+                notify_run_finished(self.record)
+            except Exception:
+                pass
         # Don't suppress exceptions — caller still needs to see them.
         return None
 

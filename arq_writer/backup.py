@@ -101,6 +101,11 @@ class BackupResult:
     backuprecord_path: Path
     files_written: int = 0
     trees_written: int = 0
+    # Files / dirs that hit a stat / read / readlink error during
+    # the walk + got skipped (or fell back to defaulted metadata).
+    # 0 in the happy path; nonzero means the operator should look
+    # at the file_read_error / dir_stat_error events for details.
+    files_with_errors: int = 0
     bytes_plaintext: int = 0
     bytes_on_disk: int = 0
     blob_ids: List[str] = field(default_factory=list)
@@ -362,6 +367,7 @@ class Backup:
         # Per-run accumulators.
         self.files_written = 0
         self.files_reused = 0          # tree-walk reuse counter
+        self.files_with_errors = 0     # stat / readlink / read_bytes failures
         self.trees_written = 0
         self.bytes_plaintext = 0
         self.bytes_on_disk = 0
@@ -855,15 +861,29 @@ class Backup:
         # under the S_IFLNK mode bit.
         is_symlink = src.is_symlink()
         if is_symlink:
+            # readlink can race against deletion / permission
+            # change. Either failure → emit + skip the entry from
+            # the tree (rather than silently writing a 0-byte link
+            # whose restore would be invisible damage).
             try:
                 data = os.readlink(src).encode("utf-8")
             except OSError as exc:
                 _emit(self.callback, "file_read_error",
-                      path=str(src), error=str(exc))
-                data = b""
+                      path=str(src), error=str(exc),
+                      op="readlink")
+                self.files_with_errors += 1
+                return None
             # lstat so we get the symlink's own metadata, not the
-            # target's.
-            st = src.lstat()
+            # target's. Wrap because the symlink can disappear
+            # between readlink + lstat.
+            try:
+                st = src.lstat()
+            except OSError as exc:
+                _emit(self.callback, "file_read_error",
+                      path=str(src), error=str(exc),
+                      op="lstat")
+                self.files_with_errors += 1
+                return None
             locs = [self._write_blob(data)]
             uname, gname = _resolve_owner(
                 st.st_uid if hasattr(st, "st_uid") else 0,
@@ -898,12 +918,20 @@ class Backup:
                   blob_id=locs[0].blobIdentifier if locs else "")
             return node, len(data), 1
 
+        # File read can fail for many reasons (permissions changed,
+        # source deleted mid-walk, IO error). Previous behaviour
+        # silently substituted empty bytes — that produced a
+        # successful-looking backup with corrupt 0-byte content.
+        # Emit + skip so the operator gets a real failure indicator
+        # in the run summary instead of invisible damage.
         try:
             data = src.read_bytes()
         except OSError as exc:
             _emit(self.callback, "file_read_error",
-                  path=str(src), error=str(exc))
-            data = b""
+                  path=str(src), error=str(exc),
+                  op="read_bytes")
+            self.files_with_errors += 1
+            return None
         # When the Buzhash chunker is enabled, files larger than the
         # min-chunk threshold get split into multiple dataBlobLocs;
         # restore concatenates them back in order. Empty / tiny files
@@ -914,7 +942,35 @@ class Backup:
             ]
         else:
             locs = [self._write_blob(data)]
-        st = src.stat()
+        # The post-read stat() races against deletion/perms-change
+        # too. On failure, fall back to a "best-effort" empty stat
+        # rather than skipping — we already wrote the blob bytes
+        # successfully, so the file content is captured. The file
+        # then lands with default mtime / mode (operator sees the
+        # event-stream warning + the per-file metadata anomaly is
+        # diagnosed by the next run's stat-mismatch check).
+        try:
+            st = src.stat()
+        except OSError as exc:
+            _emit(self.callback, "file_stat_error",
+                  path=str(src), error=str(exc),
+                  op="post_read_stat",
+                  recovery="defaulted_metadata")
+            self.files_with_errors += 1
+            # Fabricate a minimal stat-shape so the FileNode
+            # constructor below doesn't crash. mac_st_mode=0 +
+            # mtime=0 are the sentinels restore can detect.
+            class _DefaultStat:
+                st_size = len(data)
+                st_mtime = 0.0
+                st_ctime = 0.0
+                st_mode = 0
+                st_uid = 0
+                st_gid = 0
+                st_ino = 0
+                st_nlink = 1
+                st_dev = 0
+            st = _DefaultStat()
         uname, gname = _resolve_owner(
             st.st_uid if hasattr(st, "st_uid") else 0,
             st.st_gid if hasattr(st, "st_gid") else 0,
@@ -989,7 +1045,31 @@ class Backup:
         tree_loc = self._write_blob(tree_bytes, is_tree=True)
         self.trees_written += 1
 
-        st = src.stat()
+        # Directory stat() races against rmdir / chmod. On failure
+        # we fabricate a sentinel stat so the TreeNode lands with
+        # defaulted metadata + the operator sees an explicit
+        # event in the stream. The tree blob itself is already
+        # written — that's the important bit.
+        try:
+            st = src.stat()
+        except OSError as exc:
+            _emit(self.callback, "dir_stat_error",
+                  path=str(src), error=str(exc),
+                  op="post_walk_stat",
+                  recovery="defaulted_metadata")
+            self.files_with_errors += 1
+
+            class _DefaultDirStat:
+                st_size = 0
+                st_mtime = 0.0
+                st_ctime = 0.0
+                st_mode = 0
+                st_uid = 0
+                st_gid = 0
+                st_ino = 0
+                st_nlink = 1
+                st_dev = 0
+            st = _DefaultDirStat()
         # Directories can carry xattrs + ACLs too (Finder labels,
         # NFSv4 ACEs, etc.). Capture both on the TreeNode itself
         # so restore can re-apply them after mkdir.
@@ -1296,6 +1376,7 @@ def build_backup(
         backuprecord_path=rec_path,
         files_written=bk.files_written,
         trees_written=bk.trees_written,
+        files_with_errors=bk.files_with_errors,
         bytes_plaintext=bk.bytes_plaintext,
         bytes_on_disk=bk.bytes_on_disk,
         blob_ids=list(bk.blob_ids),

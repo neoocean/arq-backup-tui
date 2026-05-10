@@ -584,6 +584,29 @@ def main(argv: Optional[List[str]] = None) -> int:
                              ensure_ascii=False, default=str))
             return 0 if report.ok else 4
 
+        # Resolve incremental ledger before the validate() call so
+        # save happens regardless of whether the AUDIT tier ran.
+        ledger = None
+        ledger_path = None
+        use_incremental = (
+            args.incremental
+            or args.ledger_path is not None
+        )
+        if use_incremental and tier is ValidationTier.AUDIT:
+            from .incremental_audit import (
+                ledger_path_for, load_ledger, save_ledger,
+            )
+            target = (
+                str(args.ledger_path) if args.ledger_path
+                else (args.target or "default")
+            )
+            ledger_path = (
+                args.ledger_path
+                if args.ledger_path is not None
+                else ledger_path_for(args.target or "default")
+            )
+            ledger = load_ledger(ledger_path, target=target)
+
         report = validate(
             backend,
             tier=tier,
@@ -603,7 +626,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             ),
             openssl_path=args.openssl_path,
             callback=callback,
+            audit_ledger=ledger,
         )
+        # Persist the (possibly-grown) ledger after the run so the
+        # next sweep can skip what we just confirmed. Save even on
+        # partial sweeps — the ledger is append-only by design,
+        # half a sweep's worth of records is still useful.
+        if (
+            ledger is not None
+            and ledger_path is not None
+        ):
+            from .incremental_audit import save_ledger
+            try:
+                save_ledger(ledger, ledger_path)
+            except OSError as exc:
+                print(
+                    f"warning: failed to persist incremental "
+                    f"ledger {ledger_path}: {exc}",
+                    file=sys.stderr,
+                )
         print(json.dumps(asdict(report), indent=2,
                           ensure_ascii=False, default=str))
         return _exit_code_for(report)
