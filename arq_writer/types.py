@@ -87,8 +87,17 @@ class FileNode:
     # ``v4_trailing_block`` is ``b"\x00" * 38``. An empty bytes
     # value means "no parser ran" — the writer's fresh-walk path
     # then falls back to synthesising the structured form using
-    # ``create_time`` as a best-effort scanned-at proxy.
+    # the scanned-at hints below (and finally ``time.time_ns()``).
     v4_trailing_block: bytes = b""
+
+    # Optional scanned-at override for the v4 trailing block bytes
+    # 0..15. Strategy K (2026-05-11) established these bytes are
+    # the backup engine's walk-time of this entry, not a file
+    # timestamp; integration tests / a future scan-loop integration
+    # can pin them by setting these explicitly. When both are 0 the
+    # writer falls back to ``time.time_ns()``.
+    v4_scanned_at_sec: int = 0
+    v4_scanned_at_nsec: int = 0
 
 
 @dataclass
@@ -123,6 +132,8 @@ class TreeNode:
     xattrsBlobLocs: List[BlobLoc] = field(default_factory=list)
     # See FileNode for trailing-block field semantics.
     v4_trailing_block: bytes = b""
+    v4_scanned_at_sec: int = 0
+    v4_scanned_at_nsec: int = 0
 
 
 # Convenient union for "either kind of Node". Most APIs accept either

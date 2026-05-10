@@ -168,23 +168,53 @@ def _v4_trailing_block(node: Node) -> bytes:
 
     2. **Fresh-walk synthesis** — when ``v4_trailing_block`` is
        empty (writer-driven path, no parser intervention),
-       synthesise the structured form with the documented fields:
+       synthesise the structured form with the fields:
 
          bytes  0..7  int64 BE   scanned-at sec
          bytes  8..15 int64 BE   scanned-at nsec
          bytes 16..23 int64 BE   present-flag (high byte = 0x01)
          bytes 24..37 14 zero bytes
 
-       Bytes 12..15 of Arq.app's actual emit carry a per-Node
-       value that varies (looks like a monotonic counter); we
-       can't reproduce it without RE-ing its semantics, so the
-       synthesised form's bytes 12..15 are zero. That's
-       sufficient for any new fresh-walk destination — Arq.app
-       reads it cleanly — but produces a different blob_id than
-       Arq.app would for the same fresh source. For dedup'd
-       incremental backups against an existing destination, the
-       prior-tree code path uses parsed Nodes, which take the
-       verbatim re-emit path above.
+       **Scanned-at semantics** (Strategy K-static, 21,519 v4 nodes
+       on operator's destination 2026-05-11): bytes 0..15 are a
+       backup-engine *scan event* timestamp, NOT a file-metadata
+       timestamp. Their nsec component (bytes 8..15) is non-zero
+       on essentially every node (0/21516 are nsec-zero) and
+       never matches the node's btime / mtime / ctime / atime
+       nsec. Across the sample, bytes 0..7 happen to match
+       ``ctime_sec`` 89.2% of the time — because most files were
+       last ``chmod``/``touch``'d shortly before backup — but
+       that's coincidence; the actual source is the wall clock
+       when ``arq.app`` walked this directory entry.
+
+       The fallback ladder is therefore:
+
+         a. ``v4_scanned_at_sec`` / ``v4_scanned_at_nsec`` if the
+            caller set them explicitly (e.g. an integration test
+            asserting byte equivalence against a known Arq.app
+            emit, or a future scan-loop integration that captures
+            real walk timestamps).
+         b. Else ``create_time_sec`` / ``create_time_nsec`` — a
+            **deterministic** stand-in. Wall-clock (``time_ns``)
+            would be semantically closer to Arq.app's emit but
+            would break our writer's blob-level dedup (every
+            re-emit of an unchanged file would produce a new
+            blob_id). Arq.app sidesteps this by reusing the
+            prior emit's tree blob when a file's metadata is
+            unchanged; our model is content-addressed, so the
+            fallback **must** be a function of file metadata
+            only.
+
+       Strategy K (2026-05-11, 21,519 nodes) characterised the
+       residual bytes 0..15 gap: with ``create_time`` ~47% of
+       nodes hit a full (sec, nsec) match against Arq.app's
+       emit; ``ctime_sec`` alone matches 91.7% of the sec field
+       but no field matches the nsec at all. Strategy I (Arq.app
+       GUI restore of our fresh-walk emit) remains the only
+       definitive test of whether Arq.app's reader validates
+       these bytes — all OTHER bytes in the trailing block
+       (16..37) and EVERY byte of every Node prefix match
+       Arq.app's emit at 100% in K.
     """
     raw = getattr(node, "v4_trailing_block", b"") or b""
     if len(raw) == NODE_V4_TRAILING_BLOCK_BYTES:
@@ -192,6 +222,9 @@ def _v4_trailing_block(node: Node) -> bytes:
     sec = int(getattr(node, "v4_scanned_at_sec", 0) or 0)
     nsec = int(getattr(node, "v4_scanned_at_nsec", 0) or 0)
     if sec == 0 and nsec == 0:
+        # Deterministic fallback (preserves blob-level dedup).
+        # See docstring for the wall-clock alternative we
+        # considered + rejected.
         sec = int(getattr(node, "create_time_sec", 0) or 0)
         nsec = int(getattr(node, "create_time_nsec", 0) or 0)
     out = bytearray()
