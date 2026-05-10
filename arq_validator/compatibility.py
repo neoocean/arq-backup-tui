@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional
 
 from . import constants as C
 from .backend import Backend
-from .crypto import decrypt_keyset
+from .crypto import Keyset, decrypt_keyset
 
 
 # ---------------------------------------------------------------------------
@@ -155,11 +155,21 @@ def check_arq7_compatibility(
         openssl_path=openssl_path,
     )
     _check_backupconfig(backend, root, cu, report)
-    _check_backupplan(backend, root, cu, report)
+    # ``backupplan.json`` and per-folder ``backupfolder.json`` are
+    # ARQO-encrypted in Arq.app v8 (T1) — pass keyset down so the
+    # sidecar reader can decrypt them. Plain-JSON destinations stay
+    # readable via the auto-detect path in ``read_sidecar``.
+    _check_backupplan(
+        backend, root, cu, report,
+        keyset=keyset, openssl_path=openssl_path,
+    )
     _check_backupfolders_index(backend, root, cu, report)
 
     # L6..L8: per-folder configs + record paths
-    folder_uuids = _check_per_folder(backend, root, cu, report)
+    folder_uuids = _check_per_folder(
+        backend, root, cu, report,
+        keyset=keyset, openssl_path=openssl_path,
+    )
     report.folder_uuids = folder_uuids
 
     if keyset is None:
@@ -409,9 +419,19 @@ _BACKUPPLAN_REQUIRED = {
 
 def _check_backupplan(
     backend: Backend, root: str, cu: str, report: ComplianceReport,
+    *,
+    keyset: Optional[Keyset] = None,
+    openssl_path: str = "openssl",
 ) -> None:
+    # backupplan.json is ARQO-encrypted in Arq.app v8 (T1) — pass
+    # the keyset through ``read_sidecar`` so the file decrypts +
+    # parses; older plain-JSON destinations (no ARQO magic) parse
+    # without the keyset path.
+    from .sidecar import read_sidecar
     path = f"{root.rstrip('/')}/{cu}/backupplan.json"
-    data = _read_json(backend, path)
+    data = read_sidecar(
+        backend, path, keyset=keyset, openssl_path=openssl_path,
+    )
     if data is None:
         _add(report, _fail("L4", "backupplan.json present + parseable",
                            f"missing or invalid JSON: {path}"))
@@ -521,6 +541,9 @@ _BACKUPFOLDER_REQUIRED = (
 
 def _check_per_folder(
     backend: Backend, root: str, cu: str, report: ComplianceReport,
+    *,
+    keyset: Optional[Keyset] = None,
+    openssl_path: str = "openssl",
 ) -> List[str]:
     bf_root = f"{root.rstrip('/')}/{cu}/{C.BACKUPFOLDERS_DIR}"
     try:
@@ -545,9 +568,15 @@ def _check_per_folder(
         count=len(folder_uuids),
     ))
 
+    # Per-folder backupfolder.json is ARQO-encrypted in Arq.app v8
+    # (T1); older plain-JSON destinations still parse correctly via
+    # the auto-detect path in ``read_sidecar``.
+    from .sidecar import read_sidecar
     for fu in folder_uuids:
         path = f"{bf_root}/{fu}/backupfolder.json"
-        data = _read_json(backend, path)
+        data = read_sidecar(
+            backend, path, keyset=keyset, openssl_path=openssl_path,
+        )
         if data is None:
             _add(report, _fail(
                 "L7", f"backupfolder.json for {fu}",

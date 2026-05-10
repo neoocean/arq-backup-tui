@@ -59,7 +59,7 @@ from arq_writer.types import BlobLoc, FileNode, TreeNode
 
 from . import constants as C
 from .backend import Backend
-from .crypto import decrypt_keyset
+from .crypto import Keyset, decrypt_keyset
 from .layout import discover_layout, list_backuprecords
 
 
@@ -230,8 +230,14 @@ def compute_shape_fingerprint(
             "config_schema": _schema_of_json(
                 backend, f"{cu_root}/backupconfig.json",
             ),
+            # backupplan.json is ARQO-encrypted in Arq.app v8 (T1)
+            # — pass the keyset so _schema_of_json can decrypt
+            # before extracting the schema. Plain-JSON destinations
+            # (older writer output) still parse correctly because
+            # the helper auto-detects the ARQO magic.
             "plan_schema": _schema_of_json(
                 backend, f"{cu_root}/backupplan.json",
+                keyset=keyset, openssl_path=openssl_path,
             ),
             "folders_index_schema": _schema_of_json(
                 backend, f"{cu_root}/backupfolders.json",
@@ -261,10 +267,13 @@ def compute_shape_fingerprint(
         for folder_uuid in sorted(lay.backup_folder_uuids):
             folder = {
                 "uuid": "REDACTED",
+                # Per-folder backupfolder.json is ARQO-encrypted in
+                # Arq.app v8 (T1) — same keyset path as the plan.
                 "folder_schema": _schema_of_json(
                     backend,
                     f"{cu_root}/{C.BACKUPFOLDERS_DIR}/{folder_uuid}/"
                     "backupfolder.json",
+                    keyset=keyset, openssl_path=openssl_path,
                 ),
                 "records": [],
             }
@@ -292,11 +301,23 @@ def compute_shape_fingerprint(
     return out
 
 
-def _schema_of_json(backend: Backend, path: str) -> Dict[str, Any]:
-    try:
-        raw = backend.read_all(path)
-        data = json.loads(raw.decode("utf-8"))
-    except Exception:
+def _schema_of_json(
+    backend: Backend, path: str,
+    *,
+    keyset: Optional[Keyset] = None,
+    openssl_path: str = "openssl",
+) -> Dict[str, Any]:
+    """Read a JSON sidecar (plain or ARQO-encrypted) and return its
+    schema. ``keyset`` is required to decrypt ARQO-wrapped sidecars
+    (``backupplan.json`` and per-folder ``backupfolder.json`` on
+    Arq.app v8); plain-JSON sidecars parse without it.
+    """
+    from .sidecar import read_sidecar
+    data = read_sidecar(
+        backend, path,
+        keyset=keyset, openssl_path=openssl_path,
+    )
+    if data is None:
         return {"_error": "missing_or_unparseable"}
     if not isinstance(data, dict):
         return {"_error": "not_dict"}

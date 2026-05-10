@@ -576,11 +576,22 @@ class Backup:
             creation_time=time.time(),
             update_time=time.time(),
         )
+        # Arq.app v8 stores backupplan.json as an ARQO envelope
+        # whose plaintext is the pretty-printed JSON bytes (NOT
+        # LZ4-wrapped — distinct from the blob path's
+        # ``lz4_wrap → build_encrypted_object`` chain). Emitting
+        # plain JSON instead surfaces in any schema-level diff
+        # against an Arq.app destination (see
+        # docs/COMPAT-VERIFICATION.md §2.7.1, T1).
+        plain_json = json.dumps(
+            plan, indent=2, ensure_ascii=False,
+        ).encode("utf-8")
+        encrypted = build_encrypted_object(
+            plain_json, self.encryption_key, self.hmac_key,
+            openssl_path=self.openssl_path,
+        )
         self.backend.write_all(
-            self._cu_path("backupplan.json"),
-            json.dumps(
-                plan, indent=2, ensure_ascii=False,
-            ).encode("utf-8"),
+            self._cu_path("backupplan.json"), encrypted,
         )
 
     # ------------------------------------------------------------------
@@ -1132,11 +1143,18 @@ class Backup:
             local_path=str(source),
             local_mount_point=local_mount_point,
         )
+        # Per-folder backupfolder.json is ARQO-encrypted in Arq.app
+        # v8 the same way backupplan.json is — plaintext is the JSON
+        # bytes, no LZ4 wrap (T1 in HANDOFF.md).
+        plain_bf_json = json.dumps(
+            bf_json, indent=2, ensure_ascii=False,
+        ).encode("utf-8")
+        encrypted_bf = build_encrypted_object(
+            plain_bf_json, self.encryption_key, self.hmac_key,
+            openssl_path=self.openssl_path,
+        )
         self.backend.write_all(
-            f"{bf_rel}/backupfolder.json",
-            json.dumps(
-                bf_json, indent=2, ensure_ascii=False,
-            ).encode("utf-8"),
+            f"{bf_rel}/backupfolder.json", encrypted_bf,
         )
 
         # Update accumulated plan metadata before walking so the

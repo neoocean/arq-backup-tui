@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import plistlib
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .crypto_write import build_encrypted_object
 from .lz4_block import lz4_wrap
@@ -143,8 +143,25 @@ def build_backuprecord_dict(
     volume_name: str = "",
     version: int = 100,
     disk_identifier: str = "ROOT",
+    backup_record_errors: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Assemble the top-level dict written into the backuprecord plist."""
+    """Assemble the top-level dict written into the backuprecord plist.
+
+    ``backup_record_errors`` (default ``None`` = empty list) carries
+    per-file errors collected during the walk. Each item is a dict
+    matching Arq.app v8's per-error schema:
+
+    - **required**: ``localPath: str``, ``errorMessage: str``,
+      ``pathIsDirectory: bool``.
+    - **optional** (set when the underlying error maps to an NSError):
+      ``errorCode: int``, ``errorDomain: str``, ``severity: int``.
+
+    Pre-T4 the writer emitted ``errorCount: 0`` (a scalar) here. The
+    Arq.app v8 schema is a list-of-objects with the keys above —
+    surfaced by the 2026-05-10 schema diff (T4 in HANDOFF.md). The
+    structured form lets a restore UI surface every failed path,
+    not just a count.
+    """
     if creation_date is None:
         creation_date = time.time()
     return {
@@ -153,12 +170,14 @@ def build_backuprecord_dict(
         "backupFolderUUID": backup_folder_uuid,
         "backupPlanJSON": backup_plan_dict,
         "backupPlanUUID": backup_plan_uuid,
+        "backupRecordErrors": (
+            list(backup_record_errors) if backup_record_errors else []
+        ),
         "computerOSType": int(computer_os_type),
         "copiedFromCommit": False,
         "copiedFromSnapshot": False,
         "creationDate": int(creation_date),
         "diskIdentifier": disk_identifier,
-        "errorCount": 0,
         "isComplete": True,
         "localMountPoint": local_mount_point,
         "localPath": local_path,

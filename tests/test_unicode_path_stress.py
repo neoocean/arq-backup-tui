@@ -33,6 +33,29 @@ import unittest
 from pathlib import Path
 from typing import Dict
 
+
+def _read_sidecar_text(
+    path: Path, dest: Path, cu: str, password: str,
+) -> str:
+    """Read a sidecar's plaintext as UTF-8 text. Transparently
+    decrypts ARQO-wrapped sidecars (post-T1 ``backupplan.json`` and
+    per-folder ``backupfolder.json``) so the unicode-byte invariants
+    apply to the same JSON representation either way."""
+    raw = path.read_bytes()
+    if raw[:4] == b"ARQO":
+        from arq_reader.decrypt import decrypt_encrypted_object
+        from arq_validator.crypto import decrypt_keyset
+
+        keyset = decrypt_keyset(
+            (dest / cu / "encryptedkeyset.dat").read_bytes(), password,
+        )
+        plain = decrypt_encrypted_object(
+            raw, keyset.encryption_key, keyset.hmac_key,
+        )
+    else:
+        plain = raw
+    return plain.decode("utf-8")
+
 from arq_reader import Restore
 from arq_validator import LocalBackend, check_arq7_compatibility
 from arq_writer import build_backup
@@ -237,9 +260,10 @@ class JsonSidecarUnicodeTests(unittest.TestCase):
                 src, dest, encryption_password="pw",
                 folder_name="한국어-폴더",
             )
-            plan_text = (
-                dest / r.computer_uuid / "backupplan.json"
-            ).read_text(encoding="utf-8")
+            plan_text = _read_sidecar_text(
+                dest / r.computer_uuid / "backupplan.json",
+                dest, r.computer_uuid, "pw",
+            )
             # The folder name must appear as the literal Korean
             # text, not as a \uXXXX escape sequence.
             self.assertIn("한국어-폴더", plan_text)
@@ -259,7 +283,9 @@ class JsonSidecarUnicodeTests(unittest.TestCase):
                 / "backupfolders" / r.folder_uuid
                 / "backupfolder.json"
             )
-            text = bf.read_text(encoding="utf-8")
+            text = _read_sidecar_text(
+                bf, dest, r.computer_uuid, "pw",
+            )
             # localPath must include the emoji literal.
             self.assertIn("🎵", text)
 

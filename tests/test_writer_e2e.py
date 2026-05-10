@@ -111,12 +111,21 @@ class WriterEndToEndTests(unittest.TestCase):
             res = build_backup(src, dest, "pw")
             cu_root = dest / res.computer_uuid
 
-            # Top-level files exist with valid JSON.
-            for fn in ("backupconfig.json", "backupfolders.json",
-                        "backupplan.json"):
+            # Top-level plain-JSON files exist + parse.
+            # ``backupplan.json`` is an ARQO envelope post-T1
+            # (per-folder ``backupfolder.json`` is too) and has its
+            # own assertions below; the schema-level format check
+            # for the plan + folder ARQO path lives in
+            # ``tests/test_sidecar_encryption.py``.
+            for fn in ("backupconfig.json", "backupfolders.json"):
                 with (cu_root / fn).open() as f:
                     parsed = json.load(f)
                 self.assertIsInstance(parsed, dict)
+            # ``backupplan.json`` is an ARQO envelope.
+            self.assertEqual(
+                (cu_root / "backupplan.json").read_bytes()[:4],
+                b"ARQO",
+            )
 
             # Encrypted keyset starts with the spec magic.
             keyset = (cu_root / "encryptedkeyset.dat").read_bytes()
