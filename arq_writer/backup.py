@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -144,6 +145,70 @@ def _path_for_blob(computer_uuid: str, blob_id: str) -> str:
 def _absolute(dest_root: Path, rel: str) -> Path:
     """Resolve a relative-to-computer path under dest_root."""
     return dest_root / rel.lstrip("/")
+
+
+def _derive_volume_name(source: Path) -> str:
+    """Best-effort derivation of the user-facing volume name
+    containing ``source``, mirroring what Arq.app v8 emits in
+    the BackupRecord plist's ``volumeName`` field.
+
+    Strategy (macOS):
+
+    1. Resolve symlinks so ``/var/...`` becomes ``/private/var/...``
+       and ``/tmp/...`` becomes ``/private/tmp/...``.
+    2. If the resolved path is under ``/Volumes/<X>/``, return
+       ``X`` directly. Sampled 2026-05-10 from
+       ``/Volumes/arqbackup1`` real records: ``volumeName`` always
+       matches the ``/Volumes/<X>`` directory name verbatim.
+    3. Otherwise (boot volume), shell out to
+       ``/usr/sbin/diskutil info /`` and parse the
+       ``Volume Name:`` line. Boot-volume name is user-customisable
+       so we can't hardcode "Macintosh HD".
+
+    On non-macOS (Linux, etc.) returns ``""``. Arq.app v8 itself
+    sometimes emits ``""`` for ``volumeName`` (pre-v101 records),
+    so the empty fallback is harmless to compatibility.
+
+    Lookup failures (path that diskutil doesn't recognise, timeout,
+    /usr/sbin/diskutil missing) also return ``""`` rather than
+    raising — the writer must always succeed even if metadata
+    extraction is degraded.
+    """
+    if sys.platform != "darwin":
+        return ""
+    try:
+        resolved = Path(source).resolve()
+    except (OSError, ValueError):
+        return ""
+    parts = resolved.parts
+    if len(parts) >= 3 and parts[1] == "Volumes":
+        return parts[2]
+    # Boot volume — ask diskutil for its user-facing name.
+    try:
+        import subprocess
+        cp = subprocess.run(
+            ["/usr/sbin/diskutil", "info", str(resolved)],
+            capture_output=True, text=True, timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if cp.returncode != 0:
+        # Fall back to the boot volume itself.
+        try:
+            cp = subprocess.run(
+                ["/usr/sbin/diskutil", "info", "/"],
+                capture_output=True, text=True, timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if cp.returncode != 0:
+            return ""
+    for line in cp.stdout.splitlines():
+        if "Volume Name:" in line:
+            return line.split(":", 1)[1].strip()
+    return ""
 
 
 def _resolve_owner(
@@ -1335,6 +1400,14 @@ class Backup:
             relative_path=rec_relative,
             creation_date=float(creation_date),
             backup_record_errors=self.backup_record_errors,
+            # GAP-E: emit the source volume's user-facing name so
+            # the BackupRecord plist's ``volumeName`` matches
+            # Arq.app v8's emit. Real values sampled 2026-05-10
+            # against /Volumes/arqbackup1: "ssd2", "Macintosh HD",
+            # "vault", "ssd". Empty string fallback on non-macOS
+            # or lookup failure (Arq.app's pre-v101 records also
+            # emit "" sometimes).
+            volume_name=_derive_volume_name(source),
             # F2: when writing Tree v4 records, surface
             # ``nodeTreeVersion`` and bump the record version to
             # 101 to match Arq.app v8's emit (HANDOFF.md F2).
