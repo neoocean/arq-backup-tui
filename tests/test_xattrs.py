@@ -154,7 +154,22 @@ class FilesystemRoundTripTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "blank.txt"
             p.write_bytes(b"x")
-            self.assertEqual(capture_xattrs(p), {})
+            captured = capture_xattrs(p)
+            # Recent macOS releases (≥ Sequoia) auto-attach
+            # ``com.apple.provenance`` to every file the kernel sees
+            # written, regardless of whether userland touches xattrs.
+            # That's a system-managed attribute, not a "the user set
+            # an xattr" event — the contract this test pins is "no
+            # *user-applied* xattrs ⇒ no user-visible xattrs in the
+            # capture". Filter the system-managed namespace before
+            # asserting empty, matching the same robustness pattern
+            # ``test_capture_then_apply_round_trips_byte_perfect``
+            # already uses for its captured set.
+            user_visible = {
+                k: v for k, v in captured.items()
+                if not k.startswith("com.apple.provenance")
+            }
+            self.assertEqual(user_visible, {})
 
     def test_capture_then_apply_round_trips_byte_perfect(self) -> None:
         with tempfile.TemporaryDirectory() as td:
