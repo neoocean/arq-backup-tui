@@ -169,12 +169,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     create.add_argument(
         "--chunker",
-        choices=("none", "default", "arq_v7_41"),
+        choices=("none", "default", "arq_v7_41", "fixed-40m"),
         default="none",
         help=(
             "Chunker selection. 'none' = single blob per file "
             "(default); 'default' = generic Buzhash; "
-            "'arq_v7_41' = Arq.app v7.41-matching parameters."
+            "'arq_v7_41' = Arq.app v7.41-matching Buzhash "
+            "parameters; 'fixed-40m' = Arq.app v8's "
+            "useBuzhash=False mode — fixed 40,000,000-byte "
+            "splits, matches the operator's plan #1 emit "
+            "byte-for-byte (HANDOFF.md GAP-L)."
         ),
     )
     create.add_argument(
@@ -296,6 +300,13 @@ def _resolve_chunker(name: str):
     if name == "arq_v7_41":
         from .arq_chunker_params import ARQ_V7_CHUNKER_CONFIG
         return ARQ_V7_CHUNKER_CONFIG
+    if name == "fixed-40m":
+        # Returning a FixedChunker instance, NOT a ChunkerConfig
+        # — the writer treats anything truthy with a ``.chunk()``
+        # method as a chunker, so this works without changes to
+        # the call site.
+        from .chunker import FixedChunker
+        return FixedChunker()
     return None
 
 

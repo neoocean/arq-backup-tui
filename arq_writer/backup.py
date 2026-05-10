@@ -418,8 +418,18 @@ class Backup:
         self.max_pack_bytes = max_pack_bytes
         self.large_blob_threshold = large_blob_threshold
         self.chunker_config = chunker_config
-        self._chunker: Optional[Buzhash] = (
-            Buzhash(chunker_config) if chunker_config is not None else None
+        # Accept either a ChunkerConfig (wrapped in Buzhash, the
+        # legacy contract) or a pre-built chunker instance with a
+        # ``.chunk(data)`` method (e.g. ``FixedChunker``). The
+        # writer's existing ``self._chunker.chunk(piece)`` call
+        # site doesn't care which one it is.
+        self._chunker = (
+            chunker_config if (
+                chunker_config is not None
+                and hasattr(chunker_config, "chunk")
+            )
+            else Buzhash(chunker_config) if chunker_config is not None
+            else None
         )
         self.dedup_against_existing = dedup_against_existing
         self.max_file_bytes = max_file_bytes
@@ -1322,10 +1332,16 @@ class Backup:
             self._prior_tree = None
 
         # Per-folder chunker override — swap in for the duration
-        # of this folder's walk, then restore.
+        # of this folder's walk, then restore. Same dual-shape
+        # handling as ``__init__``: a pre-built chunker instance
+        # (e.g. ``FixedChunker``) passes through, while a
+        # ``ChunkerConfig`` gets wrapped in ``Buzhash``.
         prev_chunker = self._chunker
         if chunker_config is not None:
-            self._chunker = Buzhash(chunker_config)
+            self._chunker = (
+                chunker_config if hasattr(chunker_config, "chunk")
+                else Buzhash(chunker_config)
+            )
 
         # Walk + write blobs. A cooperative cancel raised mid-walk
         # short-circuits to "no backuprecord written"; the partial

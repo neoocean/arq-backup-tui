@@ -302,5 +302,96 @@ class ChunkerWriterIntegrationTests(unittest.TestCase):
             self.assertEqual(res_r.failures, [])
 
 
+class FixedChunkerTests(unittest.TestCase):
+    """``FixedChunker`` mirrors Arq.app v8's ``useBuzhash=False``
+    emit (HANDOFF.md GAP-L). Sampled 2026-05-10 from a 91 MB
+    SQLite DB on the operator's destination, which split into
+    (40,000,000 + 40,000,000 + 11,815,936) bytes — fixed 40 M
+    decimal-bytes per chunk, no rolling-hash content detection.
+    """
+
+    def test_default_chunk_size_is_40_million_bytes(self) -> None:
+        from arq_writer.chunker import (
+            FIXED_CHUNK_SIZE_ARQ_V8, FixedChunker,
+        )
+        self.assertEqual(FIXED_CHUNK_SIZE_ARQ_V8, 40_000_000)
+        self.assertEqual(FixedChunker().chunk_size, 40_000_000)
+
+    def test_91mb_input_splits_to_40_40_remainder(self) -> None:
+        # The exact split sampled from Arq.app's emit on a real
+        # 91,815,936-byte file: (40 M, 40 M, 11,815,936). Reproduce
+        # it deterministically here so a future refactor of the
+        # chunker can't regress.
+        from arq_writer.chunker import FixedChunker
+        data = b"\xab" * 91_815_936
+        sizes = [len(c) for c in FixedChunker().chunk(data)]
+        self.assertEqual(sizes, [40_000_000, 40_000_000, 11_815_936])
+
+    def test_smaller_than_chunk_yields_one_chunk(self) -> None:
+        from arq_writer.chunker import FixedChunker
+        data = b"x" * 1234
+        sizes = [len(c) for c in FixedChunker().chunk(data)]
+        self.assertEqual(sizes, [1234])
+
+    def test_exact_multiple_yields_no_remainder(self) -> None:
+        from arq_writer.chunker import FixedChunker
+        data = b"y" * 80_000_000
+        sizes = [len(c) for c in FixedChunker().chunk(data)]
+        self.assertEqual(sizes, [40_000_000, 40_000_000])
+
+    def test_empty_input_yields_no_chunks(self) -> None:
+        # Matches ``Buzhash.chunk(b"")``'s same-shape behaviour so
+        # the writer's zero-byte short-circuit keeps working.
+        from arq_writer.chunker import FixedChunker
+        self.assertEqual(list(FixedChunker().chunk(b"")), [])
+
+    def test_custom_chunk_size(self) -> None:
+        # Arq.app may change the default in a future version;
+        # operators on different versions should be able to
+        # override the constant.
+        from arq_writer.chunker import FixedChunker
+        data = b"z" * 1000
+        sizes = [len(c) for c in FixedChunker(300).chunk(data)]
+        self.assertEqual(sizes, [300, 300, 300, 100])
+
+    def test_invalid_chunk_size_raises(self) -> None:
+        from arq_writer.chunker import FixedChunker
+        with self.assertRaises(ValueError):
+            FixedChunker(0)
+        with self.assertRaises(ValueError):
+            FixedChunker(-1)
+
+    def test_writer_integration_via_cli_resolver(self) -> None:
+        # End-to-end: a small backup using ``--chunker fixed-40m``
+        # via the CLI's resolver path. Drives the dual-shape
+        # ``chunker_config`` plumbing in ``Backup.__init__`` (a
+        # FixedChunker instance instead of a ChunkerConfig).
+        from arq_writer.cli import _resolve_chunker
+        from arq_writer.chunker import FixedChunker
+        chunker = _resolve_chunker("fixed-40m")
+        self.assertIsInstance(chunker, FixedChunker)
+        self.assertEqual(chunker.chunk_size, 40_000_000)
+        with tempfile.TemporaryDirectory() as td_str:
+            td = Path(td_str)
+            src = td / "src"; src.mkdir()
+            # 100 KB keeps the test fast — split-shape correctness
+            # is covered by
+            # ``test_91mb_input_splits_to_40_40_remainder``.
+            (src / "f.bin").write_bytes(b"\xcc" * 100_000)
+            res_w = build_backup(
+                src, td / "backup", "pw",
+                chunker_config=chunker,
+            )
+            self.assertGreaterEqual(res_w.files_written, 1)
+            # Round-trip restore confirms the writer accepted the
+            # FixedChunker instance through ``chunker_config``
+            # without trying to wrap it in Buzhash.
+            r = Restore(td / "backup", "pw")
+            res_r = r.restore(
+                folder_uuid=res_w.folder_uuid, dest=td / "out",
+            )
+            self.assertEqual(res_r.failures, [])
+
+
 if __name__ == "__main__":
     unittest.main()
