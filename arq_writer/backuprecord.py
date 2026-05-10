@@ -75,14 +75,42 @@ def blobloc_to_dict(loc: BlobLoc) -> Dict[str, Any]:
 
 
 def node_to_dict(node: Node) -> Dict[str, Any]:
-    """Render a ``Node`` as the dict shape the spec shows in the example.
+    """Render a ``Node`` as the dict shape Arq.app v8 emits in the
+    BackupRecord plist's ``node`` field.
 
-    Field names match the ASCII-plist sample in the Arq 7 spec
-    (``changeTime_*``, ``modificationTime_*``, ``mac_st_*``, etc.) so a
-    reader who has the spec open can recognize them at a glance.
+    Sampled 2026-05-10 against ``/Volumes/arqbackup1`` (HANDOFF.md
+    GAP-B). Per Arq.app v8 the JSON shape carries 9 keys our
+    earlier emit was missing:
+
+    - ``addedTime_sec`` / ``addedTime_nsec`` — when the entry was
+      first added to a backup. We map this to ``create_time_*``
+      because that's the closest semantic our writer tracks
+      without an explicit per-entry add-time field.
+    - ``documentID`` (int, default ``0``) /
+      ``hasDocumentID`` (bool, default ``True``) — macOS document
+      identifier. Constants for non-document files.
+    - ``holes`` (list, default ``[]``) / ``isSparse`` (bool,
+      default ``False``) / ``sparseLogicalSize`` (int, default
+      ``0``) — sparse-file metadata. The writer doesn't probe for
+      sparseness yet (separate enhancement); defaults match the
+      empty / dense case Arq.app emits for ordinary files.
+    - ``reparseTag`` (int) / ``reparsePointIsDirectory`` (bool) —
+      Windows reparse-point fields. Same data the binary tree
+      keeps in ``win_reparse_*``; renamed in JSON to match
+      Arq.app's emit.
+
+    Other key-name conventions (``changeTime_*`` /
+    ``modificationTime_*`` / ``mac_st_*`` / ``winAttrs``) match the
+    Arq 7 spec sample so the file is recognizable next to the spec.
     """
     is_tree = isinstance(node, TreeNode)
     out: Dict[str, Any] = {
+        # When this entry first joined a backup. Best-effort proxy
+        # is the file's create_time; Arq.app tracks this separately
+        # but absent that infrastructure, the create-time is closer
+        # than 0 (which would imply "never added").
+        "addedTime_sec": int(node.create_time_sec),
+        "addedTime_nsec": int(node.create_time_nsec),
         "isTree": bool(is_tree),
         "computerOSType": int(node.computerOSType),
         "containedFilesCount": int(node.containedFilesCount),
@@ -94,6 +122,12 @@ def node_to_dict(node: Node) -> Dict[str, Any]:
         "creationTime_sec": int(node.create_time_sec),
         "creationTime_nsec": int(node.create_time_nsec),
         "deleted": bool(node.deleted),
+        # macOS document ID. Arq.app v8 emits ``hasDocumentID:
+        # True`` even when ``documentID`` is 0 (the operator's
+        # real records consistently show this pair). Non-document
+        # files end up with these defaults.
+        "documentID": 0,
+        "hasDocumentID": True,
         # ``userName`` / ``groupName`` round-trip the resolved
         # owner of the file as Arq.app records them. Discovered
         # against the operator's real Hetzner destination — our
@@ -110,6 +144,20 @@ def node_to_dict(node: Node) -> Dict[str, Any]:
         "mac_st_gid": int(node.mac_st_gid),
         "mac_st_rdev": int(node.mac_st_rdev),
         "mac_st_flags": int(node.mac_st_flags),
+        # Sparse-file metadata. The writer doesn't probe sparseness
+        # itself; emitting the defaults so Arq.app's loader sees a
+        # well-formed shape. Real sparse-file detection is a
+        # follow-up (HANDOFF.md F-series).
+        "isSparse": False,
+        "sparseLogicalSize": 0,
+        "holes": [],
+        # Windows reparse points. The Tree v4 binary keeps these
+        # under ``win_reparse_*``; Arq.app's BackupRecord JSON
+        # drops the ``win_`` prefix.
+        "reparseTag": int(node.win_reparse_tag),
+        "reparsePointIsDirectory": bool(
+            node.win_reparse_point_is_directory
+        ),
         "winAttrs": int(node.win_attrs),
     }
     if is_tree:

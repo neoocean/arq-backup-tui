@@ -261,5 +261,123 @@ class NodeTreeVersionFieldTests(unittest.TestCase):
         self.assertEqual(rec["nodeTreeVersion"], 4)
 
 
+class NodeJsonArqAppV8KeysTests(unittest.TestCase):
+    """``node_to_dict`` emits every key Arq.app v8's BackupRecord
+    JSON ``node`` field carries.
+
+    Sampled 2026-05-10 against a v101 record on
+    ``/Volumes/arqbackup1`` (HANDOFF.md GAP-B): the real root
+    node has 34 keys; pre-fix our emit was 25. The 9 missing keys
+    are the post-fix focus:
+
+    - ``addedTime_sec`` / ``addedTime_nsec``
+    - ``documentID`` / ``hasDocumentID``
+    - ``holes`` / ``isSparse`` / ``sparseLogicalSize``
+    - ``reparseTag`` / ``reparsePointIsDirectory``
+    """
+
+    # Keys common to TreeNode and FileNode JSON shapes.
+    SHARED_KEYS = frozenset({
+        "isTree", "computerOSType", "containedFilesCount", "itemSize",
+        "modificationTime_sec", "modificationTime_nsec",
+        "changeTime_sec", "changeTime_nsec",
+        "creationTime_sec", "creationTime_nsec",
+        "deleted",
+        "userName", "groupName",
+        "mac_st_dev", "mac_st_ino", "mac_st_mode", "mac_st_nlink",
+        "mac_st_uid", "mac_st_gid", "mac_st_rdev", "mac_st_flags",
+        "winAttrs",
+        "dataBlobLocs", "xattrsBlobLocs",
+        # Added in this fix:
+        "addedTime_sec", "addedTime_nsec",
+        "documentID", "hasDocumentID",
+        "holes", "isSparse", "sparseLogicalSize",
+        "reparseTag", "reparsePointIsDirectory",
+    })
+    # ``treeBlobLoc`` is TreeNode-only; FileNode JSON has 33 keys
+    # (the shared set), TreeNode JSON has 34 (plus ``treeBlobLoc``).
+    # The 34-key shape matches Arq.app v8's BackupRecord root node
+    # JSON sampled 2026-05-10 against a v101 record on
+    # ``/Volumes/arqbackup1`` (HANDOFF.md GAP-B).
+    TREE_NODE_KEYS = SHARED_KEYS | {"treeBlobLoc"}
+
+    def _file_node_dict(self):
+        from arq_writer.backuprecord import node_to_dict
+        n = FileNode(
+            itemSize=42, mtime_sec=100, ctime_sec=200,
+            create_time_sec=50, create_time_nsec=12345,
+        )
+        return node_to_dict(n)
+
+    def _tree_node_dict(self):
+        from arq_writer.backuprecord import node_to_dict
+        from arq_writer.types import BlobLoc, TreeNode
+        n = TreeNode(
+            treeBlobLoc=BlobLoc(blobIdentifier="x"),
+            itemSize=0,
+        )
+        return node_to_dict(n)
+
+    def test_file_node_emits_shared_keys(self) -> None:
+        d = self._file_node_dict()
+        self.assertEqual(set(d.keys()), self.SHARED_KEYS)
+
+    def test_tree_node_emits_thirty_four_keys(self) -> None:
+        d = self._tree_node_dict()
+        self.assertEqual(set(d.keys()), self.TREE_NODE_KEYS)
+
+    def test_addedTime_maps_to_create_time(self) -> None:
+        # Best-effort proxy until the writer tracks per-entry
+        # add-time separately. Keeps non-zero values for fresh
+        # entries, which is what Arq.app's emit shows.
+        d = self._file_node_dict()
+        self.assertEqual(d["addedTime_sec"], 50)
+        self.assertEqual(d["addedTime_nsec"], 12345)
+
+    def test_documentID_defaults(self) -> None:
+        # Real records show this exact pair for every non-document
+        # file: documentID=0 with hasDocumentID=True.
+        d = self._file_node_dict()
+        self.assertEqual(d["documentID"], 0)
+        self.assertEqual(d["hasDocumentID"], True)
+        self.assertIs(type(d["documentID"]), int)
+        self.assertIs(type(d["hasDocumentID"]), bool)
+
+    def test_sparse_defaults_for_dense_files(self) -> None:
+        # Writer doesn't probe sparseness yet (separate enhancement);
+        # the defaults must match what Arq.app emits for ordinary
+        # dense files, which is what the operator's records show.
+        d = self._file_node_dict()
+        self.assertEqual(d["isSparse"], False)
+        self.assertEqual(d["sparseLogicalSize"], 0)
+        self.assertEqual(d["holes"], [])
+        self.assertIs(type(d["holes"]), list)
+
+    def test_reparse_keys_renamed_from_win_prefix(self) -> None:
+        # Tree v4 binary keeps these as ``win_reparse_*``; the
+        # JSON path drops the ``win_`` prefix to match Arq.app.
+        from arq_writer.backuprecord import node_to_dict
+        n = FileNode(
+            itemSize=0,
+            win_reparse_tag=0xA000_000C,  # IO_REPARSE_TAG_SYMLINK
+            win_reparse_point_is_directory=True,
+        )
+        d = node_to_dict(n)
+        self.assertEqual(d["reparseTag"], 0xA000_000C)
+        self.assertEqual(d["reparsePointIsDirectory"], True)
+        # And the JSON shape doesn't keep the legacy ``win_*`` names.
+        self.assertNotIn("win_reparse_tag", d)
+        self.assertNotIn("win_reparse_point_is_directory", d)
+
+    def test_winAttrs_kept_camelCase(self) -> None:
+        # The pre-existing ``win_attrs`` → ``winAttrs`` rename
+        # already matched Arq.app and shouldn't regress.
+        from arq_writer.backuprecord import node_to_dict
+        n = FileNode(itemSize=0, win_attrs=0x20)  # FILE_ATTRIBUTE_ARCHIVE
+        d = node_to_dict(n)
+        self.assertEqual(d["winAttrs"], 0x20)
+        self.assertNotIn("win_attrs", d)
+
+
 if __name__ == "__main__":
     unittest.main()
