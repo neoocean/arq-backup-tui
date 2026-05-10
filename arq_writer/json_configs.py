@@ -63,6 +63,12 @@ def build_backupfolders_json(computer_uuid: str) -> dict:
         "standardIAObjectDirs": [],
         "onezoneIAObjectDirs": [],
         "s3GlacierObjectDirs": [],
+        # Glacier Instant Retrieval — Arq.app v8 always emits this
+        # key alongside the other s3*ObjectDirs slots even when the
+        # destination uses no S3 storage class. Omitting it surfaces
+        # in the schema diff against real Arq.app destinations
+        # (docs/COMPAT-VERIFICATION.md §2.7.1).
+        "s3GlacierIRObjectDirs": [],
         "s3DeepArchiveObjectDirs": [],
     }
 

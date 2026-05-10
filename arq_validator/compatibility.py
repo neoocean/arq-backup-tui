@@ -467,6 +467,10 @@ _BACKUPFOLDERS_REQUIRED = (
     "standardIAObjectDirs",
     "onezoneIAObjectDirs",
     "s3GlacierObjectDirs",
+    # Glacier Instant Retrieval — emitted by Arq.app v8 alongside
+    # the other s3*ObjectDirs slots; required for the compatibility
+    # audit so we don't drift back into a missing-key state.
+    "s3GlacierIRObjectDirs",
     "s3DeepArchiveObjectDirs",
 )
 
