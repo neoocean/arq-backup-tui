@@ -22,6 +22,7 @@ Three things land here:
 from __future__ import annotations
 
 import asyncio
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -278,6 +279,18 @@ class BackupRunHonorsExclusionsTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((out / "alpha.txt").is_file())
             self.assertFalse((out / "ignore.log").exists())
 
+    @unittest.skipIf(
+        sys.platform == "darwin",
+        # The test name pins what it pins: the LINUX fallback path.
+        # On macOS the BackupWorker actually goes through the real
+        # APFS-snapshot helper, which on a regular install requires
+        # ``sudo tmutil localsnapshot`` and therefore can't run in
+        # this unit-test harness. Listed under HANDOFF.md "Known
+        # landmines"; the Linux CI matrix already covers the path
+        # this test is responsible for. Tracked as L3.
+        "APFS-snapshot fallback path is Linux-only; on macOS the "
+        "live tmutil call needs sudo (covered by Linux CI).",
+    )
     async def test_use_apfs_snapshot_falls_back_on_linux(self) -> None:
         # On Linux the writer's APFS helper raises NotMacOSError;
         # the worker must catch it, emit apfs_snapshot_skipped, and
