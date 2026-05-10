@@ -221,6 +221,70 @@ def chunk_bytes(
     return Buzhash(config).chunk(data)
 
 
+# Arq.app v8's apparent fixed-blob cap when the plan has
+# ``useBuzhash: False`` — sampled 2026-05-10 from a 91 MB SQLite
+# DB inside the operator's destination, which split into
+# (40,000,000 + 40,000,000 + 11,815,936) bytes. The constant is
+# decimal 40 million, NOT 40 MiB (41,943,040). HANDOFF.md GAP-L.
+FIXED_CHUNK_SIZE_ARQ_V8 = 40_000_000
+
+
+class FixedChunker:
+    """Emit ``data`` as back-to-back fixed-size chunks.
+
+    This is the chunker Arq.app v8 uses when the backup plan has
+    ``useBuzhash: False``. Default chunk size is
+    :data:`FIXED_CHUNK_SIZE_ARQ_V8` (40,000,000 bytes), the value
+    Arq.app v8 actually emits in that mode (see HANDOFF.md GAP-L
+    for the sampling).
+
+    The split is purely positional — no rolling-hash content
+    detection. A 91 MB input therefore deterministically becomes
+    three blobs of (40M, 40M, 11.8M) bytes, which matches Arq.app
+    byte-for-byte at the chunk-boundary level. Combined with the
+    salt-shared ``compute_blob_id`` from PR #57 (Strategy E),
+    that's enough to write a destination whose blob_ids align
+    with whatever Arq.app would produce on the same source under
+    the same plan.
+
+    Use it from the writer via ``--chunker fixed-40m`` (the
+    value :data:`FIXED_CHUNK_SIZE_ARQ_V8` is exposed only because
+    advanced operators on different Arq.app versions may need to
+    override it).
+    """
+
+    def __init__(
+        self,
+        chunk_size: int = FIXED_CHUNK_SIZE_ARQ_V8,
+    ) -> None:
+        if chunk_size < 1:
+            raise ValueError(
+                f"chunk_size must be >= 1, got {chunk_size}"
+            )
+        self.chunk_size = int(chunk_size)
+
+    def chunk(self, data: bytes) -> Iterator[bytes]:
+        """Yield ``data`` in successive ``chunk_size``-byte slices.
+
+        The trailing slice is whatever's left over (size in
+        ``[1, chunk_size]``); empty input produces no chunks at
+        all (matching :class:`Buzhash`'s same-shape behaviour, so
+        the writer's existing zero-bytes short-circuit keeps
+        working).
+        """
+        if not data:
+            return
+        n = len(data)
+        cs = self.chunk_size
+        offset = 0
+        while offset < n:
+            end = offset + cs
+            if end > n:
+                end = n
+            yield data[offset:end]
+            offset = end
+
+
 # ---------------------------------------------------------------------------
 # Multi-version registry for Arq compatibility
 # ---------------------------------------------------------------------------
