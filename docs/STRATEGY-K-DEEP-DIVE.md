@@ -181,22 +181,87 @@ The records' creationDates span ~181k seconds (~50 hours);
 multi-record byte-identity for unchanged files (K2 Finding 1)
 holds across this entire span.
 
-## Recommended follow-ups (K4 deferred)
+## K4-1 sub-tree sweep (2026-05-11)
 
-1. **Sub-tree sweep** — repeat the analysis with sub-trees
-   walked (not just top-level entries) to verify whether the
-   38.4% zero rate at top level differs from the 0.014% rate
-   Strategy K's original sweep reported for the full
-   destination depth. If sub-tree non-zero rate is ~100%, the
-   "all-zero top-level + non-zero everywhere else" pattern
-   becomes a clear Arq.app convention.
-2. **First-walk-time correlation** — fresh Arq.app GUI backup
+K2 + A보완-10 reported all-zero rates of 38.4% (top-level only,
+multi-record). Strategy K's original whole-destination sweep
+showed 0.014%. The discrepancy hinted that all-zero blocks
+might be concentrated at the tree's top level. K4-1 confirms
+this with a depth-grouped sweep against the operator's
+destination.
+
+### Setup
+
+- **Destination**: `/Volumes/arqbackup1`, real Arq.app v8 emit
+- **Sample**: most-recent v4 BackupRecord (folder
+  `CA0D1896-B097-46A2-B0B8-BED9DC8FCE50`,
+  `7877564.backuprecord`), depth-3 walk
+- **Tool**: `scripts/k4_subtree_sweep.py` (this PR)
+
+### Finding — all-zero rate is concentrated at depth ≤ 1
+
+| Depth | Nodes | All-zero | Zero rate | btime_sec match (non-zero) |
+|---:|---:|---:|---:|---:|
+| 0 | 2 | 1 | 50.0% | 0/1 = 0% |
+| 1 | 6 | 2 | 33.3% | 1/4 = 25.0% |
+| 2 | 4 | 0 | 0.0% | 2/4 = 50.0% |
+| 3 | 20,769 | 0 | 0.0% | 9,880/20,769 = 47.6% |
+| **Total** | **20,781** | **3** | **0.014%** | **9,883 / 20,777 = 47.6%** |
+
+**Two clean conclusions**:
+
+1. **Zero trailing blocks live at depth ≤ 1**. Below that, the
+   non-zero rate is **100%** in this sample. This refines K2
+   Finding 2's hypothesis: zero-blocks are an Arq.app
+   convention for the **root-level entries of the BackupRecord's
+   root tree**, not a general "freshly added" pattern. The 21
+   zero blocks K2 reported at top level were all at depths 0-1
+   of the BackupRecord's emission shape.
+
+2. **btime_sec correlation is statistically stable at depth 3**.
+   The 47.6% btime_sec match at depth 3 matches K3's 40.8% and
+   A보완-10's aggregate 43.4% (multi-record top-level non-zero
+   subset). The pattern is consistent across depth levels and
+   sample sizes — the writer's `create_time` fallback hits
+   roughly half the non-zero subset regardless of where in the
+   tree the Node lives.
+
+### Implication for the writer
+
+§5.7.5's decision stands and is now better-supported by the
+depth-grouped evidence:
+
+- A small number of top-of-tree entries (≤ 1% of nodes) get
+  all-zero trailing blocks from Arq.app. The writer's fresh-walk
+  path emits trailing-blocks consistent with the structured
+  documented form for every node — including these — which
+  differs from Arq.app's emit at depth ≤ 1 but matches at
+  depth ≥ 2.
+- For 99% of nodes (depth ≥ 2), the writer's fresh-walk emit
+  byte-equality vs Arq.app's emit depends on the 8-byte
+  scan-timestamp bytes. The `create_time` fallback matches
+  ~47.6% of those cases.
+
+The depth-grouped finding has no bearing on the writer's
+behaviour decision (still: explicit override or deterministic
+fallback). It just sharpens the documentation of where Arq.app's
+emit pattern differs from a content-addressed model's natural
+emit.
+
+### Regression test
+
+`tests/test_k4_subtree_sweep_runner.py` validates the sweep
+script's logic against synthetic depth-tagged trees so future
+refactors to the analyzer can't accidentally regress the depth
+attribution.
+
+## Remaining K4 follow-ups (infrastructure-blocked)
+
+1. **First-walk-time correlation** — fresh Arq.app GUI backup
    of a new source: does trailing_sec equal the new
-   creationDate?
-3. **Strategy I** — operator-driven GUI restore (only
+   creationDate?  (Needs operator to drive a fresh GUI backup.)
+2. **Strategy I** — operator-driven GUI restore (only
    remaining reader-side validation test).
 
-K2 + A보완-10 leave these as observable evidence; the writer's
-behaviour doesn't change. Strategy K's regression coverage
-(`tests/test_serialization_round_trip.TreeV4TrailingBlockPreservationTests`)
-pins the deterministic-fallback invariant.
+K4-1 closed the sub-tree-sweep follow-up; the remaining two
+need operator GUI action.
