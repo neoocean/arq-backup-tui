@@ -172,18 +172,30 @@ def node_to_dict(node: Node) -> Dict[str, Any]:
     out["xattrsBlobLocs"] = [
         blobloc_to_dict(b) for b in node.xattrsBlobLocs
     ]
-    # ``aclBlobLoc`` — discovered missing during D2 value-level
-    # investigation 2026-05-11 against /Volumes/arqbackup1. Real
-    # Arq.app v8 emits this field on every node (TreeNode + FileNode);
-    # null for entries with no ACL, a BlobLoc dict otherwise. Our
-    # earlier emit silently omitted it on both flavours. A downstream
-    # tool walking the JSON shape and expecting the field to be
-    # present (per Arq.app's emit convention) would fail to handle
-    # our records.
+    # ``aclBlobLoc`` — emit semantics refined by V4 (2026-05-11)
+    # against the patched arq_restore. D2 added this field as
+    # `null` for nodes without ACL; that broke arq_restore's
+    # BSD reference parser because its ``Arq7BlobLoc initWithJSON:``
+    # crashes when called on `NSNull` (the `objectForKey:` call
+    # at Arq7BlobLoc.m sends to NSNull → unrecognized selector).
+    #
+    # A re-sample of real Arq.app v8 v4 records confirms Arq.app
+    # OMITS the ``aclBlobLoc`` key entirely when no ACL is
+    # present — not null, just absent. v3 records show the same
+    # pattern (D2's "null for no-ACL" generalisation was based
+    # on the parsed-dict view, where a missing key surfaces as
+    # `None` via ``.get()`` — but that's a Python-side artefact,
+    # not Arq.app's wire format).
+    #
+    # New emit rule: omit the key entirely when no ACL; emit a
+    # BlobLoc dict otherwise. Our reader's ``.get('aclBlobLoc')``
+    # tolerates both shapes (D2 reader-side fix at
+    # arq_reader/restore.py:1138-1150 unaffected). The change
+    # makes our v4 emit consumable by the patched arq_restore
+    # binary (Strategy I-alt fresh-walk verification, §5.9).
     acl_loc = getattr(node, "aclBlobLoc", None)
-    out["aclBlobLoc"] = (
-        blobloc_to_dict(acl_loc) if acl_loc is not None else None
-    )
+    if acl_loc is not None:
+        out["aclBlobLoc"] = blobloc_to_dict(acl_loc)
     return out
 
 
