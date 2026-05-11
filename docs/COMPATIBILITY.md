@@ -132,6 +132,37 @@ with SftpBackend(
 The checker never raises for format failures; everything lands in
 the report.
 
+### Strict mode — round-trip byte equivalence
+
+The default invocation runs **schema-level** checks: the right
+keys exist with the right types and values inside the expected
+ranges. ``strict=True`` adds **byte-level** round-trip checks on
+every parseable artefact (backuprecord, tree binary, xattr blob)
+in the spirit of §5.6 (Strategy F + R4):
+
+```python
+report = check_arq7_compatibility(
+    backend, "/", encryption_password="...",
+    strict=True,
+    strict_sample_cap=64,   # standardobjects per sweep; None = all
+)
+```
+
+Strict mode adds three new check IDs to the report:
+
+| ID  | What it checks                                       |
+|-----|------------------------------------------------------|
+| RT1 | BackupRecord ``parse → serialize`` is byte-identical |
+| RT2 | Tree binary ``parse_tree → write_tree`` is byte-identical |
+| RT3 | Xattr blob ``deserialize → serialize`` is byte-identical |
+
+Drift in any of those would indicate a serialise-layer regression
+the default checker can't catch (a refactor that drops compact
+JSON separators, sorts xattr dict keys, or loses Tree v4 trailing
+bytes). Strict mode is opt-in because it decrypts every sampled
+blob; the default sample cap (64 per sweep) keeps runtime bounded
+on large destinations.
+
 ## Limits of this verification
 
 - **No live Arq.app round-trip in CI**: the checker validates
