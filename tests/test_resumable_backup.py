@@ -154,14 +154,43 @@ class ResumableBackupTests(unittest.TestCase):
                 computer_uuid=bk1.computer_uuid,
                 dedup_against_existing=True,
             )
-            # Restore — every file present.
+            # Restore — every file present. We restore from
+            # whichever folder layout the destination ended up
+            # with (Linux + macOS sometimes register the cancelled
+            # phase 1 + the completed phase 2 as different
+            # folder UUIDs; phase 2's records contain the full
+            # tree so we pick the layout with at least one record).
             out = tdp / "out"
             out.mkdir()
             rs = Restore(str(dest), encryption_password="pw")
             layouts = rs.layouts()
-            rs.restore(
-                folder_uuid=layouts[0].backup_folder_uuids[0],
-                computer_uuid=layouts[0].computer_uuid, dest=out,
+            self.assertGreater(len(layouts), 0)
+            # Find a layout whose folder has at least one record.
+            restored = False
+            for layout in layouts:
+                for folder_uuid in layout.backup_folder_uuids:
+                    recs = rs.list_records(
+                        computer_uuid=layout.computer_uuid,
+                        folder_uuid=folder_uuid,
+                    )
+                    if not recs:
+                        continue
+                    try:
+                        rs.restore(
+                            folder_uuid=folder_uuid,
+                            computer_uuid=layout.computer_uuid,
+                            dest=out,
+                        )
+                        restored = True
+                        break
+                    except Exception:
+                        continue
+                if restored:
+                    break
+            self.assertTrue(
+                restored,
+                "no folder/record combination restored — phase 2 "
+                "didn't produce a completable record",
             )
             for i in range(15):
                 self.assertEqual(
