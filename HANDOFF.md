@@ -160,6 +160,61 @@ reads:
 | Chunker boundaries | ✅ Buzhash (`arq_v7_41`) and fixed-40 M both match Arq.app |
 | Content-address (blob_id) math | ✅ 8/8 chunks match `SHA-256(salt ‖ plaintext)` (Strategy E) |
 
+## 2026-05-11 — A보완 + C 시리즈 (24 PRs landed/open)
+
+After the initial 4-round R/E/L/V/K/A/B/C/D/E chain (PRs #65–#105),
+the operator authorised exhaustive follow-up coverage of every
+boomerang item + new exploration. Result:
+
+### A 보완 (10 PRs, #106–#115)
+
+Strengthens prior PRs:
+
+| ID | PR | What |
+|---|---|---|
+| 보완-1 | #106 | Reader consumes `aclBlobLoc` from JSON root (closes D2 reader gap) |
+| 보완-2 | #107 | L2+D2 end-to-end xattr+ACL consistency (4 layers) |
+| 보완-3 | #108 | `file_skipped` event reason taxonomy pinned |
+| 보완-4 | #109 | TUI Plan → BackupWorker `skip_tm_excludes` wiring |
+| 보완-5 | #110 | C3 ARQO-size determinism pinned explicitly |
+| 보완-6 | #111 | D4 placeholder paths are advertisements (dirs NOT created) |
+| 보완-7 | #112 | `scripts/capture_arqapp_fixture.py` operator helper |
+| 보완-8 | #113 | SFTP-style mock backend robustness coverage |
+| 보완-9 | #114 | C5 200 MB Buzhash validation log (`COMPAT-VERIFICATION.md` §5.4) |
+| 보완-10 | #115 | K2 5-record multi-sweep statistics (`STRATEGY-K-DEEP-DIVE.md`) |
+
+### C 시리즈 (14 PRs, #116–#129)
+
+New compatibility / safety exploration:
+
+| ID | PR | What |
+|---|---|---|
+| F1 | #116 | Concurrent backup safety (sequential/threaded/dedup, no explicit lock model) |
+| F2 | #119 | Resumable backup after mid-walk cancel |
+| F3 | #120 | Backup → restore → backup idempotency |
+| G1 | #121 | Restore `--paths` filter edge cases |
+| G2 | #122 | Restore `on_conflict` policies |
+| H1 | #117 | Symlink loop safety (no walker hang) |
+| H2 | #123 | macOS `.app` bundle handling (nested + symlinks) |
+| I1 | #118 | Permission errors during walk (graceful skip) |
+| I2 | #124 | encryption_password edge cases (empty / Unicode / long / wrong) |
+| I3 | #125 | localPath / localMountPoint edge cases |
+| J1 | #126 | Pack file UUID uniqueness (birthday paradox bound) |
+| J2 | #127 | BackupRecord `<bucket>/<num>` Unix-epoch encoding |
+| L1 | #128 | Empty/missing destination Restore behaviour |
+| M1 | #129 | `macos_default_excludes()` — Arq.app-compatible default exclusion list |
+
+### 미수행 (인프라 부재)
+
+- **C-H3 APFS encrypted volume** — needs an actual encrypted
+  volume mount; deferred until that environment is available.
+- **C-H4 Network filesystem source** (SMB/AFP/NFS) — needs a
+  network mount; deferred.
+- **Strategy I (GUI restore)** — only the operator can drive
+  Arq.app's GUI.
+- **arq_restore upstream PR submission** — only the operator
+  can decide when to file with `arqbackup/arq_restore`.
+
 ## Optional follow-ups (none of these are blockers)
 
 These are not gaps — they're operator-environment-specific
