@@ -975,6 +975,38 @@ of v4. The third is a separate, narrower question that only
 matters for the fresh-walk synthesis path (§5.7) and only against
 Arq.app GUI specifically.
 
+### 5.8.5 ⭐ Fresh-walk verification (V4, 2026-05-11)
+
+§5.8.3's verification log restored an EXISTING v4 record from
+``/Volumes/arqbackup1`` (a destination Arq.app v8 originally
+emitted) — that's the **round-trip** path. V4 closes the
+**fresh-walk** half: our writer emits a brand-new Tree v4
+destination from scratch, then the patched arq_restore reads it
+back and the bytes match the original source.
+
+**Tool**: ``scripts/arq_restore_v4/verify_fresh_walk.py`` —
+builds a flat-tree fixture (ASCII, Unicode, control bytes,
+64 KB random), runs our writer with ``tree_version=4``, then
+restores each file via patched arq_restore and SHA-256 diffs
+against source.
+
+**Result**: 4/4 files byte-identical. Confirms our writer's
+fresh-walk Tree v4 emit is consumable by an independent Tree v4
+reader implementation — proves the writer doesn't depend on
+any parser-side state that arq_restore lacks.
+
+**Production fix surfaced during V4**: ``node_to_dict`` was
+emitting ``aclBlobLoc: null`` for nodes without ACL. Real
+Arq.app v8 records OMIT the key entirely. arq_restore's
+``Arq7BlobLoc initWithJSON:`` crashes on ``NSNull``. The new
+emit rule (omit when null, emit dict otherwise) is now in
+``arq_writer/backuprecord.py``. Tests pinned in
+``tests/test_v4_fresh_walk_via_arq_restore.py``.
+
+The remaining read-side test of v4 — whether Arq.app's own
+GUI accepts our fresh-walk emit — is the operator-driven
+Strategy I and unchanged by V4.
+
 ---
 
 ## 6. ▲ Strategy F — Real backuprecord plist collection
