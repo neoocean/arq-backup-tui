@@ -38,12 +38,25 @@ from typing import Dict, List, Optional
 
 from .types import BlobLoc
 
-# Default pack-file size threshold before flushing to disk. 10 MiB
-# stays well under Arq.app's observed cap (~64 MiB on operator
-# destinations) while keeping the per-pack file count proportional
-# to the backup size — a 1 GB backup yields ~100 pack files at the
-# default. Operators can override per Backup instance.
-DEFAULT_MAX_PACK_BYTES = 10 * 1024 * 1024
+# Default pack-file size threshold before flushing to disk.
+# N8 (2026-05-12) sampled 117,934 pack files on the operator's
+# real Arq.app v8 destination and characterised the actual
+# size distributions:
+#
+#   blobpacks:       median 5.0 MB, p95 5.2 MB, max 5.25 MB
+#                    (hard cap ~5 MB; 71% of packs in 5-6 MB bucket)
+#   treepacks:       median 4.0 MB, p95 17 MB, max 51 MB
+#                    (target ~4 MB, no hard cap)
+#   largeblobpacks:  median 41 MB, p95 51 MB, max 60 MB
+#                    (target ~40 MB, soft cap ~50 MB)
+#
+# Setting this default to 5 MB makes our blobpacks emit at the
+# same size distribution Arq.app v8 produces, which Arq.app's
+# reader is optimised for (memory-mapped blocks sized to typical
+# pack). The constant is operator-overridable per Backup
+# instance for cases where larger packs are preferred (slower
+# storage, fewer-files-better filesystems).
+DEFAULT_MAX_PACK_BYTES = 5 * 1024 * 1024
 
 
 @dataclass
