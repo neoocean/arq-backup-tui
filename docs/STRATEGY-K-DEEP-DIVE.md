@@ -142,26 +142,61 @@ stand-in) produces tree blobs that:
   reuse logic kicked in**, because that's exactly the same
   "ignore the trailing-block timestamp content" pattern.
 
-## Recommended follow-ups
+## Multi-record sweep (A보완-10, 2026-05-11)
 
-1. **Sample across folders + records** — repeat the analysis
-   with `scripts/analyze_v4_trailing_block.py --limit 5000` to
-   verify Finding 1 (cross-record byte identity) at scale.
-2. **Check sub-tree node ratios** — Strategy K's original sweep
-   reported "21,516 non-zero / 21,519 total" across the whole
-   destination, but our K2 sample shows 21/39 (54%) zero
-   trailing blocks on top-level entries. Reconciling the two
-   numbers tells us whether the all-zero pattern is depth-
-   dependent (top-level only) or universal.
-3. **Source-side correlation** — for the non-zero entries with
-   recent trailing_sec, check if `trailing_sec` corresponds to
-   the file's actual modification event on the operator's
-   filesystem (look up `mtime`/`ctime`/`btime` to see which one
-   trailing_sec aligns with). If a clean correlation exists,
-   the writer could synthesise trailing_sec from one of those
-   fields **and** preserve dedup — best of both worlds.
+K2 reported single-record stats; A보완-10 ran a 5-record sweep
+across the most recent v4 records of folder
+`CA0D1896-B097-46A2-B0B8-BED9DC8FCE50` for stronger aggregate
+statistics:
 
-K2 leaves these as observable evidence; the writer's behaviour
-doesn't change with this PR. Strategy K's regression coverage
+| Record creationDate | total nodes | zero trailing | btime_sec match | btime sec+nsec match | mtime_sec match |
+|---|---:|---:|---:|---:|---:|
+| 1777877564 | 39 | 21 | 6 | 6 | 4 |
+| 1777876122 | 39 | 21 | 6 | 6 | 4 |
+| 1777870662 | 40 | 11 | 14 | 14 | 7 |
+| 1777783268 | 40 | 11 | 14 | 14 | 7 |
+| 1777696081 | 40 | 12 | 13 | 13 | 6 |
+| **Aggregate** | **198** | **76 (38.4%)** | **53** | **53** | **28** |
+
+**Aggregate statistics on top-level v4 nodes**:
+
+- Zero trailing blocks: **38.4%** (76/198) at the top level —
+  consistent with the K2 single-record observation that
+  top-level entries are zero-skewed (vs Strategy K's whole-
+  destination 0.014% from the original sweep that walked deeper
+  sub-trees).
+- Non-zero trailing blocks: 122 / 198 = 61.6%.
+- **btime_sec match on non-zero**: 53 / 122 = **43.4%**. Very
+  close to K3's single-record 40.8% — confirms the btime
+  correlation is statistically stable across records.
+- **btime sec+nsec match (when sec matches)**: 53 / 53 =
+  **100%**. Strengthens K3's 60% — when trailing_sec ==
+  btime_sec, trailing_nsec ALWAYS == btime_nsec in this multi-
+  record sample. The writer's `create_time` fallback hits 100%
+  of the "btime-aligned" subset.
+- **mtime_sec match**: 28 / 122 = 22.9%. Roughly half the
+  btime_sec rate, confirming btime is the stronger predictor.
+
+The records' creationDates span ~181k seconds (~50 hours);
+multi-record byte-identity for unchanged files (K2 Finding 1)
+holds across this entire span.
+
+## Recommended follow-ups (K4 deferred)
+
+1. **Sub-tree sweep** — repeat the analysis with sub-trees
+   walked (not just top-level entries) to verify whether the
+   38.4% zero rate at top level differs from the 0.014% rate
+   Strategy K's original sweep reported for the full
+   destination depth. If sub-tree non-zero rate is ~100%, the
+   "all-zero top-level + non-zero everywhere else" pattern
+   becomes a clear Arq.app convention.
+2. **First-walk-time correlation** — fresh Arq.app GUI backup
+   of a new source: does trailing_sec equal the new
+   creationDate?
+3. **Strategy I** — operator-driven GUI restore (only
+   remaining reader-side validation test).
+
+K2 + A보완-10 leave these as observable evidence; the writer's
+behaviour doesn't change. Strategy K's regression coverage
 (`tests/test_serialization_round_trip.TreeV4TrailingBlockPreservationTests`)
-already pins the deterministic-fallback invariant.
+pins the deterministic-fallback invariant.
