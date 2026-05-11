@@ -125,14 +125,46 @@ class P1PlanFieldRoundTripTests(unittest.TestCase):
 
 
 class P1ScheduleJsonShapeTests(unittest.TestCase):
-    """scheduleJSON is polymorphic by ``type``; our writer emits
-    the Hourly shape (8 keys). Pin that shape until/unless the
-    operator's plan-edit UX adds Daily / weekly / etc. support."""
+    """scheduleJSON is polymorphic by ``type``. P2 (PR #N+1)
+    added build_schedule_json and switched the default to the
+    Daily shape (6 keys) to match real Arq.app v8 emit.
+    Hourly remains available via explicit opt-in."""
 
-    def test_schedulejson_default_shape_is_hourly(self) -> None:
+    def test_schedulejson_default_shape_is_daily(self) -> None:
         from arq_writer.json_configs import build_backupplan
         plan = build_backupplan(
             plan_uuid="aaa", plan_name="x", folder_plans=[],
+        )
+        sj = plan["scheduleJSON"]
+        expected_keys = {
+            "backUpAndValidate", "daysOfWeek",
+            "pauseDuringWindow",
+            "startWhenVolumeIsConnected", "timeOfDay", "type",
+        }
+        self.assertEqual(set(sj.keys()), expected_keys)
+        self.assertEqual(len(sj.keys()), 6)
+
+    def test_schedulejson_default_type_is_daily(self) -> None:
+        from arq_writer.json_configs import build_backupplan
+        plan = build_backupplan(
+            plan_uuid="aaa", plan_name="x", folder_plans=[],
+        )
+        self.assertEqual(plan["scheduleJSON"]["type"], "Daily")
+        self.assertEqual(
+            plan["scheduleJSON"]["daysOfWeek"],
+            ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        )
+
+    def test_schedulejson_hourly_opt_in(self) -> None:
+        """P2: explicit Hourly opt-in via build_schedule_json."""
+        from arq_writer.json_configs import (
+            build_backupplan, build_schedule_json,
+        )
+        plan = build_backupplan(
+            plan_uuid="aaa", plan_name="x", folder_plans=[],
+            schedule_json=build_schedule_json(
+                schedule_type="Hourly",
+            ),
         )
         sj = plan["scheduleJSON"]
         expected_keys = {
@@ -141,18 +173,7 @@ class P1ScheduleJsonShapeTests(unittest.TestCase):
             "startWhenVolumeIsConnected", "type",
         }
         self.assertEqual(set(sj.keys()), expected_keys)
-        self.assertEqual(len(sj.keys()), 8)
-
-    def test_schedulejson_type_field_is_hourly(self) -> None:
-        from arq_writer.json_configs import build_backupplan
-        plan = build_backupplan(
-            plan_uuid="aaa", plan_name="x", folder_plans=[],
-        )
-        self.assertEqual(plan["scheduleJSON"]["type"], "Hourly")
-        self.assertEqual(
-            plan["scheduleJSON"]["daysOfWeek"],
-            ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-        )
+        self.assertEqual(sj["type"], "Hourly")
 
 
 @unittest.skipUnless(_has_openssl(), "openssl CLI required")

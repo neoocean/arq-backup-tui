@@ -9,7 +9,7 @@ side effects from missing keys are not worth the byte savings.
 
 from __future__ import annotations
 
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from .constants import (
     BLOB_ID_SHA256,
@@ -161,6 +161,117 @@ def build_folder_plan(
     }
 
 
+def build_schedule_json(
+    *,
+    schedule_type: str = "Daily",
+    days_of_week: Optional[list] = None,
+    time_of_day: str = "12:00",
+    every_hours: int = 1,
+    minutes_after_hour: int = 0,
+    back_up_and_validate: bool = True,
+    pause_during_window: bool = False,
+    pause_from: str = "09:00",
+    pause_to: str = "17:00",
+    start_when_volume_is_connected: bool = False,
+) -> dict:
+    """Build a polymorphic ``scheduleJSON`` dict.
+
+    Arq.app v8 emits ``scheduleJSON`` with a SHAPE that varies by
+    ``type``:
+
+    - ``type='Daily'`` (6 keys): ``backUpAndValidate``,
+      ``daysOfWeek``, ``pauseDuringWindow``,
+      ``startWhenVolumeIsConnected``, ``timeOfDay``, ``type``.
+      What real Arq.app v8 emits on a freshly-provisioned plan
+      (re-sampled 2026-05-11 against ``/Volumes/arqbackup1``).
+    - ``type='Hourly'`` (8 keys): ``daysOfWeek``, ``everyHours``,
+      ``minutesAfterHour``, ``pauseDuringWindow``, ``pauseFrom``,
+      ``pauseTo``, ``startWhenVolumeIsConnected``, ``type``.
+      Arq.app's higher-frequency alternative — emit when the
+      operator wants sub-daily backup intervals.
+
+    The default (``Daily``) matches real Arq.app v8's own emit
+    so a destination produced with no schedule override has the
+    same shape Arq.app would produce.
+    """
+    if days_of_week is None:
+        days_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    if schedule_type == "Daily":
+        return {
+            "backUpAndValidate": bool(back_up_and_validate),
+            "daysOfWeek": list(days_of_week),
+            "pauseDuringWindow": bool(pause_during_window),
+            "startWhenVolumeIsConnected": bool(
+                start_when_volume_is_connected
+            ),
+            "timeOfDay": time_of_day,
+            "type": "Daily",
+        }
+    if schedule_type == "Hourly":
+        return {
+            "daysOfWeek": list(days_of_week),
+            "everyHours": int(every_hours),
+            "minutesAfterHour": int(minutes_after_hour),
+            "pauseDuringWindow": bool(pause_during_window),
+            "pauseFrom": pause_from,
+            "pauseTo": pause_to,
+            "startWhenVolumeIsConnected": bool(
+                start_when_volume_is_connected
+            ),
+            "type": "Hourly",
+        }
+    raise ValueError(
+        f"unknown scheduleJSON type {schedule_type!r}; "
+        f"expected 'Daily' or 'Hourly'"
+    )
+
+
+def build_transfer_rate_json(
+    *,
+    enabled: bool = False,
+    schedule_type: str = "Always",
+    days_of_week: Optional[list] = None,
+    start_time_of_day: str = "08:00",
+    end_time_of_day: str = "17:00",
+    max_kbps: int = 100,
+) -> dict:
+    """Build a polymorphic ``transferRateJSON`` dict.
+
+    Arq.app v8 emits with a shape that depends on
+    ``scheduleType``:
+
+    - ``scheduleType='Always'`` (5 keys, no ``maxKBPS``): real
+      Arq.app v8 default for the always-on, unthrottled case.
+    - ``scheduleType='Scheduled'`` (6 keys including
+      ``maxKBPS``): rate-capped, time-windowed throttling.
+
+    Default matches real Arq.app v8's emit (Always).
+    """
+    if days_of_week is None:
+        days_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    if schedule_type == "Always":
+        return {
+            "daysOfWeek": list(days_of_week),
+            "enabled": bool(enabled),
+            "endTimeOfDay": end_time_of_day,
+            "scheduleType": "Always",
+            "startTimeOfDay": start_time_of_day,
+        }
+    if schedule_type == "Scheduled":
+        return {
+            "daysOfWeek": list(days_of_week),
+            "enabled": bool(enabled),
+            "endTimeOfDay": end_time_of_day,
+            "maxKBPS": int(max_kbps),
+            "scheduleType": "Scheduled",
+            "startTimeOfDay": start_time_of_day,
+        }
+    raise ValueError(
+        f"unknown transferRateJSON scheduleType {schedule_type!r}; "
+        f"expected 'Always' or 'Scheduled'"
+    )
+
+
 def build_backupplan(
     *,
     plan_uuid: str,
@@ -170,6 +281,8 @@ def build_backupplan(
     update_time: float = 0.0,
     creation_time: float = 0.0,
     storage_location_id: int = 1,
+    schedule_json: Optional[dict] = None,
+    transfer_rate_json: Optional[dict] = None,
 ) -> dict:
     """Build ``backupplan.json``.
 
@@ -177,6 +290,13 @@ def build_backupplan(
     Arq.app emits are present, with reasonable defaults for an
     operator-driven manual backup (every-day schedule, no email
     reports, no transfer-rate cap).
+
+    ``schedule_json`` / ``transfer_rate_json`` opt-ins let the
+    operator specify a custom shape (e.g. Hourly schedule or
+    Scheduled transfer rate). When omitted, the defaults are
+    the Daily/Always shapes Arq.app v8 emits on a fresh plan
+    (P2 re-sampling 2026-05-11). Use ``build_schedule_json`` /
+    ``build_transfer_rate_json`` to construct alternate shapes.
     """
     folder_plans_dict = {
         fp["backupFolderUUID"]: fp for fp in folder_plans
@@ -260,26 +380,25 @@ def build_backupplan(
         "retainHours": 24,
         "retainMonths": 60,
         "retainWeeks": 52,
-        "scheduleJSON": {
-            "daysOfWeek": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-            "everyHours": 1,
-            "minutesAfterHour": 0,
-            "pauseDuringWindow": False,
-            "pauseFrom": "09:00",
-            "pauseTo": "17:00",
-            "startWhenVolumeIsConnected": False,
-            "type": "Hourly",
-        },
+        # scheduleJSON / transferRateJSON are polymorphic by
+        # type / scheduleType discriminator (P2 finding,
+        # 2026-05-11). Default to the Daily / Always shapes
+        # Arq.app v8 emits on a fresh plan; operators wanting
+        # Hourly / Scheduled shapes can pass an explicit dict
+        # built with ``build_schedule_json`` /
+        # ``build_transfer_rate_json``.
+        "scheduleJSON": (
+            schedule_json
+            if schedule_json is not None
+            else build_schedule_json()
+        ),
         "storageLocationId": storage_location_id,
         "threadCount": 2,
-        "transferRateJSON": {
-            "daysOfWeek": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-            "enabled": False,
-            "endTimeOfDay": "18:00",
-            "maxKBPS": 100,
-            "scheduleType": "Scheduled",
-            "startTimeOfDay": "18:00",
-        },
+        "transferRateJSON": (
+            transfer_rate_json
+            if transfer_rate_json is not None
+            else build_transfer_rate_json()
+        ),
         # Same int-vs-str fix as ``creationTime`` above. Arq.app
         # v8 emits ``updateTime`` as an integer Unix epoch.
         "updateTime": int(update_time) if update_time else 0,
