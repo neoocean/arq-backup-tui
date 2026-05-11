@@ -1131,17 +1131,31 @@ class Restore:
                       total_files=total_files,
                       total_bytes=total_bytes)
             # Build a minimal root TreeNode just so the recursion's
-            # xattr-application step has something to read; the only
-            # field we actually consume from it at the root level is
-            # ``xattrsBlobLocs`` (every other field is rebuilt from
-            # the freshly-parsed Tree binaries).
+            # xattr-application + ACL-application steps have
+            # something to read. Two fields are consumed at the
+            # root level:
+            #
+            # - ``xattrsBlobLocs`` — covers the source-root dir's
+            #   xattrs
+            # - ``aclBlobLoc`` — covers the source-root dir's ACL
+            #   (D2 added the JSON emit + A보완-1 closes the
+            #   reader-side consumption gap here)
+            #
+            # Every other field is rebuilt from the freshly-parsed
+            # Tree binaries below.
             root_xattr_locs = [
                 self._blobloc_from_dict(b)
                 for b in (node_dict.get("xattrsBlobLocs") or [])
             ]
+            root_acl_dict = node_dict.get("aclBlobLoc")
+            root_acl_loc = (
+                self._blobloc_from_dict(root_acl_dict)
+                if isinstance(root_acl_dict, dict) else None
+            )
             root_tree_node = TreeNode(
                 treeBlobLoc=tree_blob_loc,
                 xattrsBlobLocs=root_xattr_locs,
+                aclBlobLoc=root_acl_loc,
             )
             self._restore_dir_node(
                 tree_blob_loc, out_dir, keyset, result, callback,
