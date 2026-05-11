@@ -127,6 +127,39 @@ def _emit(cb: Optional[ProgressCb], kind: str, **payload: object) -> None:
         pass
 
 
+# Time Machine exclusion marker xattr (macOS). When present on a
+# file, the OS hints "exclude me from backup tools". Arq.app v8
+# honours this by default; our walker matches that convention
+# unless the operator sets ``skip_tm_excludes=True`` on the
+# Backup instance. E2-new.
+_TM_EXCLUDE_XATTR = "com.apple.metadata:com_apple_backup_excludeItem"
+
+
+def _is_tm_excluded(path: Path) -> bool:
+    """True iff ``path`` carries the macOS Time Machine
+    exclusion xattr. Returns False on platforms / filesystems
+    without xattr support — those can't carry the marker."""
+    if not hasattr(os, "listxattr"):
+        # macOS Python (CPython before 3.10) lacks os.listxattr.
+        # The ctypes path lives in arq_writer.xattrs — use it.
+        try:
+            from arq_writer.xattrs import _macos_listxattr
+        except Exception:
+            return False
+        try:
+            names = _macos_listxattr(os.fsencode(os.fspath(path)))
+        except Exception:
+            return False
+        return _TM_EXCLUDE_XATTR in names
+    try:
+        names = os.listxattr(  # type: ignore[attr-defined]
+            os.fspath(path), follow_symlinks=False,
+        )
+    except (OSError, AttributeError):
+        return False
+    return _TM_EXCLUDE_XATTR in names
+
+
 def _shard_for(blob_id: str) -> Tuple[str, str]:
     """Split a 64-char SHA-256 hex into (shard, name).
 
@@ -343,7 +376,17 @@ class Backup:
         backend=None,
         callback: Optional[ProgressCb] = None,
         tree_version: int = TREE_VERSION,
+        skip_tm_excludes: bool = False,
     ) -> None:
+        # Note: ``skip_tm_excludes`` mirrors Arq.app v8's
+        # ``skipTMExcludes`` plan field. False (default) =
+        # OBEY the OS-level ``com.apple.metadata:com_apple_backup_excludeItem``
+        # xattr (skip files marked TM-excluded). True = OVERRIDE
+        # the xattr (include those files anyway). Honoured in
+        # ``_walk_file`` via an xattr check before any read. The
+        # plan JSON's ``skipTMExcludes`` field is emitted with
+        # this value so a destination reads back as the operator
+        # configured it. E2-new.
         # When ``backend`` is None we drive a LocalBackend rooted at
         # dest_root (so all backend-relative paths starting with /
         # land under dest_root on disk). When ``backend`` is given,
@@ -415,6 +458,7 @@ class Backup:
         # 3, so we keep that as the default and let opt-ins flow
         # through this knob.
         self.tree_version = int(tree_version)
+        self.skip_tm_excludes = bool(skip_tm_excludes)
         self.max_pack_bytes = max_pack_bytes
         self.large_blob_threshold = large_blob_threshold
         self.chunker_config = chunker_config
@@ -894,6 +938,23 @@ class Backup:
         """Process one source file. Returns ``None`` when the file
         is skipped (size limit / exclusion); the parent ``_walk_dir``
         drops ``None`` results from its children list."""
+        # Time Machine exclusion. The OS marks files with
+        # ``com.apple.metadata:com_apple_backup_excludeItem`` xattr
+        # when the operator (or an application's installer) wants
+        # them excluded from Time Machine + similar backup tools.
+        # Arq.app v8 honours this xattr by default. Our walker
+        # respects the same convention unless the operator sets
+        # ``skip_tm_excludes=True`` to override. Implementation
+        # detail: we check via lstat + a dedicated xattr probe
+        # because :func:`capture_xattrs` runs later in the walk
+        # and we want to short-circuit before any expensive read
+        # of file content for TM-excluded files. E2-new.
+        if not getattr(self, "skip_tm_excludes", False):
+            if _is_tm_excluded(src):
+                _emit(self.callback, "file_skipped",
+                      path=str(src), rel_path=rel_path,
+                      reason="tm_excluded")
+                return None
         # Special-file gate. Named pipes (FIFO), Unix sockets, and
         # block/character device nodes aren't backup-meaningful —
         # their "content" is a kernel-provided stream / channel, not
@@ -1518,6 +1579,7 @@ def build_backup(
     exclusions=None,
     use_apfs_snapshot: bool = False,
     tree_version: int = TREE_VERSION,
+    skip_tm_excludes: bool = False,
 ) -> BackupResult:
     """One-shot convenience wrapper: full plan init + single folder.
 
@@ -1556,6 +1618,7 @@ def build_backup(
         max_file_bytes=max_file_bytes,
         exclusions=exclusions,
         tree_version=tree_version,
+        skip_tm_excludes=skip_tm_excludes,
     )
     bk.init_plan()
 
