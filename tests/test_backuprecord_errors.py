@@ -277,6 +277,12 @@ class NodeJsonArqAppV8KeysTests(unittest.TestCase):
     """
 
     # Keys common to TreeNode and FileNode JSON shapes.
+    # Updated 2026-05-11 (V4 fix): D2 had ``aclBlobLoc`` always
+    # emitted (null when no ACL, BlobLoc dict otherwise). V4
+    # found that arq_restore's parser crashes on ``aclBlobLoc:
+    # null``, and re-sampling real Arq.app v8 v4 records
+    # confirmed Arq.app OMITS the key entirely. The current emit
+    # rule omits when null; the key is conditional, not shared.
     SHARED_KEYS = frozenset({
         "isTree", "computerOSType", "containedFilesCount", "itemSize",
         "modificationTime_sec", "modificationTime_nsec",
@@ -293,17 +299,14 @@ class NodeJsonArqAppV8KeysTests(unittest.TestCase):
         "documentID", "hasDocumentID",
         "holes", "isSparse", "sparseLogicalSize",
         "reparseTag", "reparsePointIsDirectory",
-        # Added in D2 — discovered missing 2026-05-11 via value-
-        # level diff against /Volumes/arqbackup1. Real Arq.app v8
-        # emits ``aclBlobLoc`` on every node (null when no ACL,
-        # BlobLoc dict otherwise).
-        "aclBlobLoc",
     })
-    # ``treeBlobLoc`` is TreeNode-only; FileNode JSON has 34 keys
-    # (the shared set), TreeNode JSON has 35 (plus ``treeBlobLoc``).
-    # The 35-key shape matches Arq.app v8's BackupRecord root node
-    # JSON sampled 2026-05-11 against a v101 record on
-    # ``/Volumes/arqbackup1`` (D2 investigation).
+    # FileNode JSON has 33 keys (shared set), TreeNode JSON has
+    # 34 (plus ``treeBlobLoc``). When the node carries an ACL,
+    # ``aclBlobLoc`` is added on top (FileNode: 34 keys, TreeNode:
+    # 35) — pinned by the ACL-emit test below. Sampled count
+    # matches Arq.app v8's BackupRecord root node JSON
+    # (re-sampled 2026-05-11 against ``/Volumes/arqbackup1`` v4
+    # record post-V4 fix).
     TREE_NODE_KEYS = SHARED_KEYS | {"treeBlobLoc"}
 
     def _file_node_dict(self):
@@ -328,8 +331,32 @@ class NodeJsonArqAppV8KeysTests(unittest.TestCase):
         self.assertEqual(set(d.keys()), self.SHARED_KEYS)
 
     def test_tree_node_emits_thirty_five_keys(self) -> None:
+        # Tree node without ACL emits 34 keys (was 35 pre-V4 fix
+        # when aclBlobLoc was always emitted). With ACL the node
+        # emits 35 — covered by test_acl_blob_loc_emitted_when_present.
         d = self._tree_node_dict()
         self.assertEqual(set(d.keys()), self.TREE_NODE_KEYS)
+        self.assertEqual(len(d), 34)
+
+    def test_acl_blob_loc_emitted_when_present(self) -> None:
+        """V4 fix: ``aclBlobLoc`` is conditional. Tree node with
+        ACL emits 35 keys; without ACL it emits 34 (key absent)."""
+        from arq_writer.backuprecord import node_to_dict
+        from arq_writer.types import BlobLoc, TreeNode
+        loc = BlobLoc(blobIdentifier="acl" * 21 + "x")
+        node = TreeNode(
+            treeBlobLoc=BlobLoc(blobIdentifier="tree"),
+            aclBlobLoc=loc,
+        )
+        d = node_to_dict(node)
+        self.assertIn("aclBlobLoc", d)
+        self.assertEqual(d["aclBlobLoc"]["blobIdentifier"],
+                         "acl" * 21 + "x")
+        self.assertEqual(
+            set(d.keys()),
+            self.TREE_NODE_KEYS | {"aclBlobLoc"},
+        )
+        self.assertEqual(len(d), 35)
 
     def test_addedTime_maps_to_create_time(self) -> None:
         # Best-effort proxy until the writer tracks per-entry
