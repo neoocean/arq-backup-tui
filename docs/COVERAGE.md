@@ -19,9 +19,10 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with bounded LRU tree-walk reuse; walker emits explicit error events on per-file failures (no silent corruption) |
 | Operate           | ✅ Schedule (cron + launchd + auto-gc), notifications (notify_run_finished wired to RunWriter), TUI (M1–M6 + maintenance + activity), retention + blob GC, disk-precheck on backup start, macOS progress toasts, .secrets/ wizard checkbox; throttle controllable via audit-drip rate flags |
 
-The aggregate test count is **~720 unit tests** at the time this
-table was last updated (after PRs #36–#41); the suite runs in
-~140 s on a stdlib-only toolchain
+The aggregate test count is **~810 unit tests** at the time this
+table was last updated (Round 6 — PRs #131–#143 landed 13 derived
+items spanning A/B/C/D/E/F/G series); the suite runs in
+~150 s on a stdlib-only toolchain
 (``python -m unittest discover``). TUI tests
 (~50 / 355) require the optional ``textual`` dep; without it
 they auto-skip and the rest of the suite (library + RE +
@@ -366,3 +367,48 @@ is preserved but the runtime effect (e.g. emitting a symlink)
 is missing. ❌ means it isn't there and a test would fail (or
 doesn't exist). 🔴 means it lives outside the on-disk format
 spec entirely — Arq.app concern, not ours.
+
+## Round 6 derived-items batch (2026-05-11)
+
+Round 6 derived **33 additional compatibility items** from
+focused review of the writer / reader / validator triple after
+Round 5's schema-completeness work landed. The 33 items were
+addressed in 13 PRs (one logical group each):
+
+| PR | Items | Subject |
+|---:|---|---|
+| #131 | A11 | JSON field ordering (NSDictionary byte-diff documented) |
+| #132 | D9 | JSON encoding edge cases (non-ASCII, slash escape, separators) |
+| #133 | C9 | stretchEncryptionKey per-blob flag handling |
+| #134 | C6 | Tree deep-recursion safety (100-150 levels) |
+| #135 | A13 | Mixed v100+v101 destination handling |
+| #136 | B6+B7 | Mid-walk file mutation handling |
+| #137 | A12+A14+A15 | BackupRecord edge fields (archived, OS type, empty source) |
+| #138 | C7+C8+C10 | Reader defensive handling of malformed BlobLoc / packs |
+| #139 | B8+B9+B10 | Walker races against a moving source tree |
+| #140 | D6+D7+D8+D10 | Value-level config + plist↔JSON round-trip |
+| #141 | F4+F5+F6+F7 | xattr / ACL / FinderInfo edge cases |
+| #142 | G3+G4+G5 | Chunker boundary cases |
+| #143 | E7+E9+E11+E12 | Operational CLI / restore / retention / gc edges |
+
+Aggregate: **~95 new unit tests** pinning previously-unverified
+edge cases. Two items deferred:
+
+- **E8** (`arq-validator CLI tier × backend` matrix) — needs
+  SFTP deployment infrastructure to test multi-tier × multi-
+  backend combinations end-to-end. The matrix is already
+  exercised at the Python API level by existing
+  `tests/test_arq7_compatibility.py` (15 tests) + the SFTP
+  backend smoke tests; an explicit CLI-level cross product
+  would be redundant without an SFTP fixture.
+- **E10** (`audit-drip resume mid-walk`) — needs a long-running
+  audit fixture deployed in CI for deterministic checkpoint /
+  resume coverage. The drip helper's checkpoint round-trip is
+  already covered at the unit-test layer; a true mid-walk
+  resume against a 500GB+ destination is operator-facing and
+  would need real-world deployment to verify.
+
+After Round 6's landing, **no derived compatibility items remain
+unaddressed** at the format / behaviour layer. Future work
+focuses on infrastructure (SFTP CI fixtures, deployment) rather
+than format correctness.

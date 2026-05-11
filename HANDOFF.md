@@ -215,6 +215,47 @@ New compatibility / safety exploration:
 - **arq_restore upstream PR submission** — only the operator
   can decide when to file with `arqbackup/arq_restore`.
 
+## 2026-05-11 — Round 6 derived-items batch (13 PRs)
+
+After the C 시리즈 + 미수행 list above, deeper review yielded **33
+additional derived items** across A/B/C/D/E/F/G axes (format
+edges, walker races, reader robustness, value-level configs,
+metadata edges, chunker boundaries, operational CLI corners).
+Addressed in 13 PRs (#131–#143) grouping logically-related items.
+
+| PR | Items | Subject |
+|---:|---|---|
+| #131 | A11 | JSON field ordering (NSDictionary byte-diff documented as inherent) |
+| #132 | D9 | JSON encoding edges (non-ASCII, slash escape, separators) |
+| #133 | C9 | stretchEncryptionKey per-blob flag handling |
+| #134 | C6 | Tree deep-recursion (100-150 levels) |
+| #135 | A13 | Mixed v100+v101 destinations |
+| #136 | B6+B7 | Mid-walk file mutation |
+| #137 | A12+A14+A15 | BackupRecord edges (archived, OS type, empty source) |
+| #138 | C7+C8+C10 | Reader defensive handling of malformed BlobLoc / packs |
+| #139 | B8+B9+B10 | Walker races against moving source tree |
+| #140 | D6+D7+D8+D10 | Value-level config + plist↔JSON round-trip |
+| #141 | F4+F5+F6+F7 | xattr / ACL / FinderInfo edge cases |
+| #142 | G3+G4+G5 | Chunker boundary cases |
+| #143 | E7+E9+E11+E12 | CLI / restore / retention / gc operational edges |
+
+**Aggregate**: ~95 new unit tests across 13 modules. All pass on
+the local Python 3.13 toolchain.
+
+**Two items deferred** (infrastructure-blocked, not format gaps):
+
+- **E8** (validator CLI × backend × tier matrix) — needs SFTP
+  deployment infrastructure. The matrix is already covered at
+  the Python API level by `tests/test_arq7_compatibility.py`.
+- **E10** (audit-drip mid-walk resume) — needs a long-running
+  audit fixture against a real destination. The checkpoint
+  round-trip is unit-covered; end-to-end mid-walk resume is
+  operator-deployment-facing.
+
+After Round 6's landing, **no derived compatibility items remain
+unaddressed** at the format / behaviour layer. Future work
+focuses on infrastructure rather than format correctness.
+
 ## Optional follow-ups (none of these are blockers)
 
 These are not gaps — they're operator-environment-specific
