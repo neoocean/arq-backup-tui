@@ -172,6 +172,18 @@ def node_to_dict(node: Node) -> Dict[str, Any]:
     out["xattrsBlobLocs"] = [
         blobloc_to_dict(b) for b in node.xattrsBlobLocs
     ]
+    # ``aclBlobLoc`` — discovered missing during D2 value-level
+    # investigation 2026-05-11 against /Volumes/arqbackup1. Real
+    # Arq.app v8 emits this field on every node (TreeNode + FileNode);
+    # null for entries with no ACL, a BlobLoc dict otherwise. Our
+    # earlier emit silently omitted it on both flavours. A downstream
+    # tool walking the JSON shape and expecting the field to be
+    # present (per Arq.app's emit convention) would fail to handle
+    # our records.
+    acl_loc = getattr(node, "aclBlobLoc", None)
+    out["aclBlobLoc"] = (
+        blobloc_to_dict(acl_loc) if acl_loc is not None else None
+    )
     return out
 
 

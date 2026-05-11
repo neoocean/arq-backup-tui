@@ -288,17 +288,22 @@ class NodeJsonArqAppV8KeysTests(unittest.TestCase):
         "mac_st_uid", "mac_st_gid", "mac_st_rdev", "mac_st_flags",
         "winAttrs",
         "dataBlobLocs", "xattrsBlobLocs",
-        # Added in this fix:
+        # Added in GAP-α (the original 9-key gap close):
         "addedTime_sec", "addedTime_nsec",
         "documentID", "hasDocumentID",
         "holes", "isSparse", "sparseLogicalSize",
         "reparseTag", "reparsePointIsDirectory",
+        # Added in D2 — discovered missing 2026-05-11 via value-
+        # level diff against /Volumes/arqbackup1. Real Arq.app v8
+        # emits ``aclBlobLoc`` on every node (null when no ACL,
+        # BlobLoc dict otherwise).
+        "aclBlobLoc",
     })
-    # ``treeBlobLoc`` is TreeNode-only; FileNode JSON has 33 keys
-    # (the shared set), TreeNode JSON has 34 (plus ``treeBlobLoc``).
-    # The 34-key shape matches Arq.app v8's BackupRecord root node
-    # JSON sampled 2026-05-10 against a v101 record on
-    # ``/Volumes/arqbackup1`` (HANDOFF.md GAP-B).
+    # ``treeBlobLoc`` is TreeNode-only; FileNode JSON has 34 keys
+    # (the shared set), TreeNode JSON has 35 (plus ``treeBlobLoc``).
+    # The 35-key shape matches Arq.app v8's BackupRecord root node
+    # JSON sampled 2026-05-11 against a v101 record on
+    # ``/Volumes/arqbackup1`` (D2 investigation).
     TREE_NODE_KEYS = SHARED_KEYS | {"treeBlobLoc"}
 
     def _file_node_dict(self):
@@ -322,7 +327,7 @@ class NodeJsonArqAppV8KeysTests(unittest.TestCase):
         d = self._file_node_dict()
         self.assertEqual(set(d.keys()), self.SHARED_KEYS)
 
-    def test_tree_node_emits_thirty_four_keys(self) -> None:
+    def test_tree_node_emits_thirty_five_keys(self) -> None:
         d = self._tree_node_dict()
         self.assertEqual(set(d.keys()), self.TREE_NODE_KEYS)
 
