@@ -256,6 +256,49 @@ After Round 6's landing, **no derived compatibility items remain
 unaddressed** at the format / behaviour layer. Future work
 focuses on infrastructure rather than format correctness.
 
+## 2026-05-11 — Round 7 deep-RE follow-ups (6 PRs)
+
+After Round 6 closed, deeper investigation of three K4 follow-ups
++ three writer-side scale verifications produced 6 PRs (#145–#150).
+**One production bug surfaced and was fixed** (V4); two
+**deep-RE findings** narrowed the trailing-block gap.
+
+| PR | Item | Subject | Key Finding |
+|---:|---|---|---|
+| #146 | **V4** | Fresh-walk Tree v4 via patched arq_restore | **Production bug**: `aclBlobLoc: null` emit made our v4 records unreadable by arq_restore (NSException). Fix: omit when null. 4/4 fresh-walk byte-identical. |
+| #145 | **K4-1** | Tree v4 sub-tree depth sweep | Zero trailing-blocks concentrated at tree depth ≤ 1; 99.9% of nodes (depth 3+) are non-zero. |
+| #148 | **P1** | backupplan.json round-trip | scheduleJSON polymorphism documented (Daily 6-key vs Hourly 8-key shapes). |
+| #147 | **R5** | Schema parity re-sample | **0 gaps** — 100% key match across all 4 sidecars + record shapes after V4 fix. |
+| #150 | **K4-2** | Trailing-block residual correlation | **88.2% of non-btime residual matches ctime_sec** → combined btime+ctime explains 94% of all non-zero nodes. |
+| #149 | **C-S1** | Strategy C at scale (65+ files) | All 65 Tree v3 files byte-identical via patched arq_restore. Original §4.3 was 4-file scope. |
+
+**Production bug fixed (V4)**: `node_to_dict` was emitting
+`aclBlobLoc: null` for every node without an ACL. Real Arq.app
+v8 OMITS the key entirely. arq_restore's `Arq7BlobLoc
+initWithJSON:` crashes on `NSNull` — our v4 emit was unreadable
+by the BSD reference reader. Fix: omit the key when null.
+
+**Two K4 items still infrastructure-blocked**:
+- First-walk-time correlation (operator must drive a fresh
+  Arq.app GUI backup on a new source).
+- Strategy I (operator must restore via Arq.app GUI).
+
+## 2026-05-11 — Round 8 plan-shape polymorphism (1 PR)
+
+R5's "0 schema gaps" claim held at the key-name level, but P1's
+deeper inspection found that two sub-objects of `backupplan.json`
+are **polymorphic by their type discriminator** — and our writer
+was always emitting the less-common shape.
+
+| PR | Item | Subject | Finding |
+|---:|---|---|---|
+| #151 | **P2** | scheduleJSON + transferRateJSON polymorphism | `scheduleJSON` varies by `type`: Daily (6 keys, real default) vs Hourly (8 keys). `transferRateJSON` varies by `scheduleType`: Always (5 keys, real default; no `maxKBPS`) vs Scheduled (6 keys with `maxKBPS`). New `build_schedule_json` / `build_transfer_rate_json` factories; defaults switched to Daily / Always to match real Arq.app v8. |
+
+**Round 8 audit (V5)**: confirmed zero `null` fields anywhere in
+real Arq.app emits — V4's `aclBlobLoc: null` was the only such
+case across sidecars + BackupRecord shapes. No similar fixes
+needed elsewhere.
+
 ## Optional follow-ups (none of these are blockers)
 
 These are not gaps — they're operator-environment-specific

@@ -19,10 +19,11 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with bounded LRU tree-walk reuse; walker emits explicit error events on per-file failures (no silent corruption) |
 | Operate           | ✅ Schedule (cron + launchd + auto-gc), notifications (notify_run_finished wired to RunWriter), TUI (M1–M6 + maintenance + activity), retention + blob GC, disk-precheck on backup start, macOS progress toasts, .secrets/ wizard checkbox; throttle controllable via audit-drip rate flags |
 
-The aggregate test count is **~810 unit tests** at the time this
-table was last updated (Round 6 — PRs #131–#143 landed 13 derived
-items spanning A/B/C/D/E/F/G series); the suite runs in
-~150 s on a stdlib-only toolchain
+The aggregate test count is **~840 unit tests** at the time this
+table was last updated (Round 8 — Round 6's 13 PRs + Round 7's
+6 deep-RE PRs + Round 8's plan-polymorphism PR added ~125
+total tests); the suite runs in ~155 s on a stdlib-only
+toolchain
 (``python -m unittest discover``). TUI tests
 (~50 / 355) require the optional ``textual`` dep; without it
 they auto-skip and the rest of the suite (library + RE +
@@ -412,3 +413,39 @@ After Round 6's landing, **no derived compatibility items remain
 unaddressed** at the format / behaviour layer. Future work
 focuses on infrastructure (SFTP CI fixtures, deployment) rather
 than format correctness.
+
+## Round 7 deep-RE follow-ups (2026-05-11)
+
+After Round 6 closed with "0 derived items remaining", deeper
+inspection of three K4 follow-ups + three writer-side scale
+verifications surfaced **one real production bug** and **two
+significant deep-RE findings** that further narrow the
+trailing-block gap:
+
+| PR | Item | Subject |
+|---:|---|---|
+| #146 | **V4** | Fresh-walk Tree v4 via patched arq_restore (**aclBlobLoc null→omit bug fixed**) |
+| #145 | **K4-1** | Tree v4 sub-tree depth sweep |
+| #148 | **P1** | backupplan.json operator round-trip + scheduleJSON polymorphism documented |
+| #147 | **R5** | Schema parity re-sample (0 gaps confirmed) |
+| #150 | **K4-2** | Trailing-block residual ctime correlation (94% coverage) |
+| #149 | **C-S1** | Strategy C at scale (65+ files via patched arq_restore) |
+
+Aggregate: ~20 new tests + 1 production fix.
+
+## Round 8 plan-shape polymorphism (2026-05-11)
+
+P1's documented "scheduleJSON shape limitation" closed with P2,
+which also surfaced a second polymorphic sub-object
+(transferRateJSON):
+
+| PR | Item | Subject |
+|---:|---|---|
+| #151 | **P2** | scheduleJSON Daily/Hourly + transferRateJSON Always/Scheduled polymorphism; defaults switched to Daily / Always to match real Arq.app v8 emit |
+
+Aggregate: 13 new tests + 2 new factory functions
+(`build_schedule_json`, `build_transfer_rate_json`).
+
+**Round 8 V5 audit**: confirmed zero `null` fields anywhere in
+real Arq.app emits — V4's `aclBlobLoc: null` was the only such
+case. No similar fixes needed elsewhere.
