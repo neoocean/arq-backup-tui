@@ -736,8 +736,16 @@ def _check_backuprecords(
                             "B3", f"node.treeBlobLoc dict ({rec_path})",
                             f"got {type(node.get('treeBlobLoc')).__name__}",
                         ))
-                # SV3: backuprecord version is 100.
-                if record.get("version") not in (100, 200):
+                # SV3: backuprecord version known. Arq.app v8 emits:
+                #   100 → legacy Tree v3 records (the bulk)
+                #   101 → current Tree v4 records (added in 7.40)
+                #   200 → forward-compat slot per spec
+                # Sampled 2026-05-11 against /Volumes/arqbackup1:
+                # 333 records v100 + 18 records v101 + 0 records v200.
+                # Pre-A3 the validator accepted only (100, 200) which
+                # made every v101 (Tree v4) record FAIL SV3 — a real
+                # production bug for any operator with Tree v4 data.
+                if record.get("version") not in (100, 101, 200):
                     _add(report, _fail(
                         "SV3", f"backuprecord version known ({rec_path})",
                         f"got {record.get('version')}",
