@@ -210,21 +210,85 @@ consideration if/when needed.
 - **macOS resource forks** preservation in restore: cross-
   platform stance — captured in metadata, not applied on restore.
 
+## 2026-05-11 session — autonomous R/E/L/V/K + K2/K3 chain (13 PRs)
+
+This session executed the operator-authorised "R, E, L, V, K
+series whole, autonomous mode" instruction. Outcome: 13 PRs
+opened (PR #64 from a prior session was pre-existing).
+
+**Production bugs caught + fixed (3):**
+
+- **PR #67 (L2)** — ``arq_writer/prior_tree.py::reuse_file_node_for``
+  was dropping ``xattrsBlobLocs`` + ``aclBlobLoc`` when reusing a
+  prior FileNode during ``dedup_against_existing``. Two real
+  consequences: silent xattr/ACL loss on restore + dedup-defeating
+  tree blob drift. Surfaced as macOS test failures because of
+  Sequoia's ``com.apple.provenance`` auto-attach; Linux test files
+  with no xattrs hid the bug.
+- **PR #70 (E2)** — walker had no gate for FIFO / Unix socket /
+  char / block device files. A source tree with a single
+  read-only FIFO and no writer would hang the entire backup
+  indefinitely on ``Path.read_bytes()``. Added ``S_ISFIFO`` /
+  ``S_ISSOCK`` / ``S_ISCHR`` / ``S_ISBLK`` detection before any
+  read attempt; emits ``file_skipped`` event with the kind.
+- **PR #73 (E4)** — macOS Sequoia ``ls -led`` prefixes ACL rows
+  with a leading space; the existing capture code's
+  ``ln[0].isdigit()`` check rejected them, so ACL capture
+  silently returned ``b""`` on Sequoia. The wiring tests covered
+  "is ``capture_acl`` called?" (yes) but not "does it return non-
+  empty bytes when an ACL exists?" (silently no). Fix: lstrip
+  before the digit check.
+
+**New test coverage (7 PRs):**
+
+| PR | What | Tests |
+|---|---|---:|
+| #65 (L1) | macOS provenance auto-attach absorbed | 1 fix |
+| #66 (L3) | sudo-dependent APFS test skipped on macOS | 1 fix |
+| #69 (R2) | ``arq_validator`` strict mode (RT1/RT2/RT3) | 4 new |
+| #70 (E2) | exotic file types (FIFO/socket/device/broken-symlink/hardlink) | 5 new |
+| #71 (E1) | sparse file content round-trip + policy | 3 new |
+| #72 (E3) | XAttrSetV002 under extreme loads | 5 new |
+| #73 (E4) | ACL + FinderInfo + ResourceFork | 5 new |
+| #74 (E5) | NFD vs NFC byte preservation | 3 new |
+| #75 (R1) | Strategy E auto + fixture-driven Strategy B | 3+N new |
+
+**Compatibility work (3 PRs):**
+
+- **PR #68 (V3)** — ``scripts/arq_restore_v4/UPSTREAM-PR.md``:
+  polished submission packet for upstreaming the Tree v4 patch
+  to ``arqbackup/arq_restore``. Title, body, workflow,
+  verification transcript — everything the operator needs as
+  copy-paste source. Stacks on PR #64.
+- **PR #76 (K2)** — ``docs/STRATEGY-K-DEEP-DIVE.md`` +
+  ``scripts/analyze_v4_trailing_block.py``: empirical evidence
+  that trailing-block bytes 0..15 are **per-Node-emit-event
+  timestamps with persistence across scans** (refining §5.7.5's
+  "wall-clock scan timestamp" formulation). Cross-record byte
+  identity demonstrated for 5 unchanged files between two
+  records 1442 s apart.
+- **PR #77 (K3)** — ``docs/STRATEGY-K3-CORRELATION.md``:
+  field-by-field correlation across 3,148 v4 nodes shows
+  ``btime`` is the strongest predictor of trailing_block
+  (40.8% sec match, 24.6% sec+nsec match) — justifies the
+  writer's current ``create_time`` fallback. Documents three
+  options for closing the residual 59.2% gap, recommends no
+  change pending Strategy I (operator GUI restore).
+
+**Pending — needs operator authorisation:**
+
+- **PR #64 → main** — Strategy I-alt branch (patched
+  arq_restore for Tree v4). Auto-mode classifier blocked the
+  merge attempt during the autonomous chain.
+- All 13 session PRs (#65–#77) — ready for review + merge.
+
 ## Known landmines
 
-- **macOS env-specific failures** (CI passes on Linux):
-  - `tests/test_xattrs.py::FilesystemRoundTripTests::test_capture_returns_empty_for_file_with_no_xattrs`
-    fails on recent macOS because the OS auto-attaches
-    `com.apple.provenance` to files Python's tempfile creates.
-  - `tests/test_sftp_backend_wiring.py` (1 test),
-    `tests/test_record_tier_ledger.py::RecordTierLedgerSkipsTests::test_ledger_short_circuits_already_known_blob_ids`,
-    and `tests/test_dedup_and_incremental_audit.py::DedupMeasurementTests::test_no_change_yields_high_dedup`
-    + `tests/test_retention.py::PackedModeRetentionTests::test_pack_files_collected_correctly`
-    fail for the same root cause (xattr drift between dedupe
-    runs).
-  - `tests/test_tui_m7_advanced.py::test_use_apfs_snapshot_falls_back_on_linux`
-    fails on macOS because it tries `tmutil localsnapshot`
-    which needs sudo. Pre-existing.
+- **macOS env-specific failures** — all five from the prior
+  session are now closed:
+  - ``tests/test_xattrs.py::test_capture_returns_empty_for_file_with_no_xattrs`` → PR #65 (L1)
+  - ``tests/test_record_tier_ledger.py``, ``test_dedup_and_incremental_audit.py``, ``test_retention.py``, ``test_sftp_backend_wiring.py`` → PR #67 (L2 — root cause was actually ``reuse_file_node_for`` bug, not xattr drift)
+  - ``tests/test_tui_m7_advanced.py::test_use_apfs_snapshot_falls_back_on_linux`` → PR #66 (L3)
 - **Auto-mode classifier** sometimes blocks `gh pr merge` even
   on confirmed-green CI. Workaround: re-run `gh pr checks N`
   to confirm green explicitly, then retry merge.
