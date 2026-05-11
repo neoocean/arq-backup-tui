@@ -263,5 +263,81 @@ attribution.
 2. **Strategy I** — operator-driven GUI restore (only
    remaining reader-side validation test).
 
-K4-1 closed the sub-tree-sweep follow-up; the remaining two
-need operator GUI action.
+K4-1 closed the sub-tree-sweep follow-up; K4-2 closes the
+residual-correlation analysis (below); the remaining two need
+operator GUI action.
+
+## K4-2 trailing-block residual: ctime correlation closes 88% (2026-05-11)
+
+K3 + A보완-10 left the residual ~53% non-btime-matching nodes
+unexplained — the writer's `create_time` fallback covered the
+47% that matched btime, but the rest had no documented mapping.
+K4-2 sweeps the residual against `mtime_sec`, `ctime_sec`, and
+`record.creationDate` offset to find any pattern.
+
+### Setup
+
+- **Tool**: `scripts/k4_2_residual_analysis.py` (this PR)
+- **Sample**: latest v4 record on
+  `CA0D1896-B097-46A2-B0B8-BED9DC8FCE50`,
+  `7877564.backuprecord`, full sub-tree depth 3
+- **Total non-zero nodes**: 20,778
+
+### Finding — **trailing_sec is btime_sec OR ctime_sec for 94% of nodes**
+
+```
+Total non-zero nodes:           20,778
+  btime_sec match:               9,883  (47.6%)
+  residual (non-btime):         10,895
+    mtime_sec match:                 0  ( 0.0%)
+    ctime_sec match:             9,609  (88.2% of residual)
+    offset from creationDate:  mean=285 days
+```
+
+**The trailing_sec encodes either `btime_sec` (when the file
+was created on this filesystem) OR `ctime_sec` (when the file's
+metadata was last changed) — whichever Arq.app's walker
+captured at first-emit time.**
+
+Combining the two correlations:
+
+- btime match: 9,883
+- ctime match in residual: 9,609
+- **Total btime-or-ctime explained**: 19,492 / 20,778 = **93.8%**
+
+The remaining 1,286 nodes (6.2%) have trailing_sec values that
+match neither btime nor ctime nor mtime — likely files whose
+metadata was modified after first emit (so ctime drifted past
+the emit time, but the trailing-block kept the original).
+
+### Cross-cluster pattern
+
+The "mean offset from creationDate = 285 days" is consistent
+with K2 Finding 4 ("sec values cluster around content-change
+events"). The 285-day offset matches the operator's long-tail
+of files created / modified months ago that haven't been
+touched since — exactly the files whose ctime equals their
+initial-emit-into-Arq time.
+
+### Implication for the writer
+
+The current fallback (`create_time`) matches 47.6%. A
+refinement to use `ctime` for nodes where btime mismatches
+COULD push the match rate to ~94% — but at the cost of
+breaking dedup-safety: ctime changes on every metadata
+modification (chmod, chown, xattr add), so a re-emit of the
+same file with new metadata would produce a different
+trailing_sec → different tree blob → blob_id miss.
+
+The writer's content-addressed model can't follow that pattern
+without sidecar state. K3 §5.7.5's decision stands: the
+deterministic `create_time` fallback gives 100% reproducibility
++ 47.6% match — preferable to a non-deterministic ctime
+fallback that hits 94% but breaks dedup.
+
+K4-2 is a **documentation finding**, not a writer behaviour
+change. The improved understanding is preserved here for future
+readers of the Strategy K saga; the regression test at
+`tests/test_k4_2_residual_correlation.py` pins the
+analyzer's residual-classification math against synthetic
+input.
