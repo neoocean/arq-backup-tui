@@ -35,13 +35,15 @@ class BackupFoldersIndexTests(unittest.TestCase):
         self.assertEqual(set(out.keys()), self.EXPECTED_KEYS)
 
     def test_includes_s3GlacierIRObjectDirs(self) -> None:
-        # Regression for the 2026-05-10 schema diff: this key was
-        # missing from our writer's output but present (as []) in
-        # Arq.app v8's emit. Pin it as an empty list — same shape
-        # Arq.app uses for unused storage-class slots.
+        # Pre-D4 we emitted this as ``[]``; post-D4 the placeholder
+        # path mirrors Arq.app v8's emit shape (single-element
+        # list per storage-class slot, even when unused).
         out = build_backupfolders_json("CU-1234")
         self.assertIn("s3GlacierIRObjectDirs", out)
-        self.assertEqual(out["s3GlacierIRObjectDirs"], [])
+        self.assertEqual(
+            out["s3GlacierIRObjectDirs"],
+            ["/CU-1234/s3glacierirobjects"],
+        )
 
     def test_storage_class_slots_are_lists(self) -> None:
         out = build_backupfolders_json("CU-1234")
@@ -51,15 +53,22 @@ class BackupFoldersIndexTests(unittest.TestCase):
             )
 
     def test_standard_dir_threads_through_computer_uuid(self) -> None:
-        # Sanity: the only slot writes use is standardObjectDirs.
-        # Make sure the UUID is wired in and the others stay empty.
+        # All 6 storage-class ObjectDirs are emitted with their
+        # placeholder paths under /<cu>/<class>objects (D4
+        # investigation pins this against real Arq.app v8 emit).
         out = build_backupfolders_json("CU-WIRED-IN")
-        self.assertEqual(
-            out["standardObjectDirs"],
-            ["/CU-WIRED-IN/standardobjects"],
-        )
-        for k in self.EXPECTED_KEYS - {"standardObjectDirs"}:
-            self.assertEqual(out[k], [], msg=k)
+        expected_paths = {
+            "standardObjectDirs": "/CU-WIRED-IN/standardobjects",
+            "standardIAObjectDirs": "/CU-WIRED-IN/standardiaobjects",
+            "onezoneIAObjectDirs": "/CU-WIRED-IN/onezoneiaobjects",
+            "s3GlacierObjectDirs": "/CU-WIRED-IN/s3glacierobjects",
+            "s3GlacierIRObjectDirs": "/CU-WIRED-IN/s3glacierirobjects",
+            "s3DeepArchiveObjectDirs": (
+                "/CU-WIRED-IN/s3deeparchiveobjects"
+            ),
+        }
+        for k, p in expected_paths.items():
+            self.assertEqual(out[k], [p], msg=k)
 
 
 class FolderPlanArqAppV8KeysTests(unittest.TestCase):
