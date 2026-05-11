@@ -96,6 +96,33 @@ class MaxPackedItemLengthBoundaryTests(unittest.TestCase):
                     largest_arqo = e.length
         return bp_files, lbp_files, largest_arqo
 
+    def test_arqo_size_measurement_is_deterministic(self) -> None:
+        """A보완-5: the random.Random(seed).randbytes() + AES-CBC
+        padding + ARQO header sizing chain is fully deterministic.
+        Two independent measurements with the same threshold MUST
+        produce identical arqo_size — otherwise the threshold-
+        based tests below are unreliable.
+
+        Pre-A보완-5 these tests assumed stability without pinning
+        it; if a future refactor introduced non-determinism (e.g.
+        randomised tree timestamps), the boundary tests would
+        flake. This test makes the determinism explicit."""
+        with tempfile.TemporaryDirectory() as td:
+            _, _, size_a = self._build_and_get_arqo_size(
+                Path(td), 10_000_000,
+            )
+        with tempfile.TemporaryDirectory() as td:
+            _, _, size_b = self._build_and_get_arqo_size(
+                Path(td), 10_000_000,
+            )
+        self.assertEqual(
+            size_a, size_b,
+            f"arqo size measurement drifted: run-1={size_a} "
+            f"vs run-2={size_b}. The seed/padding/header chain "
+            f"must be deterministic for the boundary tests to "
+            f"be reliable.",
+        )
+
     def test_threshold_equals_arqo_size_routes_to_blobpacks(
         self,
     ) -> None:
