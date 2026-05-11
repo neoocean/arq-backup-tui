@@ -894,6 +894,46 @@ class Backup:
         """Process one source file. Returns ``None`` when the file
         is skipped (size limit / exclusion); the parent ``_walk_dir``
         drops ``None`` results from its children list."""
+        # Special-file gate. Named pipes (FIFO), Unix sockets, and
+        # block/character device nodes aren't backup-meaningful —
+        # their "content" is a kernel-provided stream / channel, not
+        # a fixed byte sequence. Worse, opening a read-only FIFO with
+        # no writer blocks the walker indefinitely; the previous
+        # behaviour was to hang the entire backup on the first FIFO
+        # in the source tree. Detect and skip these before any read
+        # attempt so the operator gets a structured ``file_skipped``
+        # event in the run summary instead of an unexplained stall.
+        # Symlinks (S_IFLNK) and regular files fall through to the
+        # normal walker; the lstat() pattern matches what
+        # ``_walk_dir`` already uses for directory entries.
+        try:
+            sf_stat = src.lstat()
+        except OSError:
+            sf_stat = None
+        if sf_stat is not None:
+            import stat as _stat_mod
+            mode = sf_stat.st_mode
+            if (
+                _stat_mod.S_ISFIFO(mode)
+                or _stat_mod.S_ISSOCK(mode)
+                or _stat_mod.S_ISCHR(mode)
+                or _stat_mod.S_ISBLK(mode)
+            ):
+                special_kind = (
+                    "fifo" if _stat_mod.S_ISFIFO(mode)
+                    else "socket" if _stat_mod.S_ISSOCK(mode)
+                    else "char_device" if _stat_mod.S_ISCHR(mode)
+                    else "block_device"
+                )
+                # ``kind`` is the event name (``_emit``'s second positional),
+                # so we use ``special_kind`` for the payload field naming
+                # the special-file flavour (fifo / socket / char_device /
+                # block_device).
+                _emit(self.callback, "file_skipped",
+                      path=str(src), rel_path=rel_path,
+                      reason="special_file", special_kind=special_kind,
+                      mode=oct(mode))
+                return None
         # File-size skip rule. Symlinks always pass (their lstat
         # size is just the link-target string length).
         if (
