@@ -1,0 +1,57 @@
+From: Claude Code <noreply@anthropic.com>
+Date: 2026-05-11
+Subject: [PATCH] Arq7Node: consume the 38-byte trailing block for Tree v4
+
+The published `arq_restore` (https://github.com/arqbackup/arq_restore)
+predates Arq.app v8's Tree v4 emit. `Arq7Node::initWithBufferedInputStream:`
+has a branch for `theTreeVersion >= 2` (reparse fields) but nothing
+for `>= 4` — so when it consumes a v4 Node, it stops 38 bytes short
+of where the next Node begins, and the second Node's `isTree` flag
+reads from the middle of the previous Node's trailing block. From
+that point the parse cascade and restoration fails with
+`missing blob identifier`.
+
+The 38-byte trailing block is decoded in this project's
+`docs/COMPAT-VERIFICATION.md` §5.7 (Strategy K). It carries a
+backup-engine "scanned-at" timestamp (sec int64 BE + nsec int64 BE)
+plus a `0x0000000001000000` present-flag and 14 reserved zero bytes.
+Restore doesn't need any of these values — it just has to advance
+the input stream past them.
+
+Tested against the operator's real Arq.app v8 destination
+`/Volumes/arqbackup1` (18 v4 BackupRecords, arqVersion 7.40.1 /
+7.40.2). With this patch, `arq_restore`'s `listtree` walks v4 trees
+cleanly and `restore` produces files whose SHA-256 matches what
+this project's Python reader produces independently.
+
+---
+ arq7restore/Arq7Node.m | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/arq7restore/Arq7Node.m b/arq7restore/Arq7Node.m
+--- a/arq7restore/Arq7Node.m
++++ b/arq7restore/Arq7Node.m
+@@ -318,6 +318,22 @@
+         if (theTreeVersion >= 2) {
+             if (![IntegerIO readUInt32:&_reparseTag from:bis error:error]
+                 || ![BooleanIO read:&_reparsePointIsDirectory from:bis error:error]) {
+                 return nil;
+             }
+         }
++        if (theTreeVersion >= 4) {
++            // Tree v4 adds a 38-byte trailing block per Node.
++            // bytes  0..7   int64 BE  scanned-at sec   (backup-engine walk timestamp,
++            // bytes  8..15  int64 BE  scanned-at nsec   not a file-metadata field)
++            // bytes 16..23  int64 BE  present-flag (0x0000000001000000)
++            // bytes 24..37  14 reserved zeros
++            // All of these are backup-engine state that arq_restore doesn't
++            // need to consume the file content — we just have to advance the
++            // input stream past them so the next Node starts at the right
++            // offset. See https://github.com/neoocean/arq-backup-tui
++            // docs/COMPAT-VERIFICATION.md §5.7 for the byte-level RE notes.
++            unsigned char v4_trailing[38];
++            if (![bis readExactly:38 into:v4_trailing error:error]) {
++                return nil;
++            }
++        }
+         _userName = userName;

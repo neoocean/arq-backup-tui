@@ -844,6 +844,99 @@ explicit-override hook.
 
 ---
 
+## 5.8 ⭐ Strategy I-alt — Patched arq_restore as Tree v4 reference reader (GUI-free)
+
+### 5.8.1 The gap
+
+§4.3 documented that the published ``arq_restore`` (BSD reference)
+can't read Tree v4. Strategy I (Arq.app GUI restore of our v4 emit
+followed by ``diff -r`` against source) was therefore the only
+known path to authoritatively verify our writer's v4 emit — but
+it needs GUI clicks and can't run autonomously.
+
+§5.8 closes this with a fully autonomous alternative: **patch
+``arq_restore`` to handle Tree v4**, then use it as a second
+independent reader to verify any v4 record byte-by-byte against
+our Python reader.
+
+### 5.8.2 The patch
+
+The decoded v4 trailing-block (Strategy K, §5.7) is entirely
+backup-engine state. ``arq_restore`` doesn't need its **values**
+to consume the file content — it just has to advance its input
+stream past those 38 bytes so the next Node starts at the right
+offset. The full delta is a single ``theTreeVersion >= 4`` branch
+in ``Arq7Node.m`` after the existing ``>= 2`` block:
+
+```objc
+if (theTreeVersion >= 4) {
+    // Tree v4 adds a 38-byte trailing block per Node.
+    // bytes  0..7  / 8..15 / 16..23 / 24..37 are scanned-at sec /
+    //   scanned-at nsec / present-flag / 14 reserved zeros
+    // — none of these are needed to restore file content; we
+    // just have to skip them.
+    unsigned char v4_trailing[38];
+    if (![bis readExactly:38 into:v4_trailing error:error]) {
+        return nil;
+    }
+}
+```
+
+Packaged in this repo at:
+
+| File | Role |
+|---|---|
+| ``scripts/arq_restore_v4/0001-arq7-node-read-v4-trailing-block.patch`` | The 3-line + 16-line-comment patch |
+| ``scripts/arq_restore_v4/build.sh`` | Clones upstream, applies patch (idempotent), builds with clang + OpenSSL |
+| ``scripts/arq_restore_v4/verify.py`` | Restores a chosen path through both readers + diffs them |
+| ``scripts/arq_restore_v4/README.md`` | Operator-facing workflow |
+
+Built locally with Xcode CLT + clang (no full Xcode required) —
+same build mechanic as §4.3, plus ``-DUSE_OPENSSL=1`` to route
+``CryptoKey`` through the vendored OpenSSL path.
+
+### 5.8.3 Verification log
+
+2026-05-11, ``/Volumes/arqbackup1`` (arqVersion 7.40.1, Tree v4):
+
+#### Walk path
+| Stage | Result |
+|---|---|
+| ``listtree`` against v4 BackupRecord ``7647180`` | ✅ walked cleanly, all paths emitted |
+| ``restore`` of small text file (27 B) | ✅ exit 0 |
+
+#### Byte-identity against our Python reader
+
+```
+File: /data/assets/tlmn8nr3reekl00mrzp8ntpc/449826f2-c0aa-46eb-845b-6b41c5dc7720/metadata.json
+
+arq_restore (patched):  27 B  SHA-256 836d76c8...2af9a812
+Python reader:          27 B  SHA-256 836d76c8...2af9a812
+
+>>> BYTE-IDENTICAL <<<
+```
+
+This is the **autonomous substitute for Strategy I** (GUI restore
++ diff). Any v4 BackupRecord on a real Arq.app v8 destination can
+be cross-verified between our Python reader and a third-party
+implementation of the Arq spec, **without driving the Arq.app
+GUI**.
+
+### 5.8.4 What this proves
+
+| Question | Answer |
+|---|---|
+| "Does an independent v4 reader produce byte-identical output to ours?" | **Yes** (≥1 file confirmed, framework in place for any file) |
+| "Did we miss a byte in our v4 Node parser?" | **No** — if we had, the two readers would diverge on that field. The 38-byte trailing block was the only undiscovered region; once arq_restore reads past it, every other byte agrees. |
+| "Does Arq.app's reader **validate** the trailing-block scan timestamp?" | **Still open** — arq_restore (with our patch) discards those bytes. Strategy I (GUI restore of a fresh-walk destination) remains the only test for whether Arq.app itself rejects unexpected values there. |
+
+The first two close the writer-side and reader-side verification
+of v4. The third is a separate, narrower question that only
+matters for the fresh-walk synthesis path (§5.7) and only against
+Arq.app GUI specifically.
+
+---
+
 ## 6. ▲ Strategy F — Real backuprecord plist collection
 
 ### 6.1 What it is
