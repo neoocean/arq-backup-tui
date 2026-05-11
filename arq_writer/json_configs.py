@@ -51,25 +51,55 @@ def build_backupconfig(
 def build_backupfolders_json(computer_uuid: str) -> dict:
     """Build the top-level ``backupfolders.json``.
 
-    Only the ``standardObjectDirs`` field is populated since the v0
-    writer stores everything under ``standardobjects/``. The other
-    storage-class fields stay empty — matches what ``arq_restore`` /
-    Arq.app expect for a non-S3 destination.
+    Arq.app v8 emits each storage-class ObjectDir field as a
+    single-element list of the corresponding directory path
+    under ``/<computer_uuid>/...``, regardless of whether any
+    actual objects use that storage class. Sampled 2026-05-11
+    against ``/Volumes/arqbackup1`` (D4 investigation): all 6
+    fields carry placeholder paths even though only the
+    ``standardobjects`` directory actually exists on disk.
+
+    Path naming convention (verified against operator's real
+    Arq.app v8 destination):
+
+    | Field | Path suffix |
+    |---|---|
+    | ``standardObjectDirs`` | ``standardobjects`` |
+    | ``standardIAObjectDirs`` | ``standardiaobjects`` |
+    | ``onezoneIAObjectDirs`` | ``onezoneiaobjects`` |
+    | ``s3GlacierObjectDirs`` | ``s3glacierobjects`` |
+    | ``s3GlacierIRObjectDirs`` | ``s3glacierirobjects`` |
+    | ``s3DeepArchiveObjectDirs`` | ``s3deeparchiveobjects`` |
+
+    The arq_restore reader looks up blobs by walking each
+    listed path; non-existent placeholder paths simply yield
+    zero objects.
     """
     return {
         "standardObjectDirs": [
             f"/{computer_uuid}/standardobjects",
         ],
-        "standardIAObjectDirs": [],
-        "onezoneIAObjectDirs": [],
-        "s3GlacierObjectDirs": [],
-        # Glacier Instant Retrieval — Arq.app v8 always emits this
-        # key alongside the other s3*ObjectDirs slots even when the
-        # destination uses no S3 storage class. Omitting it surfaces
-        # in the schema diff against real Arq.app destinations
-        # (docs/COMPAT-VERIFICATION.md §2.7.1).
-        "s3GlacierIRObjectDirs": [],
-        "s3DeepArchiveObjectDirs": [],
+        "standardIAObjectDirs": [
+            f"/{computer_uuid}/standardiaobjects",
+        ],
+        "onezoneIAObjectDirs": [
+            f"/{computer_uuid}/onezoneiaobjects",
+        ],
+        "s3GlacierObjectDirs": [
+            f"/{computer_uuid}/s3glacierobjects",
+        ],
+        # Glacier Instant Retrieval — Arq.app v8 always emits
+        # this key alongside the other s3*ObjectDirs slots even
+        # when the destination uses no S3 storage class. Empty
+        # would surface in the schema diff against real Arq.app
+        # destinations (docs/COMPAT-VERIFICATION.md §2.7.1 +
+        # D4 investigation).
+        "s3GlacierIRObjectDirs": [
+            f"/{computer_uuid}/s3glacierirobjects",
+        ],
+        "s3DeepArchiveObjectDirs": [
+            f"/{computer_uuid}/s3deeparchiveobjects",
+        ],
     }
 
 
