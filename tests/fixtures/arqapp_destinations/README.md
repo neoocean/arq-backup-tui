@@ -46,15 +46,16 @@ The test runner discovers fixtures by tarball name (any
 
 ## What runs against the fixtures
 
-- **Strategy B** (`tests/test_strategy_b_fixture_regression.py`,
-  TBD): cross-restore — our reader against an Arq.app emit.
-- **Strategy C** (`tests/test_strategy_c_fixture_regression.py`,
-  TBD): cross-restore — our writer's emit against the patched
-  `arq_restore` binary. Requires
-  `scripts/arq_restore_v4/arq_restore.bin.v4` to exist.
-- **Strategy I-alt** (`tests/test_strategy_i_alt_fixture_regression.py`,
-  TBD): patched-arq_restore vs our Python reader, byte-equal on
-  every restored file.
+- **Strategy B** — cross-restore (our reader against an
+  Arq.app emit). Implemented in
+  `tests/test_strategy_b_fixture_regression.py` in this PR.
+- **Strategy C** — cross-restore (our writer's emit against
+  the patched `arq_restore` binary). Pending follow-up —
+  requires the binary built from `scripts/arq_restore_v4/` to
+  be on PATH.
+- **Strategy I-alt** — patched-arq_restore vs our Python
+  reader, byte-equal on every restored file. Pending the same
+  binary follow-up as Strategy C.
 
 Each test module's class-level skip condition checks for the
 fixture file (and, where applicable, the patched binary). When
