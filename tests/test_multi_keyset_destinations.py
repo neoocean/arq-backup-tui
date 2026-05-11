@@ -52,7 +52,7 @@ class MultiKeysetDestinationTests(unittest.TestCase):
         from arq_writer.backup import build_backup
         dest = td / "dest"
         results = []
-        for i, password in enumerate(["pw-a", "pw-b"]):
+        for i, password in enumerate(["alpha", "beta"]):
             src = td / f"src{i}"
             src.mkdir()
             (src / f"file-{i}.txt").write_bytes(
@@ -75,7 +75,7 @@ class MultiKeysetDestinationTests(unittest.TestCase):
             # Restore needs ONE password to discover layouts;
             # the layouts list shows all computers regardless of
             # whether THIS password unlocks all of them.
-            rs = Restore(str(dest), encryption_password="pw-a")
+            rs = Restore(str(dest), encryption_password="alpha")
             layouts = rs.layouts()
             self.assertEqual(
                 len(layouts), 2,
