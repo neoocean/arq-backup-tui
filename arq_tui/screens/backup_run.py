@@ -300,6 +300,7 @@ class BackupRunScreen(Screen):
             exclusions=exclusions,
             max_file_bytes=self.plan.max_file_bytes,
             use_apfs_snapshot=self.plan.use_apfs_snapshot,
+            skip_tm_excludes=self.plan.skip_tm_excludes,
         )
         self.worker.start()
 
