@@ -283,6 +283,17 @@ the FUSE mount.
   users. The ``rclone mount`` workaround stays available for
   anyone who wants a cloud target anyway.
 
+- **Sparse files (filesystem holes)**: content correctness ✅ —
+  bytes round-trip identically including the zero-hole regions
+  (covered by ``tests/test_sparse_files.py``). Sparseness
+  preservation on restore ❌ — the restorer writes zeros
+  explicitly rather than re-creating filesystem holes. A 2 GB
+  sparse file with 8 KB of actual data restores as 2 GB on disk.
+  Destination-side storage is **not** affected: Buzhash chunker
+  + content-addressed dedup mean the destination footprint
+  scales with unique content, not logical size. (See E1 entry
+  in ``HANDOFF.md``.)
+
 - **Schedule / throttling / notifications / wake-from-sleep**:
   most of these are now **implemented** as of PRs #29–#36. Schedule
   via ``arq_tui.scheduling`` (cron + launchd + auto-gc); notifications
