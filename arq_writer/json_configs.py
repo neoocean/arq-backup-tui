@@ -226,6 +226,73 @@ def build_schedule_json(
     )
 
 
+def build_email_report_json(
+    *,
+    when: str = "never",
+    email_type: str = "custom",
+    authentication_type: str = "none",
+    connection_security: str = "none",
+    port: int = 587,
+    report_helo_use_ip: bool = True,
+    from_address: Optional[str] = None,
+    to_address: Optional[str] = None,
+    hostname: Optional[str] = None,
+    username: Optional[str] = None,
+    subject: Optional[str] = None,
+    start_tls: Optional[bool] = None,
+) -> dict:
+    """Build a polymorphic ``emailReportJSON`` dict.
+
+    Real Arq.app v8 emits two shapes depending on whether SMTP
+    is **actively configured** (i.e. the operator entered
+    hostname/credentials in the GUI):
+
+    - **Not configured** (the "default" plan shape, what real
+      Arq.app v8 emits on a freshly provisioned plan that
+      hasn't seen an SMTP setup): 6 keys —
+      ``authenticationType``, ``connectionSecurity``, ``port``,
+      ``reportHELOUseIP``, ``type``, ``when``. The SMTP-specific
+      slots are omitted entirely. Re-sampled 2026-05-11 against
+      ``/Volumes/arqbackup1`` — see P3.
+    - **SMTP configured**: 10+ keys adding ``fromAddress``,
+      ``hostname``, ``startTLS``, ``subject``, ``toAddress``,
+      ``username``.
+
+    The default emits the 6-key "not configured" shape (matching
+    real Arq.app v8). Pass any of the SMTP-specific kwargs as
+    non-``None`` to enable the 10-key shape.
+    """
+    base = {
+        "authenticationType": authentication_type,
+        "connectionSecurity": connection_security,
+        "port": int(port),
+        "reportHELOUseIP": bool(report_helo_use_ip),
+        "type": email_type,
+        "when": when,
+    }
+    # Switch to the SMTP-configured shape only when the caller
+    # provides at least one SMTP slot. This mirrors Arq.app v8's
+    # convention of omitting the SMTP fields when the report
+    # feature is unconfigured.
+    smtp_provided = any(
+        v is not None for v in (
+            from_address, to_address, hostname, username,
+            subject, start_tls,
+        )
+    )
+    if not smtp_provided:
+        return base
+    base.update({
+        "fromAddress": from_address or "",
+        "toAddress": to_address or "",
+        "hostname": hostname or "",
+        "username": username or "",
+        "subject": subject or "",
+        "startTLS": bool(start_tls),
+    })
+    return base
+
+
 def build_transfer_rate_json(
     *,
     enabled: bool = False,
@@ -283,6 +350,7 @@ def build_backupplan(
     storage_location_id: int = 1,
     schedule_json: Optional[dict] = None,
     transfer_rate_json: Optional[dict] = None,
+    email_report_json: Optional[dict] = None,
 ) -> dict:
     """Build ``backupplan.json``.
 
@@ -332,18 +400,16 @@ def build_backupplan(
         # safe default Arq.app v8 ships with for iCloud / Dropbox
         # placeholders).
         "datalessFilesOption": 1,
-        "emailReportJSON": {
-            "authenticationType": "none",
-            "fromAddress": "",
-            "hostname": "",
-            "port": 587,
-            "startTLS": False,
-            "subject": "",
-            "toAddress": "",
-            "type": "custom",
-            "username": "",
-            "when": "never",
-        },
+        # emailReportJSON is polymorphic by whether SMTP is
+        # configured (P3 finding, 2026-05-11). Real Arq.app v8
+        # emits the 6-key 'not configured' shape on a fresh plan;
+        # SMTP setup adds 6 more keys. Default to the 6-key shape
+        # matching real Arq.app v8.
+        "emailReportJSON": (
+            email_report_json
+            if email_report_json is not None
+            else build_email_report_json()
+        ),
         "excludedNetworkInterfaces": [],
         "excludedWiFiNetworkNames": [],
         "id": 1,
