@@ -97,6 +97,117 @@ fact that backuprecord is emitted as JSON rather than binary plist, the
 block in Tree v4) were reverse-engineered by directly analyzing the bytes of
 the operator's actual destinations (see `docs/REAL-DATA-DISCOVERIES.md`).
 
+## 2.1 Arq 7 compatibility chart
+
+Current state (2026-05-12, after 10 rounds of compat verification across
+~20 different audit surfaces — see `docs/COVERAGE.md` for the per-PR
+breakdown and `HANDOFF.md` for the round-by-round history).
+
+### On-disk format
+
+| Layer                                 | Read | Write | Round-trip verified |
+|---------------------------------------|:----:|:-----:|:-------------------:|
+| ARQO envelope (AES-256-CBC + HMAC)    | ✅   | ✅    | NIST + RFC vectors (N6) |
+| PBKDF2-SHA-256 keyset derivation      | ✅   | ✅    | RFC 6070-equivalent vectors (N6) |
+| Standalone-objects layout             | ✅   | ✅    | Strategy A fingerprint |
+| Pack-file format (treepacks/blobpacks/largeblobpacks) | ✅ | ✅ | Strategy C at scale (65 files, byte-id) |
+| Pack-size distribution                | n/a  | ✅    | 117k pack sample → 5 MB cap (N8) |
+| LZ4 + gzip + uncompressed blobs       | ✅   | ✅    | C8 mixed-compression chunks |
+| Tree v3 (`version=100`)               | ✅   | ✅    | Strategy C / arq_restore byte-id |
+| Tree v4 (`version=101`, 38-byte trailing block) | ✅ | ✅ | Strategy F (round-trip) + I-alt (fresh-walk) |
+| BackupRecord JSON (20 top-level keys) | ✅   | ✅    | R5 100% real-data parity |
+| BackupRecord node v3 (27 keys) / v4 (34 keys) | ✅ | ✅ | R5 + V4 fix |
+| `backupplan.json` (47 keys)           | ✅   | ✅    | R5 100% real-data parity |
+| `backupconfig.json` (11 keys)         | ✅   | ✅    | D8 + R5 |
+| `backupfolders.json` (6 keys)         | ✅   | ✅    | R5 |
+| `backupfolder.json` (8 keys)          | ✅   | ✅    | R5 |
+| `scheduleJSON` polymorphism (Daily / Hourly) | ✅ | ✅    | P2 |
+| `transferRateJSON` polymorphism (Always / Scheduled) | ✅ | ✅ | P2 |
+| `emailReportJSON` polymorphism (6-key / 12-key) | ✅ | ✅ | P3 |
+
+### Source-side semantics
+
+| Feature                               | Status | Notes |
+|---------------------------------------|:------:|---|
+| File content blobs (chunked + dedup)  | ✅     | Buzhash + FixedChunker; cross-run + cross-folder dedup |
+| File metadata (mode, mtime, ctime, uid, gid, flags) | ✅ | Preserved through round-trip |
+| Symlinks                              | ✅     | Stored as content with `S_IFLNK` mode |
+| Hardlinks                             | ✅     | `(st_dev, st_ino)` cache; restored as `os.link` (N4) |
+| macOS xattrs (general)                | ✅     | `XAttrSetV002` blob; ordering preserved |
+| `com.apple.FinderInfo` (32-byte fork) | ✅     | F7 + N5 byte-perfect round-trip |
+| `com.apple.ResourceFork`              | ✅     | N5 round-trip (incl. KB-scale payloads) |
+| macOS NFSv4 ACLs                      | ✅     | F6 multi-entry + kernel round-trip |
+| Linux POSIX ACLs                      | ✅     | `getfacl`/`setfacl` round-trip |
+| Tree-walk reuse (incremental backup)  | ✅     | LRU-bounded `PriorTreeIndex` |
+| APFS snapshot-based backup            | ✅     | `--use-apfs-snapshot` option |
+| Time Machine `com_apple_backup_excludeItem` xattr | ✅ | E2 walker honours by default |
+| `skipTMExcludes=true` override        | ✅     | Operator can override |
+| Sparse files (`isSparse=true`)        | ⚠️     | Detection emits defaults (real Arq.app v8: 0 sparse files observed in 21 sampled records, so no-op default is acceptable) |
+| macOS resource forks (data fork only) | ⚠️     | The legacy `<file>/..namedfork/rsrc` stream is captured via xattr but not restored as a separate fork on non-HFS+ filesystems |
+
+### Operations
+
+| Operation                             | Status | Module |
+|---------------------------------------|:------:|---|
+| Full backup of source tree            | ✅     | `arq_writer.backup.build_backup` |
+| Incremental backup (cross-run dedup)  | ✅     | Same; uses `--dedup-against-existing` |
+| Tree-version selection (3 / 4)        | ✅     | `--tree-version 3` / `--tree-version 4` |
+| Chunker selection (none / default / arq_v7_41 / fixed-40m) | ✅ | `--chunker` |
+| Walker cancel / pause / resume        | ✅     | `Backup.cancel()` / `.pause()` / `.resume()` |
+| Mid-write crash safety (atomic temp+rename) | ✅ | N7 — SIGKILL no longer leaves truncated packs |
+| Full restore                          | ✅     | `arq_reader.restore.Restore` |
+| Selective restore (`paths=` filter)   | ✅     | G1 |
+| Historical-record restore (non-latest) | ✅    | E9 (`backuprecord_path=`) |
+| Restore conflict policies (overwrite / skip / rename) | ✅ | G2 |
+| Hardlink reconstruction               | ✅     | N4 |
+| Retention policy (hourly / daily / weekly / monthly / yearly / keep-last-N) | ✅ | `arq_writer.retention` |
+| Orphan-blob GC                        | ✅     | `gc_orphan_blobs` |
+| Format-conformance validation (L0-L4) | ✅     | `arq_validator.check_arq7_compatibility` |
+| Audit-drip (resumable byte-level check) | ✅   | `audit_drip` + checkpoint state file |
+
+### Storage backends
+
+| Backend                               | Status |
+|---------------------------------------|:------:|
+| Local filesystem                      | ✅     |
+| SFTP                                  | ✅     |
+| Network-mounted destinations (SMB / AFP / NFS) | ⚠️ | Works via the local backend (the mount is transparent); no Arq.app-specific protocol used |
+| S3 / Wasabi / B2 / Storj / GCS / Azure Blob / OneDrive / Dropbox / Box / GDrive / pCloud | ❌ | Out of scope — see README §1 |
+
+### Deliberately out of scope
+
+These are documented design choices, not gaps:
+
+- **Cloud storage backends** (S3 et al.) — preserves Arq.app's commercial value.
+- **Unencrypted backups** (`isEncrypted: false`) — writer always encrypts.
+- **NSDictionary hash-bucket key emission order** (A11) — would require
+  re-implementing Apple's NSDictionary runtime; our writer emits in Python's
+  dict insertion order which is JSON-equivalent but byte-different.
+- **Tree v4 trailing-block bytes 0-15 exact reproduction** — these encode
+  Arq.app's per-Node first-emit-time which a content-addressed writer can't
+  reproduce without sidecar state (K2-K4 analyses; 94% of bytes covered by
+  the `create_time` deterministic fallback, K4-2 §5.7.5).
+
+### Verification log (the highest-confidence proofs)
+
+- **Strategy A** (shape fingerprint diff): 100% schema match across all 4
+  sidecars + BackupRecord shapes against real `/Volumes/arqbackup1`.
+- **Strategy B** (cross-restore Arq.app → our reader): 127,222 files
+  byte-identical.
+- **Strategy C** (writer → `arq_restore`): Tree v3 byte-perfect, scale-
+  verified at 65+ files (C-S1).
+- **Strategy F + R4** (round-trip byte equivalence parse → re-emit):
+  278/278 blobs from real Arq.app v8 destination byte-identical.
+- **Strategy I-alt** (writer → patched `arq_restore`): 4/4 fresh-walk
+  Tree v4 files byte-identical via independent reader (V4).
+- **Strategy K + K4-2** (Tree v4 trailing-block correlation): 94% of
+  trailing_sec values explained as btime ⨯ ctime.
+- **N6** (crypto primitives): 6/6 RFC/NIST test vectors pass.
+
+For the full per-PR breakdown of each round see `docs/COVERAGE.md`'s
+"Round N" sections; for the historical context behind each finding see
+`HANDOFF.md`.
+
 ## 3. What It Can Do
 
 The four libraries this package provides:
