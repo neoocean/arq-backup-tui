@@ -504,6 +504,157 @@ def _check_backupplan(
                         "L4", f"folder plan key {k!r}",
                     ))
 
+    # V6 — nested-dict shape polymorphism. P1/P2/P3 surfaced that
+    # ``scheduleJSON`` / ``transferRateJSON`` / ``emailReportJSON``
+    # have multiple legal shapes depending on a discriminator key.
+    # A strict shape check has to accept any of those shapes — a
+    # writer following Arq.app v8's "emit only the relevant
+    # fields" convention produces fewer keys than the strict
+    # union; rejecting it would be wrong.
+    _check_polymorphic_schedule_json(
+        data.get("scheduleJSON"), report,
+    )
+    _check_polymorphic_transfer_rate_json(
+        data.get("transferRateJSON"), report,
+    )
+    _check_polymorphic_email_report_json(
+        data.get("emailReportJSON"), report,
+    )
+
+
+# ---------------------------------------------------------------------------
+# V6 — nested-dict shape polymorphism (scheduleJSON /
+# transferRateJSON / emailReportJSON)
+# ---------------------------------------------------------------------------
+
+
+# scheduleJSON varies by ``type``.
+_SCHEDULE_JSON_SHAPES = {
+    "Daily": frozenset({
+        "backUpAndValidate", "daysOfWeek", "pauseDuringWindow",
+        "startWhenVolumeIsConnected", "timeOfDay", "type",
+    }),
+    "Hourly": frozenset({
+        "daysOfWeek", "everyHours", "minutesAfterHour",
+        "pauseDuringWindow", "pauseFrom", "pauseTo",
+        "startWhenVolumeIsConnected", "type",
+    }),
+}
+
+
+def _check_polymorphic_schedule_json(
+    obj, report: ComplianceReport,
+) -> None:
+    if not isinstance(obj, dict):
+        # The L4 type check already flagged this; don't double-fail.
+        return
+    sched_type = obj.get("type")
+    expected_keys = _SCHEDULE_JSON_SHAPES.get(sched_type)
+    if expected_keys is None:
+        _add(report, _fail(
+            "L4",
+            f"scheduleJSON type={sched_type!r}",
+            f"unknown type; expected one of "
+            f"{sorted(_SCHEDULE_JSON_SHAPES)}",
+        ))
+        return
+    actual = set(obj.keys())
+    extra = actual - expected_keys
+    missing = expected_keys - actual
+    if extra or missing:
+        _add(report, _fail(
+            "L4",
+            f"scheduleJSON shape (type={sched_type})",
+            f"extra={sorted(extra)} missing={sorted(missing)}",
+        ))
+    else:
+        _add(report, _ok(
+            "L4",
+            f"scheduleJSON shape ({sched_type}) ok",
+        ))
+
+
+# transferRateJSON varies by ``scheduleType``.
+_TRANSFER_RATE_JSON_SHAPES = {
+    "Always": frozenset({
+        "daysOfWeek", "enabled", "endTimeOfDay",
+        "scheduleType", "startTimeOfDay",
+    }),
+    "Scheduled": frozenset({
+        "daysOfWeek", "enabled", "endTimeOfDay", "maxKBPS",
+        "scheduleType", "startTimeOfDay",
+    }),
+}
+
+
+def _check_polymorphic_transfer_rate_json(
+    obj, report: ComplianceReport,
+) -> None:
+    if not isinstance(obj, dict):
+        return
+    sched_type = obj.get("scheduleType")
+    expected_keys = _TRANSFER_RATE_JSON_SHAPES.get(sched_type)
+    if expected_keys is None:
+        _add(report, _fail(
+            "L4",
+            f"transferRateJSON scheduleType={sched_type!r}",
+            f"unknown scheduleType; expected one of "
+            f"{sorted(_TRANSFER_RATE_JSON_SHAPES)}",
+        ))
+        return
+    actual = set(obj.keys())
+    extra = actual - expected_keys
+    missing = expected_keys - actual
+    if extra or missing:
+        _add(report, _fail(
+            "L4",
+            f"transferRateJSON shape ({sched_type})",
+            f"extra={sorted(extra)} missing={sorted(missing)}",
+        ))
+    else:
+        _add(report, _ok(
+            "L4",
+            f"transferRateJSON shape ({sched_type}) ok",
+        ))
+
+
+# emailReportJSON: two shapes by whether SMTP slots are present.
+_EMAIL_REPORT_NOT_CONFIGURED_KEYS = frozenset({
+    "authenticationType", "connectionSecurity", "port",
+    "reportHELOUseIP", "type", "when",
+})
+_EMAIL_REPORT_SMTP_CONFIGURED_KEYS = (
+    _EMAIL_REPORT_NOT_CONFIGURED_KEYS
+    | {"fromAddress", "hostname", "startTLS",
+       "subject", "toAddress", "username"}
+)
+
+
+def _check_polymorphic_email_report_json(
+    obj, report: ComplianceReport,
+) -> None:
+    if not isinstance(obj, dict):
+        return
+    actual = set(obj.keys())
+    if actual == _EMAIL_REPORT_NOT_CONFIGURED_KEYS:
+        _add(report, _ok(
+            "L4", "emailReportJSON shape (not configured) ok",
+        ))
+        return
+    if actual == _EMAIL_REPORT_SMTP_CONFIGURED_KEYS:
+        _add(report, _ok(
+            "L4", "emailReportJSON shape (SMTP configured) ok",
+        ))
+        return
+    extra = actual - _EMAIL_REPORT_SMTP_CONFIGURED_KEYS
+    missing_required = _EMAIL_REPORT_NOT_CONFIGURED_KEYS - actual
+    _add(report, _fail(
+        "L4",
+        "emailReportJSON shape",
+        f"matches neither known shape; extra={sorted(extra)} "
+        f"missing-base={sorted(missing_required)}",
+    ))
+
 
 # ---------------------------------------------------------------------------
 # L5 — backupfolders.json
