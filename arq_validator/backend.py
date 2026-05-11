@@ -171,7 +171,41 @@ class LocalBackend:
         full.mkdir(parents=parents, exist_ok=exist_ok)
 
     def write_all(self, path: str, data: bytes) -> None:
+        """Atomic-rename write: data goes to ``<path>.tmp.<rand>``,
+        the temp file is fsync'd, then ``os.replace`` moves it
+        to the final path.
+
+        Rationale (N7): a SIGKILL during write (or a power loss
+        on local-disk destinations) must not leave a half-written
+        pack file at the final path — the reader would then see a
+        truncated ARQO and report 'corruption' rather than
+        'absence'. The temp-then-rename pattern guarantees the
+        final path is either the COMPLETE pre-existing content or
+        the COMPLETE new content, never an in-between.
+        """
+        import secrets
         rel = path.lstrip("/")
         full = self.root / rel
         full.parent.mkdir(parents=True, exist_ok=True)
-        full.write_bytes(data)
+        # Random suffix so concurrent writers don't collide on
+        # the same temp path.
+        tmp = full.with_name(
+            full.name + f".tmp.{secrets.token_hex(4)}",
+        )
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+                # fsync the data so the rename's atomicity covers
+                # the bytes, not just the metadata.
+                f.flush()
+                import os as _os
+                _os.fsync(f.fileno())
+            _os.replace(tmp, full)
+        except Exception:
+            # Best-effort cleanup of the temp on failure paths
+            # so the destination doesn't accumulate orphan tmps.
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
