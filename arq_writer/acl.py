@@ -111,11 +111,18 @@ def _capture_macos(
     if cp.returncode != 0:
         return b""
     # ACL lines look like "0: user:foo allow ..." (numeric
-    # index + colon). Skip the regular `ls -l` summary line.
-    acl_lines = [
-        ln for ln in cp.stdout.splitlines()
-        if ln and ln[0].isdigit() and ":" in ln[:5]
-    ]
+    # index + colon). On macOS Sequoia ≥ ``ls -led`` prefixes
+    # each ACL row with a single leading space (older releases
+    # left them unindented), so we strip leading whitespace
+    # before the digit check. Skip the regular ``ls -l`` summary
+    # line which begins with a permission glyph (``-``/``d``/etc).
+    acl_lines = []
+    for raw in cp.stdout.splitlines():
+        stripped = raw.lstrip()
+        if not stripped:
+            continue
+        if stripped[0].isdigit() and ":" in stripped[:5]:
+            acl_lines.append(stripped)
     if not acl_lines:
         return b""
     body = "\n".join(acl_lines).encode("utf-8")
