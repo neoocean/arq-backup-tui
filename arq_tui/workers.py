@@ -156,6 +156,7 @@ class BackupWorker(_BaseWorker):
         exclusions=None,
         max_file_bytes: Optional[int] = None,
         use_apfs_snapshot: bool = False,
+        skip_tm_excludes: bool = False,
     ) -> None:
         super().__init__(target)
         self.sources = list(sources)
@@ -172,6 +173,7 @@ class BackupWorker(_BaseWorker):
         self.exclusions = exclusions
         self.max_file_bytes = max_file_bytes
         self.use_apfs_snapshot = use_apfs_snapshot
+        self.skip_tm_excludes = bool(skip_tm_excludes)
         self._backup = None  # set by _run for cancel routing
 
     def cancel(self) -> None:
@@ -198,6 +200,7 @@ class BackupWorker(_BaseWorker):
             dedup_against_existing=self.dedup_against_existing,
             exclusions=self.exclusions,
             max_file_bytes=self.max_file_bytes,
+            skip_tm_excludes=self.skip_tm_excludes,
             callback=self._emit,
         )
         self._backup = bk

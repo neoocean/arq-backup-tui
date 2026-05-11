@@ -88,6 +88,13 @@ class Plan:
     exclude_gitignore_lines: List[str] = field(default_factory=list)
     max_file_bytes: Optional[int] = None
     use_apfs_snapshot: bool = False
+    # Time Machine exclusion override (E2-new). When False
+    # (default = Arq.app v8 convention) the walker skips files
+    # carrying ``com.apple.metadata:com_apple_backup_excludeItem``
+    # xattr. When True the operator wants those files backed up
+    # despite the OS hint. Threads through to
+    # ``Backup(skip_tm_excludes=…)`` at backup time.
+    skip_tm_excludes: bool = False
     retention: dict = field(default_factory=dict)
     last_run_iso: str = ""
     # Schedule for periodic execution. Empty dict = unscheduled.
@@ -204,6 +211,9 @@ class PlanRegistry:
                 use_apfs_snapshot=bool(
                     data.get("use_apfs_snapshot", False)
                 ),
+                skip_tm_excludes=bool(
+                    data.get("skip_tm_excludes", False)
+                ),
                 retention=dict(data.get("retention") or {}),
                 last_run_iso=str(data.get("last_run_iso") or ""),
                 schedule=dict(data.get("schedule") or {}),
@@ -240,6 +250,7 @@ class PlanRegistry:
             "exclude_gitignore_lines": list(plan.exclude_gitignore_lines),
             "max_file_bytes": plan.max_file_bytes,
             "use_apfs_snapshot": plan.use_apfs_snapshot,
+            "skip_tm_excludes": plan.skip_tm_excludes,
             "retention": dict(plan.retention),
             "last_run_iso": plan.last_run_iso,
             "schedule": dict(plan.schedule),
