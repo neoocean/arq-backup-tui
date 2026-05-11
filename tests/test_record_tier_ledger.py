@@ -50,6 +50,27 @@ def _build_small_real_backup(workdir: Path):
 
 class RecordTierLedgerSkipsTests(unittest.TestCase):
 
+    @unittest.skipIf(
+        sys.platform == "darwin",
+        # macOS Sequoia ≥ auto-attaches ``com.apple.provenance`` to
+        # every kernel-observed file write — with the SAME value
+        # across every file on the machine. Both ``a.txt`` and
+        # ``b.txt`` therefore emit an xattr blob with an identical
+        # blob_id, which means within a SINGLE validate_record
+        # walk the second file's xattr-blob walk hits
+        # ``ledger.contains()`` (because the first file's walk
+        # just recorded it) and increments
+        # ``blobs_skipped_by_ledger`` — making the first-run
+        # ``== 0`` assertion impossible on macOS. The
+        # ``com.apple.provenance`` xattr is kernel-protected, so
+        # neither ``xattr -c`` nor ``xattr -d`` can strip it.
+        # Linux CI covers the intended path (which is the
+        # second-run all-skipped assertion below — that one still
+        # holds on macOS, the test just can't reach it). Listed
+        # under HANDOFF.md "Known landmines"; tracked as L2.
+        "com.apple.provenance shared blob_id causes within-run "
+        "ledger short-circuit on macOS Sequoia; covered by Linux CI.",
+    )
     def test_ledger_short_circuits_already_known_blob_ids(self) -> None:
         from arq_validator.backend import LocalBackend
         from arq_validator.incremental_audit import AuditLedger
