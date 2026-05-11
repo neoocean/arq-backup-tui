@@ -170,7 +170,14 @@ def build_backupplan(
         # Pro Console is Arq.app's enterprise management feature;
         # standalone backups never originate there.
         "createdAtProConsole": False,
-        "creationTime": f"{creation_time:.3f}" if creation_time else "0",
+        # Arq.app v8 emits ``creationTime`` as an integer Unix
+        # epoch (seconds), NOT a stringified decimal. Verified
+        # 2026-05-11 against the operator's real
+        # ``/Volumes/arqbackup1`` destination — D1 type-level
+        # check found ``real=int, ours=str`` here. The fingerprint
+        # module's value-level diff would have flagged this on
+        # any future comparison; emit as int to match.
+        "creationTime": int(creation_time) if creation_time else 0,
         # `datalessFilesOption`: 1 = "materialize then back up" (the
         # safe default Arq.app v8 ships with for iCloud / Dropbox
         # placeholders).
@@ -243,7 +250,9 @@ def build_backupplan(
             "scheduleType": "Scheduled",
             "startTimeOfDay": "18:00",
         },
-        "updateTime": f"{update_time:.3f}" if update_time else "0",
+        # Same int-vs-str fix as ``creationTime`` above. Arq.app
+        # v8 emits ``updateTime`` as an integer Unix epoch.
+        "updateTime": int(update_time) if update_time else 0,
         "useAPFSSnapshots": True,
         "useBuzhash": False,
         "version": 2,
