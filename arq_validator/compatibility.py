@@ -130,6 +130,8 @@ def check_arq7_compatibility(
     encryption_password: str,
     computer_uuid: Optional[str] = None,
     openssl_path: str = "openssl",
+    strict: bool = False,
+    strict_sample_cap: Optional[int] = 64,
 ) -> ComplianceReport:
     """Run every Arq 7 invariant against the destination at
     ``root`` inside ``backend``.
@@ -137,6 +139,21 @@ def check_arq7_compatibility(
     Returns a :class:`ComplianceReport`. Never raises for format
     failures; only programmer errors (e.g. ``backend`` is None)
     propagate.
+
+    ``strict``
+        When True, additionally runs the §5.6 round-trip byte
+        equivalence checks (RT1 BackupRecord JSON, RT2 Tree
+        binary, RT3 xattr blob) against the destination's
+        actual artefacts. Default ``False`` — schema-level
+        checks only. See :mod:`arq_validator.strict` for the
+        full strict-mode rationale.
+
+    ``strict_sample_cap``
+        When ``strict=True``, the maximum number of
+        standardobjects to round-trip-test (per shard
+        traversal). Default 64. Pass ``None`` to walk every
+        blob (expensive on the operator's real destinations —
+        415k+ standardobjects). No effect when ``strict=False``.
     """
     report = ComplianceReport(
         destination_root=root,
@@ -187,6 +204,17 @@ def check_arq7_compatibility(
         openssl_path=openssl_path,
     )
     _check_pack_files(backend, root, cu, report)
+
+    # Strict mode: §5.6 round-trip byte equivalence on actual
+    # destination artefacts.
+    if strict:
+        from .strict import run_strict_round_trips
+        for r in run_strict_round_trips(
+            backend, root, cu, keyset, folder_uuids,
+            sample_cap=strict_sample_cap,
+            openssl_path=openssl_path,
+        ):
+            _add(report, r)
 
     return report
 
