@@ -19,11 +19,10 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with bounded LRU tree-walk reuse; walker emits explicit error events on per-file failures (no silent corruption) |
 | Operate           | ✅ Schedule (cron + launchd + auto-gc), notifications (notify_run_finished wired to RunWriter), TUI (M1–M6 + maintenance + activity), retention + blob GC, disk-precheck on backup start, macOS progress toasts, .secrets/ wizard checkbox; throttle controllable via audit-drip rate flags |
 
-The aggregate test count is **~840 unit tests** at the time this
-table was last updated (Round 8 — Round 6's 13 PRs + Round 7's
-6 deep-RE PRs + Round 8's plan-polymorphism PR added ~125
-total tests); the suite runs in ~155 s on a stdlib-only
-toolchain
+The aggregate test count is **~920 unit tests** at the time this
+table was last updated (Round 10 — Rounds 6-10 added ~210 tests
+across 33 PRs spanning A/B/C/D/E/F/G/K/P/V/R/N axes); the suite
+runs in ~165 s on a stdlib-only toolchain
 (``python -m unittest discover``). TUI tests
 (~50 / 355) require the optional ``textual`` dep; without it
 they auto-skip and the rest of the suite (library + RE +
@@ -449,3 +448,49 @@ Aggregate: 13 new tests + 2 new factory functions
 **Round 8 V5 audit**: confirmed zero `null` fields anywhere in
 real Arq.app emits — V4's `aclBlobLoc: null` was the only such
 case. No similar fixes needed elsewhere.
+
+## Round 9 emailReportJSON polymorphism + validator + value pins (2026-05-11)
+
+| PR | Item | Subject |
+|---:|---|---|
+| #153 | **P3** | emailReportJSON polymorphism (real Arq.app emits 6-key 'not configured' shape; we were emitting 10-key with 2 wrong + 6 SMTP-only fields) |
+| #154 | **V6** | Validator extension: accept all 3 known nested-dict shapes (scheduleJSON / transferRateJSON / emailReportJSON), flag unknown discriminators + cross-shape leakage |
+| #155 | **R9** | Pin BackupRecord top-level edge-value defaults (archived, copiedFromCommit/Snapshot, backupRecordErrors, isComplete, storageClass, computerOSType, diskIdentifier, volumeName, nodeTreeVersion v3/v4) |
+
+Aggregate: ~29 new tests. After Round 9 the nested-dict-shape
+story is fully closed.
+
+## Round 10 different-approach surfaces (2026-05-12)
+
+Operator requested a **completely different approach** beyond
+the 10 surfaces used in Rounds 1-9. Round 10 introduced 10 new
+surfaces, **two of which surfaced production bugs**:
+
+| PR | Item | New surface |
+|---:|---|---|
+| #156 | **N6** | RFC/NIST crypto vector independence (AES-256-CBC NIST SP 800-38A + HMAC-SHA-256 RFC 4231 + PBKDF2 vectors) |
+| #157 | **N2** | Embedded SQLite schema extraction from ArqAgent Mach-O strings (122 CREATEs) |
+| #158 | **N8** | Real-data pack-size distribution sampling (117,934 packs) → **default cap 10MB→5MB** |
+| #159 | **N3** | New Mach-O symbol extension: `FileChangeLasts` + 6 related symbols |
+| #160 | **N4** | Hardlink-shape end-to-end + Arq.app `HardLinkQueue` symbol parity |
+| #161 | **N9** | `arqVersion` field receiver-tolerance probing |
+| #162 | **N10** | Locale × timezone invariance fuzzing (12 combos) |
+| #163 | **N7** | Mid-write crash safety → **`LocalBackend.write_all` now atomic** (temp+fsync+rename) |
+| #164 | **N5** | Apple-canonical xattr macOS round-trip (ResourceFork + FinderInfo) |
+| #165 | **N1** | `arqc` CLI surface alignment audit |
+
+**Production bugs fixed**:
+- **N8**: blobpack cap (10MB → 5MB matches Arq.app v8 emit pattern)
+- **N7**: SIGKILL during pack write no longer leaves truncated files at final paths
+
+**Major artifacts**:
+- `docs/N2-arqagent-schema.sql` — full 122-CREATE SQLite schema RE'd from ArqAgent
+- `docs/N3-FILECHANGELASTS-RE.md` — Mach-O symbol map + trailing-block source
+
+Aggregate: ~50 new tests across 10 surfaces.
+
+After Round 10, the compat-surface count is **20** (10 from
+Rounds 1-9 + 10 new from Round 10). The format + behaviour layer
+has zero known remaining gaps; operator-GUI-blocked items
+(Strategy I + first-walk-time correlation) are the only
+outstanding work.

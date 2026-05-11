@@ -299,6 +299,61 @@ real Arq.app emits — V4's `aclBlobLoc: null` was the only such
 case across sidecars + BackupRecord shapes. No similar fixes
 needed elsewhere.
 
+## 2026-05-11 — Round 9 emailReportJSON polymorphism + validator + value pins (3 PRs)
+
+After R8 closed the nested-dict polymorphism story for two of
+three sub-objects, deeper probing of the third (emailReportJSON)
+surfaced a similar shape drift; V6 generalised polymorphism
+acceptance into the validator; R9 locked record-level VALUE
+defaults R5 had only key-locked.
+
+| PR | Item | Subject |
+|---:|---|---|
+| #153 | **P3** | emailReportJSON polymorphism: real Arq.app v8 emits 6 keys when SMTP not configured (we were emitting 10 with 2 missing real keys + 6 SMTP-only fields). New `build_email_report_json` factory; default switches to the 6-key shape. After P3, ALL 3 nested-dict shapes in backupplan.json match real Arq.app v8. |
+| #154 | **V6** | Validator accepts polymorphic nested-dict shapes for scheduleJSON / transferRateJSON / emailReportJSON; flags unknown discriminator values + cross-shape leaked keys + shapes matching neither known case. |
+| #155 | **R9** | Pin BackupRecord top-level edge-value defaults (archived=False, copiedFromCommit/Snapshot=False, backupRecordErrors=[], isComplete=True, storageClass='STANDARD', computerOSType=1, diskIdentifier='ROOT', volumeName round-trips, nodeTreeVersion v3/v4 key presence). 13 tests. |
+
+After Round 9 the nested-dict-shape story is fully closed:
+schedule/transferRate/email all polymorphism-aware + validator-
+enforced + value-pinned at the BackupRecord layer.
+
+## 2026-05-12 — Round 10 different-approach surfaces (10 PRs + 2 production fixes)
+
+Operator requested a **completely different approach** to compat
+verification beyond the 10 surfaces used in Rounds 1-9 (schema,
+value, byte-roundtrip, fingerprint, real-data, polymorphism,
+reader-differential, trailing-block RE, reader robustness, walker
+edge tests). Round 10 covered 10 new surfaces; **two real
+production fixes** dropped out:
+
+| PR | Item | New surface | Outcome |
+|---:|---|---|---|
+| #156 | **N6** | RFC/NIST crypto vector independence | All 6 vectors pass — primitives RFC-conformant |
+| #157 | **N2** | Embedded SQLite schema from Mach-O strings | 122 CREATEs extracted; writer values fit Arq.app's local-cache schema |
+| #158 | **N8** | Real-data pack-size distribution sampling (117,934 packs on /Volumes/arqbackup1) | **Production fix**: default cap 10MB → 5MB to match Arq.app v8's hard ~5MB blobpack cap (71% of real packs in 5-6 MB bucket) |
+| #159 | **N3** | New Mach-O symbol extension (`FileChangeLasts` + 6 related symbols) | Trailing-block source identified; `[FileChangeLasts save:]` mechanism behind K2 Finding 1 (cross-record persistence) |
+| #160 | **N4** | Hardlink-shape end-to-end + Arq.app symbol parity (HardLinkQueue) | Writer + reader already correct; pinned with 3 end-to-end + 1 binary-string-defensive test |
+| #161 | **N9** | `arqVersion` receiver-tolerance probing | Reader permissive across {7.41, 7.37, 8.0, '', missing}; Arq.app's `nil arqVersion` rejection path confirmed via binary strings |
+| #162 | **N10** | Locale × timezone invariance fuzzing | All 12 locale/TZ combos (C/en_US/ko_KR/tr_TR × UTC/LA/Seoul) produce byte-identical emit |
+| #163 | **N7** | Mid-write crash safety end-to-end | **Production fix**: `LocalBackend.write_all` now atomic (temp+fsync+rename) — was vulnerable to SIGKILL truncation; verified via SIGKILL subprocess test |
+| #164 | **N5** | Apple-canonical xattr macOS round-trip | ResourceFork (4KB) + FinderInfo (32B) bytes preserved end-to-end |
+| #165 | **N1** | `arqc` CLI surface alignment audit | Behavioral mapping pinned; defensive tests fire on Arq.app command-set drift |
+
+**Two production bugs fixed by Round 10**:
+- **N8**: blobpack cap 10MB → 5MB (matches Arq.app v8's emit pattern)
+- **N7**: atomic write via temp+rename (SIGKILL no longer leaves truncated packs)
+
+**Major artifacts preserved**:
+- `docs/N2-arqagent-schema.sql` — 122-CREATE SQLite schema RE'd from ArqAgent
+- `docs/N3-FILECHANGELASTS-RE.md` — symbol map + trailing-block source
+
+After Round 10, the compat surfaces audited number **20** (the
+original 10 of Rounds 1-9 plus 10 new in Round 10). The format
++ behaviour layer has zero known remaining gaps; the operator-
+GUI-blocked items (Strategy I + first-walk-time correlation)
+remain the only outstanding work, and only Arq.app can drive
+them.
+
 ## Optional follow-ups (none of these are blockers)
 
 These are not gaps — they're operator-environment-specific
