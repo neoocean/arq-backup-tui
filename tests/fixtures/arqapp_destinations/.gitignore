@@ -1,0 +1,9 @@
+# Operator-supplied Arq.app destination captures + their passwords
+# live here; keep them out of the repo to stay public-safe.
+*.tar
+*.tgz
+*.tar.gz
+*.password
+# Per-fixture extracted destination directories — name them
+# anything ending in a computer UUID and they'll be ignored.
+*-????-????-????-????????????/
