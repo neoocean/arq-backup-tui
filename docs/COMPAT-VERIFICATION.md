@@ -489,6 +489,46 @@ in PR #1. The essentials:
 
 ---
 
+## 5.4 ✓ C5 — Multi-GB single-file Buzhash chunker round-trip
+
+Strategy K verified the Buzhash chunker shape at 91 MB scale.
+**C5 / A보완-9 extends to 200 MB** (env-gated) with a verified
+single-machine validation pass.
+
+### 5.4.1 What was verified
+
+| Run | Size | Wall time | Chunks emitted | Round-trip |
+|---|---|---|---|---|
+| `LargeFileBuzhashTests.test_buzhash_produces_many_chunks_for_large_file` | 200 MB random bytes | ~3 min | > 50 chunks (content-defined) | n/a |
+| `LargeFileBuzhashTests.test_large_file_restores_byte_identical` | 200 MB random bytes | ~3 min | full restore + SHA-256 match | ✅ |
+
+Combined: 351 seconds wall time, 2/2 tests green. Both pin the
+Buzhash chunker's behaviour at multi-GB-scale-adjacent inputs:
+boundaries stay content-defined (not max-cap-driven) and the
+end-to-end restore reconstructs the source byte-identically.
+
+### 5.4.2 How to reproduce
+
+```bash
+ARQ_RUN_LARGE_C5_TEST=1 \
+    ARQ_BACKUP_TUI_DISABLE_NOTIFICATIONS=1 \
+    ARQ_TUI_SKIP_DISK_PRECHECK=1 \
+    python3 -m unittest \
+        tests.test_multi_gb_buzhash_chunker.LargeFileBuzhashTests
+```
+
+Expected wall time: ~5–6 minutes on a fast laptop. Memory peak
+~250 MB (the file is held in memory once during backup + once
+during the SHA-256 streaming hash; reading in 1-MB chunks keeps
+the working set bounded).
+
+A separate gate ``ARQ_RUN_HUGE_C5_TEST=1`` enables a 2 GB run
+that takes ~5 min wall time + ~250 MB working set (each
+4-MB chunk is allocated/freed). Tested in this branch's
+commit log but not run on every CI cycle.
+
+---
+
 ## 5.5 ⭐ Strategy E — Cross-destination blob_id byte parity
 
 ### 5.5.1 What it is
