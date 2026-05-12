@@ -197,6 +197,27 @@ def _build_parser() -> argparse.ArgumentParser:
               "4-8 for a multi-core local mirror; 1 (default) for "
               "SFTP."),
     )
+    p.add_argument(
+        "--graph-max-records",
+        default=0,
+        type=int,
+        help=("graph tier only — cap on records walked. 0 = "
+              "unlimited (all backuprecords across all folders)."),
+    )
+    p.add_argument(
+        "--graph-max-blobs-per-record",
+        default=0,
+        type=int,
+        help=("graph tier only — cap per-record blob walk. 0 = "
+              "unlimited."),
+    )
+    p.add_argument(
+        "--graph-max-runtime-sec",
+        default=0,
+        type=int,
+        help=("graph tier only — soft cap on wall time for the "
+              "entire L3 sweep. 0 = unlimited."),
+    )
     # Audit-drip specific.
     p.add_argument(
         "--target",
@@ -473,6 +494,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     needs_password = is_drip or is_record or tier in (
         ValidationTier.DEEP, ValidationTier.AUDIT,
+        ValidationTier.GRAPH,
     )
     password: Optional[str] = None
     if needs_password:
@@ -637,6 +659,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 args.audit_max_bytes if args.audit_max_bytes > 0 else None
             ),
             audit_concurrency=getattr(args, "audit_concurrency", 1),
+            graph_max_records=(
+                getattr(args, "graph_max_records", 0) or None),
+            graph_max_blobs_per_record=getattr(
+                args, "graph_max_blobs_per_record", 0),
+            graph_max_runtime_sec=(
+                getattr(args, "graph_max_runtime_sec", 0) or None),
             openssl_path=args.openssl_path,
             callback=callback,
             audit_ledger=ledger,

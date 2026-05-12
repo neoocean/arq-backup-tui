@@ -21,11 +21,13 @@ from .events import EventKind, ProgressCallback, emit
 from .tiers import (
     AUDIT_DEFAULT_SKIP_LARGER_THAN,
     BackupRecordResult,
+    GraphCheckResult,
     LayoutResult,
     MagicCheckResult,
     ObjectAuditResult,
     run_backuprecord_check,
     run_full_audit,
+    run_graph_check,
     run_layout_check,
     run_magic_check,
 )
@@ -35,13 +37,15 @@ class ValidationTier(Enum):
     """Coarse tier selector matching Arq's own validation hierarchy.
 
     Each tier subsumes the cheaper tiers below it: ``DEEP`` runs L0 +
-    L1a + L1b; ``AUDIT`` runs everything.
+    L1a + L1b; ``AUDIT`` runs L0 + L1a + L1b + L2; ``GRAPH`` runs
+    everything (L0 + L1a + L1b + L2 + L3 graph-consistency).
     """
 
     DRY_RUN = "dry-run"   # L0 only
     QUICK = "quick"       # L0 + L1a magic-byte sample
     DEEP = "deep"         # L0 + L1a + L1b backuprecord HMAC
     AUDIT = "audit"       # L0 + L1a + L1b + L2 full HMAC sweep
+    GRAPH = "graph"       # AUDIT + L3 per-record graph walk
 
 
 @dataclass
@@ -58,6 +62,7 @@ class ValidationReport:
     magic_check: Optional[MagicCheckResult] = None
     backuprecord: Optional[BackupRecordResult] = None
     audit: Optional[ObjectAuditResult] = None
+    graph: Optional[GraphCheckResult] = None
 
     @property
     def elapsed_sec(self) -> float:
@@ -70,12 +75,23 @@ class ValidationReport:
             return True
         if self.backuprecord and (
             self.backuprecord.fail or not self.backuprecord.keyset_decrypted
-            and self.tier in (ValidationTier.DEEP.value, ValidationTier.AUDIT.value)
+            and self.tier in (
+                ValidationTier.DEEP.value,
+                ValidationTier.AUDIT.value,
+                ValidationTier.GRAPH.value)
         ):
             return True
         if self.audit and (
             self.audit.files_fail or self.audit.files_error
             or self.audit.aborted_reason
+        ):
+            return True
+        if self.graph and (
+            self.graph.records_fail
+            or self.graph.blobs_missing
+            or self.graph.blobs_hmac_fail
+            or self.graph.blobs_decode_fail
+            or self.graph.aborted_reason
         ):
             return True
         if self.layout and not self.layout.layout_ok:
@@ -139,6 +155,9 @@ class ValidationReport:
         if isinstance(kwargs.get("audit"), dict):
             kwargs["audit"] = _dataclass_from_dict(
                 ObjectAuditResult, kwargs["audit"])
+        if isinstance(kwargs.get("graph"), dict):
+            kwargs["graph"] = _dataclass_from_dict(
+                GraphCheckResult, kwargs["graph"])
         return cls(**kwargs)
 
     @classmethod
@@ -180,6 +199,7 @@ def _tier_runs(tier: ValidationTier) -> List[str]:
         ValidationTier.QUICK: ["L0", "L1a"],
         ValidationTier.DEEP: ["L0", "L1a", "L1b"],
         ValidationTier.AUDIT: ["L0", "L1a", "L1b", "L2"],
+        ValidationTier.GRAPH: ["L0", "L1a", "L1b", "L2", "L3"],
     }[tier]
 
 
@@ -196,6 +216,9 @@ def validate(
     discover_concurrency: int = 8,
     magic_concurrency: int = 4,
     audit_concurrency: int = 1,
+    graph_max_records: Optional[int] = None,
+    graph_max_blobs_per_record: int = 0,
+    graph_max_runtime_sec: Optional[float] = None,
     openssl_path: str = "openssl",
     callback: Optional[ProgressCallback] = None,
     audit_ledger=None,
@@ -260,6 +283,7 @@ def validate(
             ValidationTier.QUICK,
             ValidationTier.DEEP,
             ValidationTier.AUDIT,
+            ValidationTier.GRAPH,
         ):
             report.magic_check = run_magic_check(
                 backend, layouts, root=root,
@@ -268,7 +292,10 @@ def validate(
                 callback=callback,
             )
 
-        if tier in (ValidationTier.DEEP, ValidationTier.AUDIT):
+        if tier in (
+            ValidationTier.DEEP, ValidationTier.AUDIT,
+            ValidationTier.GRAPH,
+        ):
             if not encryption_password:
                 report.error = (
                     "encryption_password is required for "
@@ -284,7 +311,9 @@ def validate(
                 # Keyset failure means we can't proceed to L2 either.
                 return report
 
-        if tier is ValidationTier.AUDIT:
+        if tier in (
+            ValidationTier.AUDIT, ValidationTier.GRAPH,
+        ):
             assert encryption_password is not None
             report.audit = run_full_audit(
                 backend, layouts, encryption_password,
@@ -296,6 +325,18 @@ def validate(
                 callback=callback,
                 ledger=audit_ledger,
                 audit_concurrency=audit_concurrency,
+            )
+
+        if tier is ValidationTier.GRAPH:
+            assert encryption_password is not None
+            report.graph = run_graph_check(
+                backend, layouts, encryption_password,
+                root=root,
+                max_records=graph_max_records,
+                max_blobs_per_record=graph_max_blobs_per_record,
+                max_runtime_sec=graph_max_runtime_sec,
+                openssl_path=openssl_path,
+                callback=callback,
             )
 
     except Exception as exc:

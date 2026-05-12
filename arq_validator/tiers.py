@@ -71,6 +71,52 @@ class BackupRecordResult:
 
 
 @dataclass
+class GraphCheckResult:
+    """L3 outcome: per-backuprecord blob-graph consistency.
+
+    L3 walks every backuprecord (not just the latest, like L1b)
+    and follows its tree → file-node → blob-loc chain end-to-end.
+    Catches defects that the cheaper tiers miss:
+
+      - Tree node references a blob that no longer exists on
+        disk (orphaned reference / partial GC).  L2 doesn't
+        notice because L2 audits files that ARE present; it
+        never asks "was anything expected to be here?"
+      - Bit-rot on a blob that L1b's latest-record sweep
+        skipped because it lives in an older record.
+
+    The check delegates per-record work to
+    :func:`record_validator.validate_record` and aggregates the
+    results into one structured report.  Failures are dedupped
+    by ``blob_id`` so a blob shared across N records doesn't
+    appear N times in the operator-visible failure list.
+    """
+
+    records_checked: int = 0
+    records_ok: int = 0
+    records_fail: int = 0
+    # Unique blob count (after dedup across records); raw
+    # blob-walk count is in `blob_walks_total` so the operator
+    # can see "we walked 50000 blob refs but only 12000 unique
+    # blobs" — high dedup is the normal case for snapshot-y
+    # destinations.
+    blobs_unique: int = 0
+    blob_walks_total: int = 0
+    blobs_missing: int = 0
+    blobs_hmac_fail: int = 0
+    blobs_decode_fail: int = 0
+    bytes_fetched: int = 0
+    # Unique-by-blob_id failure entries (kind = "missing" /
+    # "hmac" / "decode" / "fetch").  See
+    # :class:`RecordValidationFailure` for the schema.
+    failures: List[Dict[str, str]] = field(default_factory=list)
+    aborted_reason: Optional[str] = None
+    # Wall time spent in L3 (same shape as ObjectAuditResult).
+    started_at: float = 0.0
+    planned_records: int = 0
+
+
+@dataclass
 class ObjectAuditResult:
     """L2 outcome: full HMAC sweep over every EncryptedObject."""
 
@@ -1104,5 +1150,228 @@ def run_full_audit(
         files_per_sec=final_files_per_sec,
         bytes_per_sec=final_bytes_per_sec,
         planned_files=result.planned_files,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# L3: per-backuprecord blob-graph consistency
+# ---------------------------------------------------------------------------
+
+
+def run_graph_check(
+    backend: Backend,
+    layouts: List[L.Arq7ComputerLayout],
+    encryption_password: str,
+    *,
+    root: str = "/",
+    max_records: Optional[int] = None,
+    max_blobs_per_record: int = 0,
+    max_runtime_sec: Optional[float] = None,
+    openssl_path: str = "openssl",
+    callback: Optional[ProgressCallback] = None,
+) -> GraphCheckResult:
+    """L3: walk every backuprecord's blob graph end-to-end.
+
+    For each layout's backup folder, iterate every backuprecord
+    chronologically, delegate the per-record walk to
+    :func:`record_validator.validate_record`, and aggregate the
+    results.  Failures are dedupped by ``blob_id`` across records.
+
+    Cost: ``records × O(blobs per record)``.  Dedup-friendly
+    backups (most snapshots share most blobs) come out
+    significantly cheaper because ``validate_record``'s per-call
+    walk hits the same on-disk bytes; if performance becomes a
+    concern, pass ``ledger`` (future) to short-circuit repeat
+    fetches across records.
+
+    Soft caps:
+      ``max_records`` — abort after this many records walked
+        (0 / None = unlimited).
+      ``max_blobs_per_record`` — passed through to
+        ``validate_record``; 0 = unlimited per record.
+      ``max_runtime_sec`` — wall-time budget for the whole tier.
+
+    Use cases:
+      - Detect bit-rot in tree nodes that reference blobs whose
+        on-disk file is intact (L2 wouldn't notice; the broken
+        REFERENCE is the corruption).
+      - Detect partial-GC scenarios where a blob got cleaned up
+        but a record still references it.
+      - Confirm older records (not just latest) are still
+        restorable.
+
+    L3 sits between L1b (latest backuprecord only) and L2 (every
+    EncryptedObject regardless of references) in scope: it
+    follows the ``records → trees → blobs`` graph for ALL
+    records.  L2 catches orphan-blob bit-rot; L3 catches
+    missing-reference + orphan-reference bit-rot.
+    """
+    from .record_validator import validate_record  # lazy
+    emit(callback, EventKind.TIER_STARTED,
+         "L3 graph consistency", tier="L3")
+    result = GraphCheckResult()
+    result.started_at = time.time()
+    started_monotonic = time.monotonic()
+    deadline = (
+        started_monotonic + max_runtime_sec if max_runtime_sec
+        else None)
+
+    # Enumerate all record paths up front so the operator
+    # gets a planned-records count in the TIER_STARTED event +
+    # downstream progress events.
+    record_paths: List[Tuple[str, str]] = []  # (cu, rec_path)
+    for lay in layouts:
+        for folder_uuid in getattr(
+                lay, "backup_folder_uuids", ()):
+            try:
+                paths = L.list_backuprecords(
+                    backend, root, lay.computer_uuid, folder_uuid)
+            except Exception as exc:
+                err = (f"list_backuprecords failed for "
+                       f"{lay.computer_uuid}/{folder_uuid}: "
+                       f"{type(exc).__name__}: {exc}")
+                result.failures.append({
+                    "blob_id": "", "kind": "fetch",
+                    "rel_path": (f"{lay.computer_uuid}/"
+                                 f"backupfolders/{folder_uuid}"),
+                    "error": err,
+                })
+                emit(callback, EventKind.LOG, err,
+                     computer=lay.computer_uuid,
+                     folder=folder_uuid)
+                continue
+            for p in paths:
+                record_paths.append((lay.computer_uuid, p))
+    result.planned_records = len(record_paths)
+
+    if max_records and result.planned_records > max_records:
+        record_paths = record_paths[:max_records]
+
+    # Track blob_ids seen across records so the final failure
+    # list is unique-by-blob_id (a 5-record run that fails
+    # the same blob in all 5 surfaces once).
+    seen_blob_failures: set = set()
+
+    for cu, record_path in record_paths:
+        if deadline is not None and time.monotonic() >= deadline:
+            result.aborted_reason = "max_runtime"
+            break
+        rep = validate_record(
+            backend, record_path, encryption_password,
+            computer_uuid=cu, openssl_path=openssl_path,
+            max_blobs=max_blobs_per_record,
+            callback=None,    # per-record callback would
+                              # spam — L3 emits its own
+                              # AUDIT_PROGRESS instead.
+        )
+        result.records_checked += 1
+        result.blob_walks_total += rep.blobs_walked
+        result.bytes_fetched += rep.bytes_fetched
+        if rep.ok and not rep.failures:
+            result.records_ok += 1
+        else:
+            result.records_fail += 1
+            for f in rep.failures:
+                blob_id = getattr(f, "blob_id", "") or ""
+                kind = getattr(f, "kind", "") or ""
+                # Bucket: dedup by (blob_id, kind) so the
+                # same blob failing the same way in multiple
+                # records collapses to one row.
+                dedup_key = (blob_id, kind)
+                if dedup_key in seen_blob_failures:
+                    continue
+                seen_blob_failures.add(dedup_key)
+                if kind == "missing":
+                    result.blobs_missing += 1
+                elif kind == "hmac":
+                    result.blobs_hmac_fail += 1
+                elif kind == "decode":
+                    result.blobs_decode_fail += 1
+                result.failures.append({
+                    "blob_id": blob_id,
+                    "rel_path": getattr(f, "rel_path", ""),
+                    "offset": str(getattr(f, "offset", 0)),
+                    "length": str(getattr(f, "length", 0)),
+                    "kind": kind,
+                    "error": getattr(f, "error", "")[:200],
+                    "node_path": getattr(f, "node_path", ""),
+                    "record_path": record_path,
+                    "computer": cu,
+                })
+        # Emit progress every record (cheap; one record can
+        # take minutes already, so per-record cadence is the
+        # right granularity for L3).
+        elapsed = max(0.001,
+                       time.monotonic() - started_monotonic)
+        records_per_sec = result.records_checked / elapsed
+        bytes_per_sec = result.bytes_fetched / elapsed
+        remaining = max(
+            0, result.planned_records - result.records_checked)
+        eta_sec: Optional[float] = None
+        if records_per_sec > 0 and remaining > 0:
+            eta_sec = remaining / records_per_sec
+        emit(
+            callback, EventKind.AUDIT_PROGRESS,
+            (f"graph: {result.records_checked}/"
+             f"{result.planned_records} records, "
+             f"{result.records_ok} OK, "
+             f"{result.records_fail} fail, "
+             f"{result.blobs_missing} missing-blob, "
+             f"{result.blobs_hmac_fail} hmac-fail"
+             + (f" — ETA {_format_duration(eta_sec)}"
+                if eta_sec is not None else "")),
+            records_checked=result.records_checked,
+            records_ok=result.records_ok,
+            records_fail=result.records_fail,
+            blob_walks_total=result.blob_walks_total,
+            blobs_missing=result.blobs_missing,
+            blobs_hmac_fail=result.blobs_hmac_fail,
+            blobs_decode_fail=result.blobs_decode_fail,
+            bytes_fetched=result.bytes_fetched,
+            planned_records=result.planned_records,
+            remaining_records=remaining,
+            elapsed_sec=elapsed,
+            records_per_sec=records_per_sec,
+            bytes_per_sec=bytes_per_sec,
+            eta_sec=eta_sec,
+            tier="L3",
+        )
+
+    result.blobs_unique = len(seen_blob_failures) + (
+        result.blob_walks_total - len(seen_blob_failures))
+    # Note: blobs_unique above is an upper bound — the
+    # per-record reports' `blobs_walked` counter doesn't
+    # currently expose unique IDs.  We expose the raw walk
+    # total via blob_walks_total + the dedupped failure count
+    # via blobs_missing/hmac/decode for actionable numbers.
+
+    elapsed_total = max(
+        0.001, time.monotonic() - started_monotonic)
+    final_records_per_sec = (
+        result.records_checked / elapsed_total)
+    final_bytes_per_sec = (
+        result.bytes_fetched / elapsed_total)
+    emit(
+        callback, EventKind.TIER_FINISHED,
+        (f"L3 graph check finished in "
+         f"{_format_duration(elapsed_total)}: "
+         f"{result.records_ok}/{result.records_checked} "
+         f"records OK, {result.blobs_missing} missing-blob, "
+         f"{result.blobs_hmac_fail} hmac-fail, "
+         f"{final_records_per_sec:.2f} rec/s, "
+         f"{final_bytes_per_sec / 1e6:.1f} MB/s"),
+        tier="L3",
+        records_checked=result.records_checked,
+        records_ok=result.records_ok,
+        records_fail=result.records_fail,
+        blobs_missing=result.blobs_missing,
+        blobs_hmac_fail=result.blobs_hmac_fail,
+        blobs_decode_fail=result.blobs_decode_fail,
+        bytes_fetched=result.bytes_fetched,
+        elapsed_sec=elapsed_total,
+        records_per_sec=final_records_per_sec,
+        bytes_per_sec=final_bytes_per_sec,
+        planned_records=result.planned_records,
     )
     return result

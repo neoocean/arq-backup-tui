@@ -176,8 +176,9 @@ arq-backup-tui/
 
 ## 3. Validation tier model
 
-We provide four validation tiers that map one-to-one with Arq.app's
-internal validation tiers. Each tier subsumes all tiers below it.
+We provide five validation tiers that map one-to-one with Arq.app's
+internal validation tiers, plus an L3 tier we add to catch defects
+that L0-L2 miss. Each tier subsumes all tiers below it.
 
 | Tier | Name | What it inspects | Cost | Frequency (operator-recommended) |
 | --- | --- | --- | --- | --- |
@@ -185,6 +186,7 @@ internal validation tiers. Each tier subsumes all tiers below it.
 | **L1a** | `quick` | ARQO magic-byte sample sweep (default 5%, full sweep with `--sample-fraction 1.0`) | sample × 4-byte RTT | Weekly |
 | **L1b** | `deep` | `encryptedkeyset.dat` decrypt + HMAC of the latest backuprecord per folder | keyset 1 time + ≤50 MB per folder | Quarterly / 90 days |
 | **L2** | `audit` | HMAC of every EncryptedObject (multi-object container aware) | Full download of every object | Once a year, or on suspicion |
+| **L3** | `graph` | Per-record graph walk — verify every blob referenced by every backuprecord exists + decrypts + HMACs. Catches missing-reference + cross-record bit-rot. | records × O(blobs/record); dedupes failures across records | On suspicion |
 
 Because L2 can take several hours per run for large destinations, a
 separate **audit-drip** mode is provided (see § 5) and a parallel
@@ -199,6 +201,11 @@ worker-pool mode is provided for thread-safe backends (see § 3.2).
   metadata
 - **L2**: Bit-rot / tampering / damage at encryption time across every
   object (the same guarantee as Arq's monthly self-validation)
+- **L3**: Missing-reference defects (tree node references a blob whose
+  file is gone — orphaned reference / partial-GC bug) AND bit-rot in
+  blobs that L1b's latest-record sweep skipped because the blob lives
+  in an older record.  L2 audits files *that exist*; L3 audits *what
+  records reference* — the two are complementary.
 
 ### 3.2 Parallel L2 audit
 
@@ -267,6 +274,43 @@ want a smoothed estimate can apply their own EMA on top of
 TIER_FINISHED carries the same throughput fields so a run-complete
 summary doesn't need to re-derive elapsed / throughput from the
 event stream.
+
+### 3.4 L3 — per-record graph consistency
+
+`run_graph_check` walks every backuprecord in every backup folder and
+verifies its blob graph end-to-end.  Delegates per-record work to
+`record_validator.validate_record`; aggregates per-blob failures
+across records (dedupped by `(blob_id, kind)` so a blob that fails
+in multiple records collapses to one row in the operator-visible
+output).
+
+Defects caught that L1b / L2 don't:
+
+- **Missing reference**: a tree node references blob X whose on-disk
+  file doesn't exist anymore (partial-GC bug, accidental delete).
+  L2 audits files that ARE present, never asks "what should be here?"
+- **Cross-record bit-rot**: an older record's referenced blob got
+  corrupted.  L1b only checks the *latest* record per folder, so
+  rot in older records hides until restore time.
+
+CLI flag: `--tier graph`.  Soft caps:
+
+- `--graph-max-records N` — stop after N records walked (0 =
+  unlimited).
+- `--graph-max-blobs-per-record N` — per-record blob walk cap (0 =
+  unlimited).
+- `--graph-max-runtime-sec N` — wall-time budget for the whole
+  sweep (0 = unlimited).
+
+`AUDIT_PROGRESS` events emit once per record with the same ETA +
+throughput shape as L2 (`records_per_sec`, `bytes_per_sec`,
+`eta_sec`, etc.) but keyed by `tier="L3"` so TUIs can distinguish
+the two streams.
+
+ValidationTier.GRAPH chains all five layers (L0 + L1a + L1b + L2 +
+L3).  L3 alone (without prior tiers) is not exposed — the L2 sweep
+provides the "every file is intact" baseline that L3 builds on for
+the "intact files match the graph" guarantee.
 
 ## 4. Core abstractions
 

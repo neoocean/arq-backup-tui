@@ -43,6 +43,7 @@ from .runner import ValidationReport, ValidationTier, validate
 from .sftp import SftpBackend, SftpConnectionError
 from .tiers import (
     BackupRecordResult,
+    GraphCheckResult,
     LayoutResult,
     MagicCheckResult,
     ObjectAuditResult,
@@ -75,6 +76,7 @@ __all__ = [
     "MagicCheckResult",
     "BackupRecordResult",
     "ObjectAuditResult",
+    "GraphCheckResult",
     # Audit-drip
     "AuditDripState",
     "Throttle",
