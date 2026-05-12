@@ -9,10 +9,11 @@ directly.
 
 from __future__ import annotations
 
+import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type, TypeVar
 
 from . import layout as L
 from .backend import Backend
@@ -85,6 +86,91 @@ class ValidationReport:
         out = asdict(self)
         # Drop None tier blocks for cleaner JSON output.
         return {k: v for k, v in out.items() if v is not None}
+
+    def to_json(self, *, indent: Optional[int] = 2) -> str:
+        """Serialize the report to a JSON string.
+
+        ``indent=None`` produces the compact form (useful for
+        log lines / wire transport); the default 2-space
+        indent is human-friendly for `cat report.json`.
+
+        Schema-version + format hints are not embedded: the
+        per-tier dataclass field names are the schema.  Future
+        non-additive changes would need ``from_dict`` to be
+        version-aware.
+        """
+        return json.dumps(
+            self.to_dict(), indent=indent, ensure_ascii=False,
+            sort_keys=False, default=str)
+
+    @classmethod
+    def from_dict(
+            cls, data: Dict[str, Any]) -> "ValidationReport":
+        """Reconstruct a ValidationReport from a ``to_dict``
+        output.
+
+        Unknown top-level keys are ignored (forward-compat) —
+        a newer ``to_dict`` that adds fields can still be read
+        by an older ``from_dict``.  Nested tier blocks are
+        reconstructed via ``_dataclass_from_dict`` which honors
+        each block's known field set; the same forward-compat
+        rule applies there.
+
+        Missing tier blocks (operator ran ``--tier quick`` so
+        ``audit`` is None) come back as None — round-trip
+        preserves the "this tier wasn't run" signal.
+        """
+        kwargs: Dict[str, Any] = {}
+        known = {f.name for f in fields(cls)}
+        for k, v in data.items():
+            if k not in known:
+                continue        # forward-compat: ignore extras
+            kwargs[k] = v
+        # Hoist tier blocks into their dataclass forms.
+        if isinstance(kwargs.get("layout"), dict):
+            kwargs["layout"] = _dataclass_from_dict(
+                LayoutResult, kwargs["layout"])
+        if isinstance(kwargs.get("magic_check"), dict):
+            kwargs["magic_check"] = _dataclass_from_dict(
+                MagicCheckResult, kwargs["magic_check"])
+        if isinstance(kwargs.get("backuprecord"), dict):
+            kwargs["backuprecord"] = _dataclass_from_dict(
+                BackupRecordResult, kwargs["backuprecord"])
+        if isinstance(kwargs.get("audit"), dict):
+            kwargs["audit"] = _dataclass_from_dict(
+                ObjectAuditResult, kwargs["audit"])
+        return cls(**kwargs)
+
+    @classmethod
+    def from_json(cls, text: str) -> "ValidationReport":
+        """Parse a JSON string produced by ``to_json``.
+        Convenience wrapper around ``from_dict``."""
+        return cls.from_dict(json.loads(text))
+
+
+# JSON round-trip helper for the tier-result dataclasses.  We
+# could plug in a third-party serializer (``cattrs``, etc.) for
+# polymorphic + union support, but every tier-result field is a
+# JSON primitive (str / int / float / bool / list / dict / None),
+# so a tiny dataclass-aware re-hydrator is sufficient + keeps the
+# pure-stdlib dependency posture.
+_T = TypeVar("_T")
+
+
+def _dataclass_from_dict(cls: Type[_T], data: Dict[str, Any]) -> _T:
+    """Re-hydrate a dataclass from its ``asdict`` output.
+
+    Forward-compat: unknown keys in ``data`` are silently
+    dropped, so adding new fields to the dataclass between
+    write + read still works in the read direction.
+
+    Backward-compat: missing fields fall through to the
+    dataclass's own defaults (no special handling needed —
+    the dataclass constructor supplies them).
+    """
+    known = {f.name for f in fields(cls)}
+    kwargs = {k: v for k, v in data.items() if k in known}
+    return cls(**kwargs)
 
 
 def _tier_runs(tier: ValidationTier) -> List[str]:

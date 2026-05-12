@@ -358,11 +358,39 @@ class ValidationReport:
     error: str | None
     def has_failures(self) -> bool: ...
     def to_dict(self) -> dict: ...
+    def to_json(self, *, indent=2) -> str: ...
+    @classmethod
+    def from_dict(cls, data: dict) -> ValidationReport: ...
+    @classmethod
+    def from_json(cls, text: str) -> ValidationReport: ...
 
 def validate(backend, *, tier, root="/", encryption_password=None,
              sample_fraction=0.05, audit_skip_larger_than=...,
              callback=None, ...) -> ValidationReport: ...
 ```
+
+`to_json` / `from_json` round-trip is intended for:
+
+- Archiving the report next to its dump (operator runs an audit
+  on Friday, wants to compare to the prior Friday's report).
+- TUI re-display without re-running L2.
+- External monitor integration — `docker-monitor` style sidecar
+  reads `report.json`, extracts failure counts + ETA, decides
+  whether to fire its own alert.
+
+Forward + backward compat:
+
+- `from_dict` ignores unknown top-level + nested-block keys, so
+  a newer schema that adds fields can still be parsed by an
+  older codebase.
+- Missing fields fall through to dataclass defaults, so an older
+  JSON without a newer field still parses cleanly (the field
+  comes back at its declared default).
+
+Polymorphic union support is deliberately omitted (no `cattrs`
+or similar) — every tier-result field is already a JSON primitive
+(str / int / float / bool / list / dict / None), keeping the
+pure-stdlib dependency posture.
 
 ## 5. audit-drip — resumable L2 audit
 
