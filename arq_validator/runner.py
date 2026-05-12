@@ -109,6 +109,7 @@ def validate(
     audit_max_bytes: Optional[int] = None,
     discover_concurrency: int = 8,
     magic_concurrency: int = 4,
+    audit_concurrency: int = 1,
     openssl_path: str = "openssl",
     callback: Optional[ProgressCallback] = None,
     audit_ledger=None,
@@ -120,6 +121,14 @@ def validate(
     expected validation failures: those land in the report's per-tier
     blocks. Unexpected exceptions (programmer error, backend bug) are
     captured into ``report.error`` so the run still finishes cleanly.
+
+    ``audit_concurrency`` (default 1) controls L2 worker parallelism.
+    Values >1 only take effect when the backend declares
+    ``supports_concurrent_reads = True`` (LocalBackend does;
+    SftpBackend does not — single channel) — otherwise the L2
+    driver silently clamps to 1 and emits a LOG event.  See
+    :func:`arq_validator.tiers.run_full_audit` for the safety
+    contract.
     """
     report = ValidationReport(
         tier=tier.value,
@@ -200,6 +209,7 @@ def validate(
                 openssl_path=openssl_path,
                 callback=callback,
                 ledger=audit_ledger,
+                audit_concurrency=audit_concurrency,
             )
 
     except Exception as exc:

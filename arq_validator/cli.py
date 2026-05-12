@@ -185,6 +185,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         help="audit only — soft cap on bytes read. 0 = unlimited.",
     )
+    p.add_argument(
+        "--audit-concurrency",
+        default=1,
+        type=int,
+        help=("audit only — number of worker threads for parallel L2 "
+              "HMAC verification. Default 1 (sequential).  Values > 1 "
+              "take effect only when the backend declares "
+              "supports_concurrent_reads=True (LocalBackend does; "
+              "SftpBackend does not — single channel).  Recommended "
+              "4-8 for a multi-core local mirror; 1 (default) for "
+              "SFTP."),
+    )
     # Audit-drip specific.
     p.add_argument(
         "--target",
@@ -624,6 +636,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             audit_max_bytes=(
                 args.audit_max_bytes if args.audit_max_bytes > 0 else None
             ),
+            audit_concurrency=getattr(args, "audit_concurrency", 1),
             openssl_path=args.openssl_path,
             callback=callback,
             audit_ledger=ledger,

@@ -29,7 +29,16 @@ class Backend(Protocol):
     Write methods (``mkdir`` / ``write_all``) are required for the
     writer. Read-only backends can leave them as no-ops or raisers;
     callers that mutate the destination assume both are available.
+
+    ``supports_concurrent_reads`` is a class-level boolean used by
+    :func:`arq_validator.tiers.run_full_audit` to decide whether
+    parallel L2 audit is safe.  Backends that share a single
+    underlying transport (a single SFTP channel) must keep this
+    False; backends that open fresh file descriptors per call (a
+    plain local filesystem) can set it True.
     """
+
+    supports_concurrent_reads: bool = False
 
     def list_dir(self, path: str) -> List[str]:
         """Return the entries (names only) under ``path``, sorted."""
@@ -93,7 +102,15 @@ class LocalBackend:
     Resolved paths are checked to lie under the root to prevent
     backend-relative paths from escaping via "..", which matters when
     the validator inputs originate from on-disk listings.
+
+    Thread-safety: every read method opens a fresh file descriptor and
+    closes it before returning.  No mutable shared state on the
+    instance after ``__init__``.  Safe for parallel reads from
+    multiple threads — :func:`arq_validator.tiers.run_full_audit`'s
+    parallel L2 mode relies on this.
     """
+
+    supports_concurrent_reads = True
 
     def __init__(self, root: os.PathLike) -> None:
         self.root = Path(root).resolve()

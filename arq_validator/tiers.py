@@ -8,8 +8,11 @@ Progress is reported through the optional ``ProgressCallback``.
 from __future__ import annotations
 
 import random
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait,
+)
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -403,6 +406,184 @@ def run_backuprecord_check(
 AUDIT_DEFAULT_SKIP_LARGER_THAN = 256 * 1024
 
 
+# ---------------------------------------------------------------------------
+# Per-file audit work — pure compute + lock-free delta merge
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _AuditDelta:
+    """Per-file outcome ready to merge into an ``ObjectAuditResult``.
+
+    ``_audit_one_file_compute`` builds + returns one of these and emits
+    the file-level callback events itself; the caller (whether
+    sequential or parallel) is responsible only for merging the delta
+    into the shared result.  Splitting the compute from the merge is
+    what enables parallel L2 audit (PR § parallel-L2): worker threads
+    produce deltas, the driver thread merges them under a lock.
+
+    Sequential mode uses the same compute → merge dance, just with no
+    actual contention; this keeps both code paths converged.
+    """
+
+    files_total: int = 0
+    files_ok: int = 0
+    files_fail: int = 0
+    files_error: int = 0
+    files_skipped: int = 0
+    bytes_read: int = 0
+    inner_arqos_total: int = 0
+    inner_arqos_ok: int = 0
+    inner_arqos_fail: int = 0
+    failures: List[Dict[str, str]] = field(default_factory=list)
+    # Set to ``file_name`` when the audit succeeded; consumed by the
+    # driver to update ``ledger`` (if any).  ``None`` for failures,
+    # errors, and skips so the ledger never marks an unverified file
+    # as audited.
+    ledger_record_file_name: Optional[str] = None
+
+
+def _audit_one_file_compute(
+    backend: Backend,
+    keyset: Keyset,
+    computer: str,
+    kind: str,
+    shard: str,
+    file_name: str,
+    abs_path: str,
+    skip_larger_than: Optional[int],
+    callback: Optional[ProgressCallback],
+) -> _AuditDelta:
+    """Pure per-file audit worker — no mutation of shared state.
+
+    Mirrors :func:`_audit_one_file` (which keeps writing to a shared
+    ``result`` for backwards compat).  This variant exists so the
+    parallel L2 driver can run many computes concurrently and merge
+    deltas serially under a lock.  Callback events are emitted from
+    within the worker — :func:`emit` swallows callback exceptions so
+    multi-thread callback hooks don't crash the driver.
+
+    See ``_merge_audit_delta`` for the inverse + ``run_full_audit``
+    for the orchestrator that ties both halves together.
+    """
+    d = _AuditDelta()
+    d.files_total = 1
+    try:
+        size = backend.stat_size(abs_path)
+    except Exception as exc:
+        err = f"stat: {type(exc).__name__}: {exc}"
+        d.files_error = 1
+        d.failures.append({
+            "computer": computer, "kind": kind, "shard": shard,
+            "file_name": file_name, "error": err[:200],
+        })
+        emit(
+            callback, EventKind.AUDIT_FILE_FAILED, err,
+            computer=computer, family=kind, shard=shard,
+            file_name=file_name, error=err[:200],
+        )
+        return d
+    if skip_larger_than is not None and size > skip_larger_than:
+        d.files_skipped = 1
+        emit(
+            callback, EventKind.AUDIT_FILE_SKIPPED,
+            f"skipped (size {size:,} > cap {skip_larger_than:,})",
+            computer=computer, family=kind, shard=shard,
+            file_name=file_name, size=size,
+        )
+        return d
+    try:
+        body = backend.read_all(abs_path)
+    except Exception as exc:
+        err = f"fetch: {type(exc).__name__}: {exc}"
+        d.files_error = 1
+        d.failures.append({
+            "computer": computer, "kind": kind, "shard": shard,
+            "file_name": file_name, "error": err[:200],
+        })
+        emit(
+            callback, EventKind.AUDIT_FILE_FAILED, err,
+            computer=computer, family=kind, shard=shard,
+            file_name=file_name, error=err[:200],
+        )
+        return d
+    d.bytes_read = len(body)
+    if len(body) != size:
+        err = f"short read: expected {size}, got {len(body)}"
+        d.files_error = 1
+        d.failures.append({
+            "computer": computer, "kind": kind, "shard": shard,
+            "file_name": file_name, "error": err,
+        })
+        emit(
+            callback, EventKind.AUDIT_FILE_FAILED, err,
+            computer=computer, family=kind, shard=shard,
+            file_name=file_name, error=err,
+        )
+        return d
+    if body[: len(C.ARQO_MAGIC)] != C.ARQO_MAGIC:
+        err = f"missing ARQO magic: {body[:4]!r}"
+        d.files_fail = 1
+        d.failures.append({
+            "computer": computer, "kind": kind, "shard": shard,
+            "file_name": file_name, "error": err,
+        })
+        emit(
+            callback, EventKind.AUDIT_FILE_FAILED, err,
+            computer=computer, family=kind, shard=shard,
+            file_name=file_name, error=err,
+        )
+        return d
+    n_ok, n_fail, fail_offsets = verify_multi_object_arqos(
+        body, keyset.hmac_key,
+    )
+    d.inner_arqos_total = n_ok + n_fail
+    d.inner_arqos_ok = n_ok
+    d.inner_arqos_fail = n_fail
+    if n_fail == 0:
+        d.files_ok = 1
+        d.ledger_record_file_name = file_name
+        emit(
+            callback, EventKind.AUDIT_FILE_VERIFIED,
+            f"audit OK: {kind}/{shard}/{file_name}",
+            computer=computer, family=kind, shard=shard,
+            file_name=file_name, inner_arqos=n_ok,
+        )
+    else:
+        d.files_fail = 1
+        err = (
+            f"{n_fail}/{n_ok + n_fail} inner ARQO HMAC mismatch "
+            f"(first failed offset: {fail_offsets[0]})"
+        )
+        d.failures.append({
+            "computer": computer, "kind": kind, "shard": shard,
+            "file_name": file_name, "error": err,
+        })
+        emit(
+            callback, EventKind.AUDIT_FILE_FAILED, err,
+            computer=computer, family=kind, shard=shard,
+            file_name=file_name, error=err,
+        )
+    return d
+
+
+def _merge_audit_delta(
+    result: ObjectAuditResult, delta: _AuditDelta,
+) -> None:
+    """Apply ``delta`` to ``result`` in place.  Caller holds a lock
+    when invoked from the parallel driver."""
+    result.files_total += delta.files_total
+    result.files_ok += delta.files_ok
+    result.files_fail += delta.files_fail
+    result.files_error += delta.files_error
+    result.files_skipped += delta.files_skipped
+    result.bytes_read += delta.bytes_read
+    result.inner_arqos_total += delta.inner_arqos_total
+    result.inner_arqos_ok += delta.inner_arqos_ok
+    result.inner_arqos_fail += delta.inner_arqos_fail
+    result.failures.extend(delta.failures)
+
+
 def _audit_one_file(
     backend: Backend,
     keyset: Keyset,
@@ -526,6 +707,7 @@ def run_full_audit(
     openssl_path: str = "openssl",
     callback: Optional[ProgressCallback] = None,
     ledger=None,
+    audit_concurrency: int = 1,
 ) -> ObjectAuditResult:
     """L2: HMAC-verify every EncryptedObject across all object families.
 
@@ -542,12 +724,211 @@ def run_full_audit(
     The caller is responsible for ``save_ledger(ledger, path)`` after
     the run; we don't persist on every sweep so a failed sweep can
     be re-run without losing prior state.
+
+    Parallel L2 audit (operator-tunable via ``audit_concurrency``):
+
+      ``audit_concurrency = 1`` (default) — purely sequential; the
+        existing behavior, completely unchanged for backwards compat
+        and for the SFTP path where a single channel cannot
+        multiplex.
+
+      ``audit_concurrency > 1`` — runs the per-file compute on a
+        ``ThreadPoolExecutor`` with ``audit_concurrency`` workers
+        and merges deltas under a lock.  The driver bounds in-flight
+        work to ``audit_concurrency * 2`` so memory + budget-check
+        responsiveness stay constant.  Useful for ``LocalBackend``
+        where reads open fresh file descriptors and HMAC is the
+        CPU-bound bottleneck.
+
+      Safety clamp: if ``backend.supports_concurrent_reads`` is
+      False (the Backend protocol default, e.g. ``SftpBackend``
+      with a single channel), ``audit_concurrency`` is silently
+      clamped to 1 and a LOG event is emitted so the operator
+      sees the downgrade.
+
+    Event ordering: in parallel mode, AUDIT_FILE_VERIFIED /
+    AUDIT_FILE_FAILED events arrive out of order; UIs that depend
+    on file-order sequence should fall back to sequential mode.
+    AUDIT_PROGRESS events remain serialized by the driver and
+    reflect a consistent merge-point snapshot.
     """
     emit(callback, EventKind.TIER_STARTED, "L2 full audit", tier="L2")
     result = ObjectAuditResult()
     deadline = (
         time.monotonic() + max_runtime_sec if max_runtime_sec else None
     )
+
+    # Resolve effective concurrency.  Defensive bounds (1 ≤ N ≤ 64)
+    # — over 64 workers buys nothing on any current target and
+    # exposes us to fd-table exhaustion on dense backups.
+    requested_concurrency = max(1, min(64, int(audit_concurrency)))
+    backend_concurrent = bool(getattr(
+        backend, "supports_concurrent_reads", False))
+    if requested_concurrency > 1 and not backend_concurrent:
+        emit(
+            callback, EventKind.LOG,
+            (f"audit_concurrency={requested_concurrency} requested "
+             f"but backend.supports_concurrent_reads=False — "
+             f"clamping to 1 (sequential)"),
+            requested=requested_concurrency, clamped_to=1,
+            backend=type(backend).__name__,
+        )
+        eff_concurrency = 1
+    else:
+        eff_concurrency = requested_concurrency
+
+    # Shared-state lock used in parallel mode.  Sequential mode never
+    # acquires it (we branch on ``eff_concurrency`` before).
+    merge_lock = threading.Lock()
+
+    def _budget_check() -> Optional[str]:
+        """Return ``"max_runtime"`` / ``"max_bytes"`` if a budget
+        has been hit, else None.  Called under ``merge_lock`` in
+        parallel mode so ``result.bytes_read`` is a consistent
+        snapshot."""
+        if deadline is not None and time.monotonic() >= deadline:
+            return "max_runtime"
+        if max_bytes is not None and result.bytes_read >= max_bytes:
+            return "max_bytes"
+        return None
+
+    def _emit_progress_if_due() -> None:
+        """Emit AUDIT_PROGRESS when ``files_total`` crosses the
+        ``progress_every`` boundary.  Caller holds ``merge_lock``
+        in parallel mode so the read of ``result.files_total`` is
+        consistent with the most recent merge."""
+        if (result.files_total > 0
+                and result.files_total % progress_every == 0):
+            emit(
+                callback, EventKind.AUDIT_PROGRESS,
+                (f"audit: {result.files_total} files; "
+                 f"{result.files_ok} OK, "
+                 f"{result.files_fail + result.files_error} fail/err, "
+                 f"{result.files_skipped} skipped"),
+                files_total=result.files_total,
+                files_ok=result.files_ok,
+                files_fail=result.files_fail,
+                files_error=result.files_error,
+                files_skipped=result.files_skipped,
+                bytes_read=result.bytes_read,
+            )
+
+    def _merge_and_finalize(delta: _AuditDelta) -> None:
+        """Apply a worker's delta into ``result`` + update ``ledger``
+        + emit periodic progress.  Caller holds ``merge_lock`` in
+        parallel mode."""
+        _merge_audit_delta(result, delta)
+        if (delta.ledger_record_file_name is not None
+                and ledger is not None):
+            ledger.record(delta.ledger_record_file_name)
+        _emit_progress_if_due()
+
+    # Sequential path — preserves the historical behavior bit-for-
+    # bit.  Used when ``eff_concurrency == 1``.
+    def _run_sequential(lay, kind, keyset) -> Optional[str]:
+        for shard, file_name in lay.family_items(kind):
+            abort = _budget_check()
+            if abort is not None:
+                return abort
+            abs_path = L.object_path(
+                root, lay.computer_uuid, kind, shard, file_name,
+            )
+            if ledger is not None and ledger.contains(file_name):
+                result.files_total += 1
+                result.files_skipped_by_ledger += 1
+                emit(
+                    callback, EventKind.AUDIT_FILE_SKIPPED,
+                    "ledger-skipped (audited previously)",
+                    computer=lay.computer_uuid, family=kind,
+                    shard=shard, file_name=file_name,
+                    reason="ledger",
+                )
+                continue
+            delta = _audit_one_file_compute(
+                backend, keyset, lay.computer_uuid,
+                kind, shard, file_name, abs_path,
+                skip_larger_than, callback,
+            )
+            _merge_and_finalize(delta)
+        return None
+
+    # Parallel path — submit per-file computes to a thread pool,
+    # bounded in-flight, drain as completed.  Caller holds the
+    # merge_lock during result-mutation.  Budget checks under lock
+    # so a partial-merge state isn't mistakenly read.
+    def _run_parallel(
+            lay, kind, keyset, pool: ThreadPoolExecutor,
+            ) -> Optional[str]:
+        max_in_flight = eff_concurrency * 2
+        in_flight: set[Future] = set()
+        abort: Optional[str] = None
+
+        for shard, file_name in lay.family_items(kind):
+            # Budget check (cheap, under lock for consistency).
+            with merge_lock:
+                abort = _budget_check()
+            if abort is not None:
+                break
+            abs_path = L.object_path(
+                root, lay.computer_uuid, kind, shard, file_name,
+            )
+            # Ledger skip is cheap + thread-safe (set.contains is
+            # atomic under GIL).  Doing it pre-submit avoids
+            # spending a worker slot on a known skip.
+            if ledger is not None and ledger.contains(file_name):
+                with merge_lock:
+                    result.files_total += 1
+                    result.files_skipped_by_ledger += 1
+                    _emit_progress_if_due()
+                emit(
+                    callback, EventKind.AUDIT_FILE_SKIPPED,
+                    "ledger-skipped (audited previously)",
+                    computer=lay.computer_uuid, family=kind,
+                    shard=shard, file_name=file_name,
+                    reason="ledger",
+                )
+                continue
+            # Drain one if we've hit the in-flight cap.
+            if len(in_flight) >= max_in_flight:
+                done, in_flight = wait(
+                    in_flight, return_when=FIRST_COMPLETED)
+                for f in done:
+                    with merge_lock:
+                        _merge_and_finalize(f.result())
+                # Re-check budget after merging a batch of deltas.
+                with merge_lock:
+                    abort = _budget_check()
+                if abort is not None:
+                    break
+            in_flight.add(pool.submit(
+                _audit_one_file_compute,
+                backend, keyset, lay.computer_uuid,
+                kind, shard, file_name, abs_path,
+                skip_larger_than, callback,
+            ))
+
+        # Always drain the remaining futures — even on abort.  Any
+        # work already in-flight has already opened file
+        # descriptors / consumed a worker; we must collect the
+        # delta so result counters stay consistent (a leaked
+        # future would skew totals on the next call site).
+        for f in as_completed(list(in_flight)):
+            try:
+                d = f.result()
+            except Exception as exc:
+                # Worker raised — shouldn't happen because
+                # _audit_one_file_compute catches its own
+                # exceptions, but defense in depth.
+                emit(
+                    callback, EventKind.LOG,
+                    f"audit worker raised: "
+                    f"{type(exc).__name__}: {exc}",
+                    error=str(exc),
+                )
+                continue
+            with merge_lock:
+                _merge_and_finalize(d)
+        return abort
 
     for lay in layouts:
         kp = L.keyset_path(root, lay.computer_uuid)
@@ -577,62 +958,24 @@ def run_full_audit(
             computer=lay.computer_uuid,
         )
 
-        for kind in C.OBJECT_FAMILIES:
-            for shard, file_name in lay.family_items(kind):
-                if deadline is not None and time.monotonic() >= deadline:
-                    result.aborted_reason = "max_runtime"
+        if eff_concurrency == 1:
+            for kind in C.OBJECT_FAMILIES:
+                abort = _run_sequential(lay, kind, keyset)
+                if abort is not None:
+                    result.aborted_reason = abort
                     del keyset
                     return result
-                if max_bytes is not None and result.bytes_read >= max_bytes:
-                    result.aborted_reason = "max_bytes"
-                    del keyset
-                    return result
-                abs_path = L.object_path(
-                    root, lay.computer_uuid, kind, shard, file_name,
-                )
-                # Incremental skip: if the operator passed a ledger
-                # AND we've successfully audited this exact file_name
-                # before, skip the network read + HMAC.
-                if ledger is not None and ledger.contains(file_name):
-                    result.files_total += 1
-                    result.files_skipped_by_ledger += 1
-                    emit(
-                        callback, EventKind.AUDIT_FILE_SKIPPED,
-                        f"ledger-skipped (audited previously)",
-                        computer=lay.computer_uuid, family=kind,
-                        shard=shard, file_name=file_name,
-                        reason="ledger",
-                    )
-                    continue
-                files_ok_before = result.files_ok
-                _audit_one_file(
-                    backend, keyset, lay.computer_uuid,
-                    kind, shard, file_name, abs_path,
-                    skip_larger_than, result, callback,
-                )
-                # Successful audit → record in the ledger so
-                # subsequent sweeps can skip it. Failures are NOT
-                # ledgered — the operator wants the next sweep to
-                # re-audit them.
-                if (
-                    ledger is not None
-                    and result.files_ok > files_ok_before
-                ):
-                    ledger.record(file_name)
-                if result.files_total % progress_every == 0:
-                    emit(
-                        callback, EventKind.AUDIT_PROGRESS,
-                        (f"audit: {result.files_total} files; "
-                         f"{result.files_ok} OK, "
-                         f"{result.files_fail + result.files_error} fail/err, "
-                         f"{result.files_skipped} skipped"),
-                        files_total=result.files_total,
-                        files_ok=result.files_ok,
-                        files_fail=result.files_fail,
-                        files_error=result.files_error,
-                        files_skipped=result.files_skipped,
-                        bytes_read=result.bytes_read,
-                    )
+        else:
+            with ThreadPoolExecutor(
+                    max_workers=eff_concurrency,
+                    thread_name_prefix="arq-l2-audit",
+                    ) as pool:
+                for kind in C.OBJECT_FAMILIES:
+                    abort = _run_parallel(lay, kind, keyset, pool)
+                    if abort is not None:
+                        result.aborted_reason = abort
+                        del keyset
+                        return result
         del keyset
 
     # Bump sweep_count + last_sweep_finished_at on the ledger so the

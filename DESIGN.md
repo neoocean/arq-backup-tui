@@ -187,7 +187,8 @@ internal validation tiers. Each tier subsumes all tiers below it.
 | **L2** | `audit` | HMAC of every EncryptedObject (multi-object container aware) | Full download of every object | Once a year, or on suspicion |
 
 Because L2 can take several hours per run for large destinations, a
-separate **audit-drip** mode is provided (see § 5).
+separate **audit-drip** mode is provided (see § 5) and a parallel
+worker-pool mode is provided for thread-safe backends (see § 3.2).
 
 ### 3.1 What kinds of defects each tier catches
 
@@ -198,6 +199,44 @@ separate **audit-drip** mode is provided (see § 5).
   metadata
 - **L2**: Bit-rot / tampering / damage at encryption time across every
   object (the same guarantee as Arq's monthly self-validation)
+
+### 3.2 Parallel L2 audit
+
+L2 historically ran every per-file HMAC verification on the calling
+thread.  For a populated `LocalBackend` mirror (tens of GB of small
+blob/tree packs) HMAC is the CPU-bound bottleneck and serial execution
+caps throughput at one core's worth of work.
+
+`run_full_audit(..., audit_concurrency=N)` runs N worker threads via a
+`ThreadPoolExecutor`.  Each worker computes a per-file `_AuditDelta`
+without touching shared state; the driver merges deltas into the
+shared `ObjectAuditResult` under a lock.  In-flight work is bounded
+to `N * 2` so budget checks (`max_runtime_sec` / `max_bytes`) stay
+responsive and memory stays constant.
+
+Safety contract:
+
+- `Backend.supports_concurrent_reads` is the protocol-level switch.
+  `LocalBackend` declares it `True` (every read opens a fresh
+  descriptor); `SftpBackend` defaults to `False` (single channel,
+  not thread-safe).  Requesting `audit_concurrency > 1` on a
+  non-concurrent backend silently clamps to 1 and emits a `LOG`
+  event so the operator sees the downgrade.
+
+- Defensive bounds: `audit_concurrency` is clamped to `[1, 64]` to
+  avoid fd-table exhaustion on extreme inputs.
+
+- Event ordering: `AUDIT_FILE_VERIFIED` / `AUDIT_FILE_FAILED` events
+  may arrive out of order in parallel mode.  `AUDIT_PROGRESS` events
+  remain serialized at the merge point and always reflect a
+  consistent snapshot.
+
+- Ledger (`AuditLedger`) writes happen under the merge lock, so
+  `contains()` / `record()` interactions are race-free regardless of
+  worker count.
+
+CLI flag: `--audit-concurrency N` (default 1).  Recommended values:
+4-8 for a multi-core local mirror; 1 (default) for SFTP.
 
 ## 4. Core abstractions
 
