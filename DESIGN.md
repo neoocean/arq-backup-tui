@@ -238,6 +238,36 @@ Safety contract:
 CLI flag: `--audit-concurrency N` (default 1).  Recommended values:
 4-8 for a multi-core local mirror; 1 (default) for SFTP.
 
+### 3.3 AUDIT_PROGRESS ETA + throughput
+
+L2 audits over multi-TB destinations can take hours.  The historical
+AUDIT_PROGRESS event reported only running counters ("N files audited
+so far"); to know "how much longer?" the operator had to multiply
+manually.
+
+The enriched payload adds:
+
+- `elapsed_sec` — wall time since L2 started.
+- `files_per_sec` / `bytes_per_sec` — running throughput.
+- `planned_files` — total file count derived from the layout at
+  start (sum of blobpacks + treepacks + largeblobpacks +
+  standardobjects per computer).
+- `remaining_files` — `planned - total`, clamped to ≥ 0.
+- `eta_sec` — linear extrapolation `remaining / files_per_sec`; None
+  when at-completion or when throughput is 0.
+- `progress_fraction` — `total / planned` (0.0 ≤ f ≤ 1.0).
+
+The human-readable `message` string carries the same info in a
+concise format (`"... — 42.5% done, 12.3 files/s, 4.7 MB/s, ETA
+1:23:45"`).  Linear extrapolation is wildly optimistic in the first
+few emissions and stabilizes as more files complete — TUIs that
+want a smoothed estimate can apply their own EMA on top of
+`files_per_sec`.
+
+TIER_FINISHED carries the same throughput fields so a run-complete
+summary doesn't need to re-derive elapsed / throughput from the
+event stream.
+
 ## 4. Core abstractions
 
 ### 4.1 Backend protocol (`backend.py`)

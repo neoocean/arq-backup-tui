@@ -91,6 +91,15 @@ class ObjectAuditResult:
     bytes_read: int = 0
     failures: List[Dict[str, str]] = field(default_factory=list)
     aborted_reason: Optional[str] = None
+    # Operator-visible progress fields (§ AUDIT_PROGRESS ETA, CL
+    # TBD 2026-05-12).  ``started_at`` is set when
+    # ``run_full_audit`` begins; ``planned_files`` is computed
+    # from layout sizes at the same time.  The driver uses both
+    # to derive elapsed / throughput / ETA in AUDIT_PROGRESS
+    # events without forcing every UI to track its own
+    # wallclock.
+    started_at: float = 0.0
+    planned_files: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +413,22 @@ def run_backuprecord_check(
 # still verify them via ``verify_multi_object_arqos`` but the cap
 # protects against pathological single-file sizes blowing memory.
 AUDIT_DEFAULT_SKIP_LARGER_THAN = 256 * 1024
+
+
+def _format_duration(seconds: float) -> str:
+    """Render a duration as ``H:MM:SS`` (or ``M:SS`` for short
+    spans).  Used by AUDIT_PROGRESS ETA strings; chosen over
+    ``timedelta.__str__`` because that produces ``"0:01:23.456789"``
+    which is hard to read in a chat message.
+    """
+    if seconds < 0:
+        seconds = 0.0
+    s = int(round(seconds))
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -754,8 +779,24 @@ def run_full_audit(
     """
     emit(callback, EventKind.TIER_STARTED, "L2 full audit", tier="L2")
     result = ObjectAuditResult()
+    result.started_at = time.time()
+    started_monotonic = time.monotonic()
     deadline = (
-        time.monotonic() + max_runtime_sec if max_runtime_sec else None
+        started_monotonic + max_runtime_sec if max_runtime_sec else None
+    )
+    # Compute planned-file count up-front so AUDIT_PROGRESS can
+    # carry meaningful ETA estimates.  Source: the discovered
+    # layout's per-family counts (same numbers that drive
+    # COMPUTER_FOUND).  Includes ALL files — the runtime may
+    # later skip some via the size cap or ledger; the ETA
+    # framework treats those as completed-already, so the
+    # estimate stays a useful upper bound.
+    result.planned_files = sum(
+        len(getattr(lay, "blobpacks", ()))
+        + len(getattr(lay, "treepacks", ()))
+        + len(getattr(lay, "largeblobpacks", ()))
+        + len(getattr(lay, "standardobjects", ()))
+        for lay in layouts
     )
 
     # Resolve effective concurrency.  Defensive bounds (1 ≤ N ≤ 64)
@@ -796,22 +837,77 @@ def run_full_audit(
         """Emit AUDIT_PROGRESS when ``files_total`` crosses the
         ``progress_every`` boundary.  Caller holds ``merge_lock``
         in parallel mode so the read of ``result.files_total`` is
-        consistent with the most recent merge."""
-        if (result.files_total > 0
+        consistent with the most recent merge.
+
+        Payload includes elapsed / throughput / ETA so UIs can
+        render a complete progress line without tracking their
+        own wallclock.  ETA is a linear extrapolation
+        (``elapsed * remaining / processed``) and gets more
+        accurate as the run proceeds; the first few emissions
+        may be wildly optimistic or pessimistic depending on
+        whether the early files are large or small.
+        """
+        if not (result.files_total > 0
                 and result.files_total % progress_every == 0):
-            emit(
-                callback, EventKind.AUDIT_PROGRESS,
-                (f"audit: {result.files_total} files; "
-                 f"{result.files_ok} OK, "
-                 f"{result.files_fail + result.files_error} fail/err, "
-                 f"{result.files_skipped} skipped"),
-                files_total=result.files_total,
-                files_ok=result.files_ok,
-                files_fail=result.files_fail,
-                files_error=result.files_error,
-                files_skipped=result.files_skipped,
-                bytes_read=result.bytes_read,
-            )
+            return
+        # Throughput math under the same lock as the counter
+        # snapshot — readers get a consistent picture.
+        elapsed = max(0.001, time.monotonic() - started_monotonic)
+        files_per_sec = result.files_total / elapsed
+        bytes_per_sec = result.bytes_read / elapsed
+        # ETA: only meaningful when we know the total file
+        # count from layout.  remaining = planned - total
+        # (clamped to 0; planned is an upper bound that may
+        # over-estimate slightly if the layout shifted mid-
+        # run).
+        eta_sec: Optional[float] = None
+        remaining = 0
+        if result.planned_files > 0:
+            remaining = max(
+                0, result.planned_files - result.files_total)
+            if files_per_sec > 0 and remaining > 0:
+                eta_sec = remaining / files_per_sec
+        # Human message: keep the historical prefix + append
+        # the new throughput + ETA suffix so existing log
+        # filters keep matching.
+        pct = (
+            f"{100.0 * result.files_total / result.planned_files:.1f}%"
+            if result.planned_files > 0 else "?%")
+        msg_extra = (
+            f" — {pct} done, {files_per_sec:.1f} files/s"
+            f", {bytes_per_sec / 1e6:.1f} MB/s"
+        )
+        if eta_sec is not None:
+            msg_extra += f", ETA {_format_duration(eta_sec)}"
+        else:
+            msg_extra += ", ETA unknown"
+        emit(
+            callback, EventKind.AUDIT_PROGRESS,
+            (f"audit: {result.files_total} files; "
+             f"{result.files_ok} OK, "
+             f"{result.files_fail + result.files_error} fail/err, "
+             f"{result.files_skipped} skipped"
+             + msg_extra),
+            files_total=result.files_total,
+            files_ok=result.files_ok,
+            files_fail=result.files_fail,
+            files_error=result.files_error,
+            files_skipped=result.files_skipped,
+            bytes_read=result.bytes_read,
+            # ETA + throughput fields (CL TBD, 2026-05-12).
+            # New consumers can read these directly; older
+            # callbacks ignore unknown keys per the events
+            # forward-compat contract.
+            elapsed_sec=elapsed,
+            files_per_sec=files_per_sec,
+            bytes_per_sec=bytes_per_sec,
+            planned_files=result.planned_files,
+            remaining_files=remaining,
+            eta_sec=eta_sec,
+            progress_fraction=(
+                result.files_total / result.planned_files
+                if result.planned_files > 0 else None),
+        )
 
     def _merge_and_finalize(delta: _AuditDelta) -> None:
         """Apply a worker's delta into ``result`` + update ``ledger``
@@ -983,11 +1079,20 @@ def run_full_audit(
     if ledger is not None:
         ledger.sweep_count += 1
         ledger.last_sweep_finished_at = time.time()
+    # Final throughput snapshot mirrors AUDIT_PROGRESS payload so
+    # UIs can render a "run complete" summary without re-deriving.
+    elapsed_total = max(
+        0.001, time.monotonic() - started_monotonic)
+    final_files_per_sec = result.files_total / elapsed_total
+    final_bytes_per_sec = result.bytes_read / elapsed_total
     emit(
         callback, EventKind.TIER_FINISHED,
-        (f"L2 audit finished: {result.files_ok}/{result.files_total} OK, "
+        (f"L2 audit finished in {_format_duration(elapsed_total)}: "
+         f"{result.files_ok}/{result.files_total} OK, "
          f"{result.files_fail + result.files_error} fail/err, "
-         f"{result.files_skipped_by_ledger} ledger-skipped"),
+         f"{result.files_skipped_by_ledger} ledger-skipped, "
+         f"{final_files_per_sec:.1f} files/s, "
+         f"{final_bytes_per_sec / 1e6:.1f} MB/s"),
         tier="L2",
         files_total=result.files_total,
         files_ok=result.files_ok,
@@ -995,5 +1100,9 @@ def run_full_audit(
         files_error=result.files_error,
         files_skipped=result.files_skipped,
         files_skipped_by_ledger=result.files_skipped_by_ledger,
+        elapsed_sec=elapsed_total,
+        files_per_sec=final_files_per_sec,
+        bytes_per_sec=final_bytes_per_sec,
+        planned_files=result.planned_files,
     )
     return result
