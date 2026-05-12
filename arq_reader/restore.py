@@ -457,7 +457,7 @@ class Restore:
             return False
         try:
             blob = self._fetch_blob(loc, keyset)
-        except (DecryptError, OSError, NotImplementedError) as exc:
+        except (DecryptError, OSError, NotImplementedError, ValueError) as exc:
             _emit(callback, "acl_fetch_error",
                   path=str(out_path), error=str(exc))
             return False
@@ -498,7 +498,7 @@ class Restore:
         for loc in locs:
             try:
                 blob = self._fetch_blob(loc, keyset)
-            except (DecryptError, OSError, NotImplementedError) as exc:
+            except (DecryptError, OSError, NotImplementedError, ValueError) as exc:
                 _emit(callback, "xattr_fetch_error",
                       path=str(out_path), error=str(exc))
                 continue
@@ -542,7 +542,7 @@ class Restore:
                 tree_blob_loc, keyset,
             )
             result.blobs_fetched += 1
-        except (DecryptError, OSError, NotImplementedError) as exc:
+        except (DecryptError, OSError, NotImplementedError, ValueError) as exc:
             result.failures.append({
                 "path": str(out_dir),
                 "kind": "tree_fetch",
@@ -643,7 +643,7 @@ class Restore:
             for loc in node.dataBlobLocs:
                 chunks.append(self._fetch_blob(loc, keyset))
                 result.blobs_fetched += 1
-        except (DecryptError, OSError, NotImplementedError) as exc:
+        except (DecryptError, OSError, NotImplementedError, ValueError) as exc:
             result.failures.append({
                 "path": str(out_path),
                 "kind": "file_fetch",
@@ -793,7 +793,7 @@ class Restore:
             tree_bytes = self._fetch_tree_blob_cached(
                 tree_blob_loc, keyset,
             )
-        except (DecryptError, OSError, NotImplementedError):
+        except (DecryptError, OSError, NotImplementedError, ValueError):
             return (0, 0)
         tree = parse_tree(tree_bytes)
         files = 0
