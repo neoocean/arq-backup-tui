@@ -2,12 +2,16 @@
 
 BackupRecords land at
 ``<cu>/backupfolders/<fu>/backuprecords/<bucket>/<num>.backuprecord``.
-The naming convention pins:
+The naming convention pins (verified against /Volumes/arqbackup1
+and Arq.app v8's GUI restore, 2026-05-24):
 
-- ``<bucket>`` is a 5-digit zero-padded number (NN/MMM/HH-K
-  the bucket-of-time)
-- ``<num>`` is the Unix-epoch second of creation (per Arq.app's
-  sampled emit)
+- ``<bucket>`` is a 5-digit zero-padded number = ``epoch // 10**7``
+- ``<num>`` is a 7-digit zero-padded number = ``epoch % 10**7``
+- together they reconstruct the Unix-epoch second of creation:
+  ``int(bucket) * 10**7 + int(num)``. Arq.app's GUI restore
+  recomputes this exact path from the record's creationDate, so
+  the divisor must be 10**7 (a 10**5 split lists via glob but
+  fails GUI restore with "…backuprecord not found").
 
 Two runs at the SAME wall-clock second would produce the same
 ``<num>`` and could collide. This module pins:
@@ -92,8 +96,10 @@ class BackupRecordNumberingTests(unittest.TestCase):
     def test_record_path_encodes_unix_epoch(self) -> None:
         """Record path's ``<bucket>/<num>`` together encode the
         Unix epoch second of creation. Bucket is the high digits
-        (epoch // 100000), num is the low 5 digits (epoch % 100000).
-        Concatenating them reconstructs the full epoch."""
+        (epoch // 10**7), num is the low 7 digits (epoch % 10**7),
+        zero-padded to 7. Concatenating them reconstructs the full
+        epoch — and must match Arq.app v8's GUI-restore path
+        recomputation."""
         from arq_writer.backup import build_backup
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
@@ -112,8 +118,12 @@ class BackupRecordNumberingTests(unittest.TestCase):
             stem = r.backuprecord_path.stem
             self.assertTrue(bucket.isdigit())
             self.assertTrue(stem.isdigit())
-            # Reconstruct full epoch.
-            full_epoch = int(bucket) * 100000 + int(stem)
+            self.assertEqual(
+                len(stem), 7,
+                f"filename {stem!r} not 7-digit zero-padded",
+            )
+            # Reconstruct full epoch with the 10**7 divisor.
+            full_epoch = int(bucket) * 10_000_000 + int(stem)
             self.assertGreaterEqual(full_epoch, before)
             self.assertLessEqual(full_epoch, after)
 
