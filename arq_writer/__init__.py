@@ -36,6 +36,7 @@ from .crypto_write import (
     build_encrypted_object,
     compute_blob_id,
     rotate_keyset_password,
+    rotate_keyset_password_on_disk,
 )
 from .exclusions import ExclusionRules
 from .lz4_block import lz4_block_compress, lz4_block_decompress, lz4_wrap
@@ -85,6 +86,7 @@ __all__ = [
     "aes_256_cbc_encrypt",
     "compute_blob_id",
     "rotate_keyset_password",
+    "rotate_keyset_password_on_disk",
     "lz4_block_compress",
     "lz4_block_decompress",
     "lz4_wrap",

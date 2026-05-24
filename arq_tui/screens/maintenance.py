@@ -9,7 +9,9 @@ backup-set browser:
   keeping the underlying ``(encryption_key, hmac_key, blob_id_salt)``
   triple intact. Existing backuprecords / blobs continue to decrypt
   afterward; the new password is what's required to unlock the
-  keyset on subsequent runs.
+  keyset on subsequent runs. The superseded keyset is archived to
+  ``keyset_history/encryptedkeyset_<unix-epoch>.dat`` exactly as
+  Arq.app does, via ``rotate_keyset_password_on_disk``.
 - **Apply retention** — call :func:`arq_writer.apply_retention`
   with a small policy form, optionally as a dry run. The on-disk
   effects (deleted record / standalone blob / pack counts) stream
@@ -224,16 +226,16 @@ class MaintenanceScreen(Screen):
     def _rotate_blocking(
         self, cuuid: str, old_password: str, new_password: str,
     ) -> None:
-        from arq_writer import rotate_keyset_password
+        from arq_writer import rotate_keyset_password_on_disk
         try:
-            keyset_path = f"/{cuuid}/encryptedkeyset.dat"
-            blob = self._backend.read_all(keyset_path)
-            new_blob = rotate_keyset_password(
-                blob,
+            # Archives the superseded keyset to keyset_history/ exactly
+            # as Arq.app does on a GUI password change (full parity).
+            rotate_keyset_password_on_disk(
+                self._backend,
+                cuuid,
                 old_password=old_password,
                 new_password=new_password,
             )
-            self._backend.write_all(keyset_path, new_blob)
         except Exception as exc:  # noqa: BLE001 - surface any failure
             self.app.call_from_thread(
                 self._on_rotate_failed, exc,
