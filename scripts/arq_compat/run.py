@@ -23,7 +23,9 @@ One-time setup is described in ``docs/arq-compat/README.md``.
 
 Subcommands::
 
-    run.py all       --workdir DIR [--arq-dest .. --plan-uuid .. --arq-pw ..]
+    run.py all       [--arq-dest .. --plan-uuid .. --computer-uuid .. --skip-backup]
+                     # idempotent: no-ops if this Arq version already has a
+                     # report (runs/<version>_*.md); --force to re-run.
     run.py direction-a --workdir DIR
     run.py direction-b --workdir DIR --plan-uuid U --arq-dest D --arq-pw P
     run.py confirm-gui-restore --workdir DIR --restored DIR
@@ -375,6 +377,20 @@ def _status_roll(scn_map: Dict[str, Dict[str, str]]) -> str:
     return "PASS"
 
 
+def existing_report(version: str) -> Optional[Path]:
+    """First accumulated run report for this Arq version, if any.
+
+    A version is considered "already tested" once any
+    ``runs/<version>_<date>.md`` exists. Used by ``all`` to no-op on a
+    version that already has a report, so the suite can be run on a periodic
+    schedule and only does work when a new Arq.app version appears.
+    """
+    if not RUNS.exists():
+        return None
+    hits = sorted(RUNS.glob(f"{version}_*.md"))
+    return hits[0] if hits else None
+
+
 def write_report(version: str, result: Dict) -> Path:
     RUNS.mkdir(parents=True, exist_ok=True)
     date = _dt.date.today().isoformat()
@@ -539,6 +555,9 @@ def main(argv=None) -> int:
                       help="target one plan's folder in a shared destination")
     pall.add_argument("--skip-backup", action="store_true",
                       help="don't trigger arqc; operator already backed up")
+    pall.add_argument("--force", action="store_true",
+                      help="re-run even if this Arq version already has a "
+                           "report (default: skip already-tested versions)")
 
     args = ap.parse_args(argv)
     ver = arq_version()
@@ -580,6 +599,19 @@ def main(argv=None) -> int:
         return 0
 
     if args.cmd == "all":
+        # Idempotent for periodic (cron) runs: if this Arq version already
+        # has a report, do nothing and exit 0 — work happens only when a new
+        # Arq.app version appears. `--force` overrides.
+        prior = existing_report(ver)
+        if prior is not None and not args.force:
+            print(f"Arq {ver}: report already exists "
+                  f"({prior.relative_to(REPO)}); nothing to do. "
+                  f"Use --force to re-run.")
+            return 0
+        if prior is not None:
+            print(f"Arq {ver}: report exists but --force given — re-running.")
+        else:
+            print(f"Arq {ver}: no report yet — running compatibility checks.")
         res: Dict = {}
         pw = _read_pw(args.arq_pw_file)
         da = direction_a(args.workdir, args.arq_restore_bin)

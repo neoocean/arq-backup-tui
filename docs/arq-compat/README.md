@@ -113,6 +113,24 @@ writes/refreshes `runs/<version>_<date>.md` and appends a row to `MATRIX.md`.
 The drift baseline for the current version is stored under `baselines/`; the
 next version's run diffs against it automatically and flags any schema change.
 
+## Periodic / scheduled use
+
+`run.py all` is **idempotent per Arq version**: on start it auto-detects the
+installed Arq.app version and, **if a report already exists for it
+(`runs/<version>_*.md`), prints a notice and exits 0 without doing any work.**
+It only runs the checks + generates a report when it sees a version it hasn't
+tested yet. So it is safe to invoke on a schedule (cron / `launchd` /
+`/loop`) — it stays quiet until an Arq.app update appears, then captures that
+version's row automatically. Pass `--force` to re-run a version that already
+has a report.
+
+```sh
+# cron-friendly: no-op until a new Arq version shows up
+*/30 * * * *  cd <repo> && python3 scripts/arq_compat/run.py all \
+    --plan-uuid <UUID> --arq-dest /Volumes/arqbackup1 \
+    --computer-uuid <UUID> --skip-backup >> /tmp/arq_compat.log 2>&1
+```
+
 ## Interpreting drift
 
 `Format drift = none` means the JSON sidecar / record / blob schema Arq emits
