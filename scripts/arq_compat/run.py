@@ -377,6 +377,19 @@ def _status_roll(scn_map: Dict[str, Dict[str, str]]) -> str:
     return "PASS"
 
 
+def _scrub_paths(text: str) -> str:
+    """Strip machine-specific absolute paths from report text so committed
+    reports never leak personal filesystem layout. The repo prefix becomes a
+    repo-relative path; any remaining home-dir path becomes ``~/…``. (The
+    reader's verify-failure JSON, for one, embeds the absolute restore-target
+    path — this keeps it out of the accumulated docs.)"""
+    repo = str(REPO)
+    text = text.replace(repo + os.sep, "").replace(repo, ".")
+    home = str(Path.home())
+    text = text.replace(home + os.sep, "~" + os.sep).replace(home, "~")
+    return text
+
+
 def existing_report(version: str) -> Optional[Path]:
     """First accumulated run report for this Arq version, if any.
 
@@ -462,7 +475,7 @@ def write_report(version: str, result: Dict) -> Path:
             L.append("```")
         L.append("")
 
-    path.write_text("\n".join(L))
+    path.write_text(_scrub_paths("\n".join(L)))
     return path
 
 
