@@ -410,10 +410,17 @@ class Backup:
         self.backup_name = backup_name
         self.computer_name = computer_name or os.uname().nodename
         self.plan_name = plan_name or backup_name
-        self.computer_uuid = (
-            computer_uuid or str(uuid.uuid4()).upper()
-        )
-        self.plan_uuid = plan_uuid or str(uuid.uuid4()).upper()
+        # Real Arq 7 names the top-level destination folder by the
+        # planUUID: folder_name == planUUID (verified 2026-05-24 against
+        # /Volumes/arqbackup1 and confirmed by Arq.app v8's GUI, which
+        # only recognises the destination when this holds). Our top-level
+        # folder is named by ``computer_uuid``, so default the two to a
+        # single shared UUID to match that layout. Explicit values are
+        # honoured; if only one is supplied the other follows it, keeping
+        # the folder/plan identity coupled by default.
+        shared_uuid = computer_uuid or plan_uuid or str(uuid.uuid4()).upper()
+        self.computer_uuid = computer_uuid or shared_uuid
+        self.plan_uuid = plan_uuid or shared_uuid
         # When dedup_against_existing is on, try to reuse the
         # destination's existing keyset so blob_ids (which are
         # SHA-256 over salt+plaintext) line up across runs. Fall
@@ -1491,12 +1498,23 @@ class Backup:
             update_time=time.time(),
         )
 
-        # Backup record path: backuprecords/<5-digit-bucket>/<num>.backuprecord.
-        # Bucket = floor(creation_date / 100000) (zero-padded to 5
-        # digits). Filename = (creation_date % 100000).backuprecord.
+        # Backup record path:
+        #   backuprecords/<5-digit-bucket>/<7-digit-num>.backuprecord
+        # Arq names the record by its creation time as a Unix epoch in
+        # seconds, split with divisor 10**7: bucket = epoch // 10_000_000
+        # (zero-padded to 5 digits), filename = epoch % 10_000_000
+        # (zero-padded to 7 digits). Confirmed 2026-05-24 two ways:
+        #   1) /Volumes/arqbackup1 — all 163 real records have 5-digit
+        #      buckets + 7-digit filenames; 10**7 decode yields valid
+        #      2026 backup timestamps.
+        #   2) Arq.app v8's GUI restore recomputes this path from the
+        #      record's creationDate and errors "…not found" if the
+        #      physical path differs. A prior 10**5 divisor (bucket too
+        #      large by ~10x, un-padded 4-5 digit filename) listed fine
+        #      via glob but failed GUI restore.
         creation_date = int(time.time())
-        bucket = f"{creation_date // 100000:05d}"
-        rec_num = creation_date % 100000
+        bucket = f"{creation_date // 10_000_000:05d}"
+        rec_num = f"{creation_date % 10_000_000:07d}"
         rec_dir_rel = (
             f"{bf_rel}/{BACKUPRECORDS_DIR}/{bucket}"
         )
