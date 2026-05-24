@@ -6,6 +6,33 @@ locks it in. Run `python -m arq_validator.compatibility` (or use
 against any destination to get a structured pass/fail report
 covering every entry below.
 
+## ✅ Bidirectional byte-perfect interoperability with Arq 7 — proven (2026-05-24)
+
+Within the scope an individual can exercise — one Mac running the **Arq 7
+GUI (Arq.app 7.44.1)** plus the operator's real Arq.app v8 destination —
+**byte-perfect interoperability with Arq 7 is proven in both directions:**
+
+| Direction | Claim | Status | Evidence |
+|---|---|---|---|
+| **A. our writer → Arq 7** | A destination this project's writer emits is read **and restored by Arq.app's own GUI**, with restored content **byte-identical** to the source. | ✅ **Proven** | Strategy I — `docs/COMPAT-VERIFICATION.md` §5.9 (GUI restore, per-file SHA-256 match); V1 same-source fingerprint (file/tree/chunk shape identical) |
+| **B. Arq 7 → our reader** | A destination **Arq.app created** is read and restored by this project's reader, **byte-perfect**. | ✅ **Proven** | Strategy B §3.4 (127,222 files / 3.17 GB, `verify.failures: []`); re-confirmed 2026-05-24 by a fresh `--verify-after` restore of real Arq-created data |
+
+**Precision on Direction A.** Our writer's emit matches Arq.app's emit
+byte-for-byte at every format-defined layer — JSON sidecars, the
+BackupRecord, ARQO envelopes, Tree v4 nodes, content-addressed blob_ids,
+and chunk boundaries. The *only* bytes that differ are the v4 trailing
+block's engine-internal **scan-timestamp** field (bytes 0–15): a runtime
+value Arq stamps per walk, not a file-metadata field, and **not validated
+by Arq.app's reader** (confirmed by the Strategy I GUI restore succeeding).
+Reproducing it would also defeat our writer's blob-level dedup, so it is
+intentionally not reproduced. Every byte that carries restorable meaning
+is identical.
+
+This closes the project's headline goal from both sides. The full session
+account is in `docs/ARQ7-GUI-INTEROP-2026-05-24.md`; the two production
+bugs the GUI surfaced (backuprecord path divisor, default folder==planUUID)
+landed in PR #184, and keyset-rotation parity in PR #185.
+
 ## Sources
 
 - **Published spec**:
