@@ -68,10 +68,17 @@ NFD on restore; our reader preserves the stored form), not a data gap.
      directory, **not** `/tmp` — the Arq.app GUI folder picker can't reach
      `/tmp`). Run artifacts there are git-ignored.
    - In Arq.app: New backup plan, **source =
-     `<repo>/arq_compat_run/fixtures`** (`<repo>` = this project's directory),
-     **destination = a fresh local-folder storage location** (scratch).
-   - Note the plan UUID (`arqc listBackupPlans`) + the destination path + its
-     encryption password.
+     `<repo>/arq_compat_run/fixtures`** (`<repo>` = this project's directory).
+     For the **destination** either:
+     - a fresh local-folder storage location (cleanest), **or**
+     - an existing storage location (e.g. `arqbackup1`) — Arq 7 isolates each
+       plan in its own `<planUUID>/` folder with its own keyset, so the test
+       data never mixes with real backups. When the destination is shared,
+       pass `--computer-uuid <planUUID>` so the reader/fingerprint target the
+       round-trip plan's folder (not a real one).
+   - Note the plan UUID (`arqc listBackupPlans`) + the destination root + its
+     encryption password. When the destination folder name == planUUID (Arq's
+     layout), `--computer-uuid` is that same UUID.
 
 ## Running (every Arq version)
 
@@ -86,11 +93,15 @@ default `--workdir` is `<repo>/arq_compat_run` (omit it to use that).
 python3 scripts/arq_compat/run.py all \
     --arq-dest /Volumes/arqbackup1            # --arq-pw-file defaults to .secrets/dest_password
 
-# Full Direction B (after the one-time round-trip plan exists):
+# Full Direction B (after the one-time round-trip plan exists).
+# `--skip-backup` reuses a backup you already ran in the GUI (otherwise the
+# suite triggers `arqc startBackupPlan`); `--computer-uuid` targets the plan's
+# folder when the destination is shared with real backups.
 python3 scripts/arq_compat/run.py all \
     --plan-uuid <ROUND-TRIP-PLAN-UUID> \
-    --arq-dest /path/to/scratch-dest \
-    --arq-pw-file /path/to/scratch-dest-password
+    --arq-dest /Volumes/arqbackup1 \
+    --computer-uuid <ROUND-TRIP-PLAN-UUID> --skip-backup \
+    --arq-pw-file /path/to/round-trip-plan-password
 
 # Direction-A GUI leg (manual): in Arq.app add a writer_* dir from
 # <repo>/arq_compat_run as a storage location, restore it to <dir>, then:

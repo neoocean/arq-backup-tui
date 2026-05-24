@@ -254,40 +254,53 @@ def _arqc(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
 
 
 def direction_b(workdir: Path, plan_uuid: str, arq_dest: Path,
-                arq_pw: str, wait_s: int = 600) -> Dict:
-    """Trigger an Arq backup of the (pre-configured) compat plan whose source
-    is workdir/fixtures, poll to completion, then restore via our reader."""
+                arq_pw: str, computer_uuid: Optional[str] = None,
+                skip_backup: bool = False, wait_s: int = 600) -> Dict:
+    """Restore the Arq-created backup of the round-trip plan and diff it
+    per scenario against workdir/fixtures.
+
+    Unless ``skip_backup``, first triggers a fresh Arq backup via
+    ``arqc startBackupPlan`` + polls ``latestBackupActivityJSON``. When the
+    operator has already backed up via the GUI, pass ``skip_backup=True``.
+
+    ``computer_uuid`` targets one plan's top-level folder — required when the
+    destination is shared with other Arq plans (e.g. the real arqbackup1
+    storage location holds both real backups and this round-trip plan, each
+    in its own planUUID folder with its own keyset)."""
     fixtures = workdir / "fixtures"
     if not fixtures.exists():
         scen.generate(fixtures)
-    out: Dict = {"plan_uuid": plan_uuid}
-    start = _arqc("startBackupPlan", plan_uuid)
-    out["start_rc"] = start.returncode
-    if start.returncode != 0:
-        out["error"] = f"startBackupPlan failed: {start.stderr[-300:]}"
-        return out
-    # poll latestBackupActivityJSON until it reports no active backup
-    deadline = time.time() + wait_s
-    done = False
-    while time.time() < deadline:
-        time.sleep(5)
-        act = _arqc("latestBackupActivityJSON", plan_uuid)
-        txt = (act.stdout or "").strip()
-        # heuristic: activity JSON reports progress/state; treat
-        # "no backup in progress" / errorCount fields as terminal.
-        if txt and ('"backupInProgress":false' in txt.replace(" ", "")
-                    or '"progress":1' in txt.replace(" ", "")
-                    or "no backup" in txt.lower()):
-            done = True
-            break
-    out["completed"] = done
-    # our reader restores Arq's destination
+    out: Dict = {"plan_uuid": plan_uuid, "computer_uuid": computer_uuid}
+    if not skip_backup:
+        start = _arqc("startBackupPlan", plan_uuid)
+        out["start_rc"] = start.returncode
+        if start.returncode != 0:
+            out["error"] = f"startBackupPlan failed: {start.stderr[-300:]}"
+            return out
+        deadline = time.time() + wait_s
+        done = False
+        while time.time() < deadline:
+            time.sleep(5)
+            act = _arqc("latestBackupActivityJSON", plan_uuid)
+            txt = (act.stdout or "").strip().replace(" ", "")
+            if txt and ('"backupInProgress":false' in txt
+                        or '"progress":1' in txt
+                        or "nobackup" in txt.lower()):
+                done = True
+                break
+        out["completed"] = done
+    else:
+        out["completed"] = "skipped (operator backed up via GUI)"
+    # our reader restores Arq's destination (the target plan's folder)
     lst = _py("arq_reader.cli", "list", str(arq_dest), "--password-env",
               PW_ENV, pw_env=arq_pw)
     try:
         ldata = json.loads(lst.stdout)
-        comp = ldata["computers"][0]
+        comps = ldata["computers"]
+        comp = next((c for c in comps if c["computer_uuid"] == computer_uuid),
+                    comps[0]) if computer_uuid else comps[0]
         folder = comp["folders"][0]
+        cu = comp["computer_uuid"]
     except Exception as e:
         out["error"] = f"reader list failed: {e}; {lst.stderr[-300:]}"
         return out
@@ -295,21 +308,36 @@ def direction_b(workdir: Path, plan_uuid: str, arq_dest: Path,
     if rdest.exists():
         shutil.rmtree(rdest)
     rdest.mkdir(parents=True)
-    r = _py("arq_reader.cli", "restore", str(arq_dest), folder, str(rdest),
-            "--password-env", PW_ENV, "--verify-after", pw_env=arq_pw)
-    out["reader_ok"] = r.returncode == 0
+    restore_args = ["arq_reader.cli", "restore", str(arq_dest), folder,
+                    str(rdest), "--password-env", PW_ENV, "--verify-after"]
+    if computer_uuid:
+        restore_args += ["--computer-uuid", cu]
+    r = _py(*restore_args, pw_env=arq_pw)
+    out["reader_exit"] = r.returncode
+    try:
+        rj = json.loads(r.stdout[r.stdout.index("{"):])
+        out["restore_failures"] = rj.get("failures", [])
+        out["verify"] = rj.get("verify", {})
+    except Exception:
+        out["verify"] = {"note": "summary parse failed"}
     out["scenarios"] = diff_all(fixtures, rdest)
     return out
 
 
 # --- Format drift (fingerprint of Arq's emit vs baseline) ------------------
 
-def baseline_and_drift(arq_dest: Path, arq_pw: str, version: str) -> Dict:
+def baseline_and_drift(arq_dest: Path, arq_pw: str, version: str,
+                       computer_uuid: Optional[str] = None) -> Dict:
     BASELINES.mkdir(parents=True, exist_ok=True)
     cur = BASELINES / f"{version}.fp.json"
-    fp = _py("arq_validator.fingerprint_cli", "compute", str(arq_dest),
-             "--password-env", PW_ENV, "--max-records-per-folder", "1",
-             "--out", str(cur), pw_env=arq_pw)
+    fp_args = ["arq_validator.fingerprint_cli", "compute", str(arq_dest),
+               "--password-env", PW_ENV, "--max-records-per-folder", "1",
+               "--out", str(cur)]
+    # Restrict to the round-trip plan's folder when the destination is shared
+    # (avoids fingerprinting — or needing the password for — other plans).
+    if computer_uuid:
+        fp_args += ["--computer-uuid", computer_uuid]
+    fp = _py(*fp_args, pw_env=arq_pw)
     if fp.returncode != 0:
         return {"error": f"fingerprint failed: {fp.stderr[-300:]}"}
     out: Dict = {"baseline": str(cur.relative_to(REPO))}
@@ -383,12 +411,22 @@ def write_report(version: str, result: Dict) -> Path:
 
     db = result.get("direction_b")
     if db:
+        roll = _status_roll(db.get("scenarios", {}))
         L.append("## Direction B — Arq → our reader\n")
         if db.get("error"):
             L.append(f"- not run / error: `{db['error']}`\n")
         else:
-            L.append(f"- backup completed={db.get('completed')} "
-                     f"reader_ok={db.get('reader_ok')}")
+            v = db.get("verify", {})
+            vfails = v.get("failures", []) if isinstance(v, dict) else []
+            L.append(f"### content round-trip: **{roll}**")
+            L.append(f"- backup={db.get('completed')} "
+                     f"computer_uuid={db.get('computer_uuid')} "
+                     f"reader_exit={db.get('reader_exit')} "
+                     f"restore_failures={len(db.get('restore_failures', []))} "
+                     f"verify_ok={v.get('ok') if isinstance(v, dict) else '?'}")
+            if vfails:
+                L.append(f"- verify notes (not content-diff failures): "
+                         f"`{json.dumps(vfails)[:300]}`")
             L.append("\n| scenario | status | detail |")
             L.append("|---|---|---|")
             for s, r in db.get("scenarios", {}).items():
@@ -477,6 +515,10 @@ def main(argv=None) -> int:
     pb.add_argument("--plan-uuid", required=True)
     pb.add_argument("--arq-dest", required=True, type=Path)
     pb.add_argument("--arq-pw-file", type=Path, default=default_pw_file)
+    pb.add_argument("--computer-uuid", default=None,
+                    help="target one plan's folder in a shared destination")
+    pb.add_argument("--skip-backup", action="store_true",
+                    help="don't trigger arqc; operator already backed up")
 
     pc = sub.add_parser("confirm-gui-restore", help="diff an Arq GUI restore")
     add_common(pc)
@@ -485,6 +527,7 @@ def main(argv=None) -> int:
     pbl = sub.add_parser("baseline", help="fingerprint Arq emit + drift")
     pbl.add_argument("--arq-dest", required=True, type=Path)
     pbl.add_argument("--arq-pw-file", type=Path, default=default_pw_file)
+    pbl.add_argument("--computer-uuid", default=None)
 
     pall = sub.add_parser("all", help="run automatable legs + report")
     add_common(pall)
@@ -492,6 +535,10 @@ def main(argv=None) -> int:
     pall.add_argument("--plan-uuid", default=None)
     pall.add_argument("--arq-dest", default=None, type=Path)
     pall.add_argument("--arq-pw-file", type=Path, default=default_pw_file)
+    pall.add_argument("--computer-uuid", default=None,
+                      help="target one plan's folder in a shared destination")
+    pall.add_argument("--skip-backup", action="store_true",
+                      help="don't trigger arqc; operator already backed up")
 
     args = ap.parse_args(argv)
     ver = arq_version()
@@ -507,14 +554,15 @@ def main(argv=None) -> int:
         rep = write_report(ver, res)
         update_matrix(ver, res, rep)
         print(f"report: {rep}")
-        print(f"[GUI leg] throwaway password for the writer_* destinations: "
-              f"{da["gui_pw"]}")
+        print("[GUI leg] throwaway password for the writer_* destinations: "
+              + da["gui_pw"])
         return 0
 
     if args.cmd == "direction-b":
         pw = _read_pw(args.arq_pw_file)
-        res = {"direction_b": direction_b(args.workdir, args.plan_uuid,
-                                          args.arq_dest, pw)}
+        res = {"direction_b": direction_b(
+            args.workdir, args.plan_uuid, args.arq_dest, pw,
+            computer_uuid=args.computer_uuid, skip_backup=args.skip_backup)}
         print(json.dumps(res, ensure_ascii=False, indent=2)[:2000])
         return 0
 
@@ -525,8 +573,10 @@ def main(argv=None) -> int:
 
     if args.cmd == "baseline":
         pw = _read_pw(args.arq_pw_file)
-        print(json.dumps(baseline_and_drift(args.arq_dest, pw, ver),
-                         ensure_ascii=False, indent=2))
+        print(json.dumps(
+            baseline_and_drift(args.arq_dest, pw, ver,
+                               computer_uuid=args.computer_uuid),
+            ensure_ascii=False, indent=2))
         return 0
 
     if args.cmd == "all":
@@ -535,15 +585,18 @@ def main(argv=None) -> int:
         da = direction_a(args.workdir, args.arq_restore_bin)
         res["direction_a"] = da
         if args.plan_uuid and args.arq_dest and pw:
-            res["direction_b"] = direction_b(args.workdir, args.plan_uuid,
-                                             args.arq_dest, pw)
+            res["direction_b"] = direction_b(
+                args.workdir, args.plan_uuid, args.arq_dest, pw,
+                computer_uuid=args.computer_uuid,
+                skip_backup=args.skip_backup)
         if args.arq_dest and pw:
-            res["drift"] = baseline_and_drift(args.arq_dest, pw, ver)
+            res["drift"] = baseline_and_drift(
+                args.arq_dest, pw, ver, computer_uuid=args.computer_uuid)
         rep = write_report(ver, res)
         update_matrix(ver, res, rep)
         print(f"Arq {ver} — report: {rep}")
-        print(f"[GUI leg] throwaway password for the writer_* destinations: "
-              f"{da["gui_pw"]}")
+        print("[GUI leg] throwaway password for the writer_* destinations: "
+              + da["gui_pw"])
         return 0
 
     return 2
