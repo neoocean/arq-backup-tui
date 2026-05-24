@@ -1005,7 +1005,44 @@ emit rule (omit when null, emit dict otherwise) is now in
 
 The remaining read-side test of v4 — whether Arq.app's own
 GUI accepts our fresh-walk emit — is the operator-driven
-Strategy I and unchanged by V4.
+Strategy I, **closed 2026-05-24 (§5.9)**.
+
+## 5.9 ⭐ Strategy I — operator-driven Arq.app GUI restore: **GREEN (2026-05-24)**
+
+With Arq 7 (Arq.app **7.44.1**, macOS 15.7.3) installed, the operator
+drove the definitive test: a fresh-walk Tree v4 destination emitted by
+our writer was added to Arq.app as a storage location, unlocked with the
+encryption password, browsed, and **restored via the GUI**. The restored
+content was **byte-identical** to the source (per-file SHA-256 match); the
+only delta was the Hangul filename coming back NFD — purely Arq's
+restore-output normalisation, since Arq **stores** the name NFC exactly
+as our writer does (§5.9 NFC/NFD note). **Arq.app does not reject our v4
+nodes' trailing-block bytes** — the open question from §5.7.6 / §5.8.4 is
+answered.
+
+Driving Strategy I surfaced **two production bugs** invisible to all prior
+surfaces because they only manifest in Arq.app's GUI restore path:
+
+1. **backuprecord path divisor** — we named records `epoch // 10⁵ / epoch
+   % 10⁵`; Arq uses **10⁷** (5-digit bucket / 7-digit zero-padded filename)
+   and recomputes the restore path from the record's `creationDate`, so the
+   wrong split listed via glob but failed GUI restore (`…backuprecord not
+   found`). Fixed (PR #184 / p4 CL 54128).
+2. **folder name != planUUID** — real Arq names the top-level destination
+   folder by the `planUUID`; our default used a separate `computer_uuid`,
+   so the GUI did not recognise the destination. Coupled by default
+   (PR #184 / p4 CL 54128).
+
+Supporting verifications the same session: **V1** (same-source paired
+fingerprint — file/tree/chunk shape identical; only backupplan.json config
+polymorphism differs), **K4** (fresh-walk v4 trailing block tracks file
+btime, not walk wall-clock), and **P6** (keyset-rotation cross-tool both
+directions + keyset_history archival parity, PR #185 / p4 CL 54140).
+
+**Bidirectional byte-perfect interop with Arq 7 is therefore proven**: our
+writer → Arq.app GUI (this section) and Arq.app → our reader (Strategy B
+§3.4, re-confirmed 2026-05-24 by a fresh `--verify-after` restore of real
+Arq-created data). Full session record: `docs/ARQ7-GUI-INTEROP-2026-05-24.md`.
 
 ---
 

@@ -491,6 +491,18 @@ Aggregate: ~50 new tests across 10 surfaces.
 
 After Round 10, the compat-surface count is **20** (10 from
 Rounds 1-9 + 10 new from Round 10). The format + behaviour layer
-has zero known remaining gaps; operator-GUI-blocked items
-(Strategy I + first-walk-time correlation) are the only
-outstanding work.
+has zero known remaining gaps.
+
+**2026-05-24 — GUI-blocked items closed.** With Arq 7 (Arq.app
+7.44.1) installed, the previously operator-GUI-blocked items were
+verified: **Strategy I** (Arq.app GUI restores our fresh-walk Tree
+v4 byte-perfect — GREEN) and **K4 first-walk-time** both done, plus
+**V1** (same-source shape match) and **P6** (keyset-rotation
+cross-tool, both directions). Bidirectional byte-perfect interop
+with Arq 7 is proven (our writer → Arq GUI, and Arq → our reader).
+Two production bugs surfaced + fixed (backuprecord path divisor
+10⁵→10⁷; default folder name == planUUID) and keyset_history
+archival on rotation added for full parity. Detail:
+`docs/ARQ7-GUI-INTEROP-2026-05-24.md`. Remaining GUI items are out
+of scope (P3 — Arq 5/6 unsupported), moot (P5 — default emit is
+JSON), or declined (P4 — daemon concurrency).
