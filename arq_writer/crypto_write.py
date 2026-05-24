@@ -15,12 +15,14 @@ import hmac as _hmac
 import secrets
 import struct
 import subprocess
+import time
 from typing import Optional
 
 from arq_validator.crypto import CryptoError
 
 from .constants import (
     ARQO_MAGIC,
+    KEYSET_FILE,
     KEYSET_MAGIC,
     KEYSET_PBKDF2_DKLEN,
     KEYSET_PBKDF2_ITERATIONS,
@@ -29,6 +31,13 @@ from .constants import (
     KEYSET_SALT_BYTES,
     KEYSET_IV_BYTES,
 )
+
+# Directory Arq.app archives superseded keysets into on a password
+# change, alongside the live ``encryptedkeyset.dat``. Each archived
+# file is named ``encryptedkeyset_<unix-epoch>.dat`` where the epoch is
+# the rotation time (verified 2026-05-24 against /Volumes/arqbackup1 and
+# an Arq.app v8 GUI password change).
+KEYSET_HISTORY_DIR = "keyset_history"
 
 
 def aes_256_cbc_encrypt(
@@ -232,6 +241,57 @@ def rotate_keyset_password(
         keyset.encryption_key, keyset.hmac_key, keyset.blob_id_salt,
         openssl_path=openssl_path,
     )
+
+
+def rotate_keyset_password_on_disk(
+    backend,
+    computer_uuid: str,
+    *,
+    old_password: str,
+    new_password: str,
+    openssl_path: str = "openssl",
+    archive_old: bool = True,
+) -> bytes:
+    """Rotate ``<computer_uuid>/encryptedkeyset.dat`` in place under a
+    new password, archiving the previous keyset exactly as Arq.app does.
+
+    Steps, mirroring Arq.app v8's GUI password-change behaviour
+    (verified 2026-05-24 against a real destination):
+
+    1. Read the live ``encryptedkeyset.dat``.
+    2. Re-wrap it under ``new_password`` via :func:`rotate_keyset_password`
+       (master keys unchanged, so existing blobs stay decryptable).
+    3. If ``archive_old`` (default), copy the OLD bytes to
+       ``<computer_uuid>/keyset_history/encryptedkeyset_<unix-epoch>.dat``
+       (epoch = rotation time) — Arq.app keeps every superseded keyset
+       here so an old password can still recover the archived copy.
+    4. Overwrite the live ``encryptedkeyset.dat`` with the new bytes.
+
+    The archive is written before the live file is overwritten, so a
+    failure mid-rotation never destroys the only copy of the old keyset.
+    Backends whose ``write_all`` is atomic (e.g. ``LocalBackend``:
+    temp+fsync+rename) keep the live file all-or-nothing throughout.
+
+    ``backend`` is any object satisfying the Backend protocol
+    (``read_all`` / ``write_all`` / ``mkdir``). Returns the new
+    ``encryptedkeyset.dat`` bytes.
+    """
+    keyset_path = f"/{computer_uuid}/{KEYSET_FILE}"
+    old_blob = backend.read_all(keyset_path)
+    new_blob = rotate_keyset_password(
+        old_blob,
+        old_password=old_password,
+        new_password=new_password,
+        openssl_path=openssl_path,
+    )
+    if archive_old:
+        history_dir = f"/{computer_uuid}/{KEYSET_HISTORY_DIR}"
+        backend.mkdir(history_dir, parents=True, exist_ok=True)
+        epoch = int(time.time())
+        archive_path = f"{history_dir}/encryptedkeyset_{epoch}.dat"
+        backend.write_all(archive_path, old_blob)
+    backend.write_all(keyset_path, new_blob)
+    return new_blob
 
 
 def compute_blob_id(blob_id_salt: bytes, plaintext: bytes) -> str:
