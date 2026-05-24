@@ -410,10 +410,21 @@ class Backup:
         self.backup_name = backup_name
         self.computer_name = computer_name or os.uname().nodename
         self.plan_name = plan_name or backup_name
-        self.computer_uuid = (
-            computer_uuid or str(uuid.uuid4()).upper()
-        )
-        self.plan_uuid = plan_uuid or str(uuid.uuid4()).upper()
+        # Real Arq 7 names the top-level destination folder by the
+        # planUUID: folder_name == planUUID (verified 2026-05-24 against
+        # /Volumes/arqbackup1 and confirmed by Arq.app v8's GUI, which
+        # only recognises the destination when this holds). Our top-level
+        # folder is named by ``computer_uuid``, so default the two to a
+        # single shared UUID to match that layout. Explicit values are
+        # honoured; if only one is supplied the other follows it, keeping
+        # the folder/plan identity coupled by default.
+        if computer_uuid is None and plan_uuid is None:
+            shared_uuid = str(uuid.uuid4()).upper()
+            self.computer_uuid = shared_uuid
+            self.plan_uuid = shared_uuid
+        else:
+            self.plan_uuid = plan_uuid or computer_uuid
+            self.computer_uuid = computer_uuid or plan_uuid
         # When dedup_against_existing is on, try to reuse the
         # destination's existing keyset so blob_ids (which are
         # SHA-256 over salt+plaintext) line up across runs. Fall
