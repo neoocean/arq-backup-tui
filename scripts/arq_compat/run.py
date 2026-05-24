@@ -457,8 +457,11 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add_common(p):
+        # Default under the project directory (not /tmp) so the Arq.app GUI
+        # folder picker can reach <workdir>/fixtures for the Direction-B plan
+        # source. Run artifacts here are git-ignored.
         p.add_argument("--workdir", type=Path,
-                       default=Path("/tmp/arq_compat_run"))
+                       default=REPO / "arq_compat_run")
 
     pa = sub.add_parser("direction-a", help="writer->reader (auto) + GUI prep")
     add_common(pa)

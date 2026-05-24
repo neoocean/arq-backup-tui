@@ -58,39 +58,43 @@ NFD on restore; our reader preserves the stored form), not a data gap.
    ```sh
    scripts/arq_restore_v4/build.sh      # clones upstream + applies patch + clang
    ```
-2. **Create the Direction-B round-trip Arq plan** (the only manual setup;
-   `arqc` cannot create plans). In Arq.app:
-   - New backup plan, **source = the suite workdir's `fixtures/` path**
-     (default `/tmp/arq_compat_run/fixtures` — or pass `--workdir` and use that
-     path's `fixtures/`),
-   - **destination = a fresh local-folder storage location** (scratch),
-   - note the plan UUID (`arqc listBackupPlans`) + the destination path +
-     its encryption password.
+2. **Generate the fixtures, then create the Direction-B round-trip Arq plan**
+   (the only manual setup; `arqc` cannot create plans).
+   - First materialise the corpus so the source path exists:
+     ```sh
+     python3 scripts/arq_compat/run.py direction-a   # also runs Direction A
+     ```
+     The default workdir is **`<repo>/arq_compat_run/`** (under the project
+     directory, **not** `/tmp` — the Arq.app GUI folder picker can't reach
+     `/tmp`). Run artifacts there are git-ignored.
+   - In Arq.app: New backup plan, **source =
+     `<repo>/arq_compat_run/fixtures`** (`<repo>` = this project's directory),
+     **destination = a fresh local-folder storage location** (scratch).
+   - Note the plan UUID (`arqc listBackupPlans`) + the destination path + its
+     encryption password.
 
 ## Running (every Arq version)
 
 The Arq encryption password is read from a file (`--arq-pw-file`, default
 `.secrets/dest_password`) — never passed inline, so it never lands in `ps`.
 Internally every reader/writer/fingerprint subprocess receives the password
-through its environment (`--password-env`), not on the command line.
+through its environment (`--password-env`), not on the command line. The
+default `--workdir` is `<repo>/arq_compat_run` (omit it to use that).
 
 ```sh
 # Automatable legs + report + matrix (Direction A + drift baseline):
 python3 scripts/arq_compat/run.py all \
-    --workdir /tmp/arq_compat_run \
     --arq-dest /Volumes/arqbackup1            # --arq-pw-file defaults to .secrets/dest_password
 
 # Full Direction B (after the one-time round-trip plan exists):
 python3 scripts/arq_compat/run.py all \
-    --workdir /tmp/arq_compat_run \
-    --plan-uuid <COMPAT-TEST-UUID> \
-    --arq-dest /path/to/compat-scratch-dest \
+    --plan-uuid <ROUND-TRIP-PLAN-UUID> \
+    --arq-dest /path/to/scratch-dest \
     --arq-pw-file /path/to/scratch-dest-password
 
-# Direction-A GUI leg (manual): in Arq.app add a writer_* dir from the
-# workdir as a storage location, restore it to <dir>, then:
-python3 scripts/arq_compat/run.py confirm-gui-restore \
-    --workdir /tmp/arq_compat_run --restored <dir>
+# Direction-A GUI leg (manual): in Arq.app add a writer_* dir from
+# <repo>/arq_compat_run as a storage location, restore it to <dir>, then:
+python3 scripts/arq_compat/run.py confirm-gui-restore --restored <dir>
 ```
 
 The version is auto-detected from `Arq.app/Contents/Info.plist`. Each run
