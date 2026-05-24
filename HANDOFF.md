@@ -1,5 +1,41 @@
 # HANDOFF — session continuity notes
 
+## 2026-05-24 — Arq 7 GUI installed: bidirectional byte-perfect interop GREEN
+
+The operator installed the **Arq 7 GUI (Arq.app 7.44.1)**, unblocking every
+GUI-only verification. Full detail: `docs/SESSION-2026-05-24.md`.
+
+- **Headline — bidirectional byte-perfect interop with Arq 7 (GREEN).** Our
+  writer → Arq.app GUI restore is content byte-identical (Strategy I,
+  `docs/COMPAT-VERIFICATION.md` §5.9; stated in `docs/COMPATIBILITY.md`), and
+  Arq → our reader restores byte-perfect (Strategy B + `--verify-after`). Only
+  the non-functional, Arq-unvalidated v4 trailing-block scan-timestamp bytes
+  differ.
+- **Two production bugs the GUI restore surfaced + fixed (PR #184 / CL 54128):**
+  backuprecord path divisor `10**5`→`10**7` (5-digit dir / 7-digit zero-padded
+  file; GUI restore recomputes the path from `creationDate`), and default
+  `computer_uuid == plan_uuid` (real Arq names the top-level folder by
+  `planUUID`). Tests: `tests/test_backuprecord_numbering.py`,
+  `tests/test_writer_folder_planuuid.py`.
+- **keyset rotation parity (PR #185 / CL 54140):** archive the superseded
+  keyset to `keyset_history/encryptedkeyset_<epoch>.dat` on rotation
+  (`arq_writer/crypto_write.py::rotate_keyset_password_on_disk`).
+- **V1 / NFC-NFD / K4 / P6** verified (see `docs/ARQ7-GUI-INTEROP-2026-05-24.md`):
+  shape match; Arq stores Hangul names NFC like us (NFD is restore-output
+  only); v4 trailing block tracks file btime; keyset rotation works both ways.
+- **Per-version compatibility suite (PR #189/#190/#191, CLs 54166/54176/54190):**
+  `scripts/arq_compat/run.py` + `docs/arq-compat/` — re-runnable + idempotent
+  per Arq version (no-ops until a new version appears; `--force` to re-run),
+  Direction A/B + format-drift, results accumulate in
+  `docs/arq-compat/MATRIX.md`. Seeded 7.44.1 = Dir A PASS / Dir B PASS.
+- **Scope decisions:** Arq 5/6 unsupported; daemon-concurrency verification
+  declined; **shared Arq config read/write assessed + deferred**
+  (`docs/RESEARCH-shared-arq-config-feasibility.md`, PR #192 / CL 54219) —
+  not achievable today (secrets in Keychain + root sidecars, no config-write
+  API, root-owned daemon DB); read + run GUI-authored plans works today.
+
+---
+
 This file is a session-to-session bridge. **The 2026-05-10
 session reached the project's stated headline goal: byte-level
 compatibility with Arq 7+ proven from multiple independent
