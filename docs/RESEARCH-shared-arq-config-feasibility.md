@@ -4,7 +4,7 @@
 *same* configuration backend as the Arq 7 GUI — its backup plans, storage
 locations, schedules, secrets — so that a plan created in the TUI and a plan
 added in the Arq GUI are indistinguishable and behave identically. The
-read-only mirror (`arq_tui/arq_app.py`) deliberately avoided write; the
+read-only `server.db` mirror in the TUI deliberately avoided write; the
 operator wants to evaluate closing that gap, knowing it is risky.
 
 This document maps the shared-config surface from direct inspection of the
@@ -26,7 +26,7 @@ Evidence gathered 2026-05-24 against the live install:
 | Secrets in the DB | **None.** `backup_plans.encryption_password` / `smb_password` and `storage_locations.password` / `private_key_passphrase` are **empty in every row.** A world-readable DB never holds the secrets. |
 | Where secrets live | macOS **Keychain** (under Arq's own service/access group — `security find-generic-password -s Arq` finds nothing for the user) **+ root-only sidecars**: `secrets/backupplanderivedencryptionkey/`, `localkeysv2.dat` (0600 root), `computerKeys.json` (0600 root). |
 | Sanctioned write API | **None for config.** `arqc` exposes only `acceptLicenseAgreement / activateLicense / setAppPassword / listBackupPlans / latest…Activity… / startBackupPlan / stopBackupPlan / pause/resumeBackups`. **No create-plan, add-storage, or import.** No `CFBundleURLTypes` (no URL scheme), no `.sdef` / `NSAppleScriptEnabled` (not scriptable). |
-| Read access | Already solved: `arq_tui/arq_app.py` opens `file:server.db?mode=ro` and decodes `storage_locations` / `backup_plans` / `activities` (non-secret fields). |
+| Read access | Already solved: the TUI's read-only `server.db` mirror opens it with `mode=ro` and decodes `storage_locations` / `backup_plans` / `activities` (non-secret fields). |
 
 **Why write was avoided** is now explicit: the DB is root-owned and
 daemon-owned, the secrets aren't in it, and there is no supported write path.
@@ -88,7 +88,8 @@ destination compat suite, but for `server.db`), and prefer pausing the daemon
 (`arqc pauseBackups` / stop ArqAgent) over racing it.
 
 - **Phase 0 — Full READ parity (DONE / extend).** Mirror every plan + storage
-  + activity field read-only. No risk. Already in `arq_tui/arq_app.py`.
+  + activity field read-only. No risk. Already implemented as the TUI's
+  read-only `server.db` mirror.
 - **Phase 1 — Operator-mediated authoring (Approach C).** TUI composes a plan
   spec and walks the operator through adding it in the Arq GUI (secrets
   provisioned by Arq), then adopts it read+run. Safe; recommended next step.
