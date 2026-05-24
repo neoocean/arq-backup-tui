@@ -29,6 +29,12 @@ tests/integration/.env
 !.secrets/sftp.json.example
 !.secrets/dest_password.example
 
+# Arq compat suite run artifacts (generated fixtures + writer/reader
+# destinations). Default workdir lives under the project dir so the Arq.app
+# GUI can pick <repo>/arq_compat_run/fixtures; the contents are transient.
+# The accumulating results live in docs/arq-compat/ and ARE tracked.
+/arq_compat_run/
+
 # Local p4-side artifacts (untracked; live alongside git only).
 .p4ignore
 .p4-git-sync-log

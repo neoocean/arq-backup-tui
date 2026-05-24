@@ -58,45 +58,78 @@ NFD on restore; our reader preserves the stored form), not a data gap.
    ```sh
    scripts/arq_restore_v4/build.sh      # clones upstream + applies patch + clang
    ```
-2. **Create the Direction-B round-trip Arq plan** (the only manual setup;
-   `arqc` cannot create plans). In Arq.app:
-   - New backup plan, **source = the suite workdir's `fixtures/` path**
-     (default `/tmp/arq_compat_run/fixtures` — or pass `--workdir` and use that
-     path's `fixtures/`),
-   - **destination = a fresh local-folder storage location** (scratch),
-   - note the plan UUID (`arqc listBackupPlans`) + the destination path +
-     its encryption password.
+2. **Generate the fixtures, then create the Direction-B round-trip Arq plan**
+   (the only manual setup; `arqc` cannot create plans).
+   - First materialise the corpus so the source path exists:
+     ```sh
+     python3 scripts/arq_compat/run.py direction-a   # also runs Direction A
+     ```
+     The default workdir is **`<repo>/arq_compat_run/`** (under the project
+     directory, **not** `/tmp` — the Arq.app GUI folder picker can't reach
+     `/tmp`). Run artifacts there are git-ignored.
+   - In Arq.app: New backup plan, **source =
+     `<repo>/arq_compat_run/fixtures`** (`<repo>` = this project's directory).
+     For the **destination** either:
+     - a fresh local-folder storage location (cleanest), **or**
+     - an existing storage location (e.g. `arqbackup1`) — Arq 7 isolates each
+       plan in its own `<planUUID>/` folder with its own keyset, so the test
+       data never mixes with real backups. When the destination is shared,
+       pass `--computer-uuid <planUUID>` so the reader/fingerprint target the
+       round-trip plan's folder (not a real one).
+   - Note the plan UUID (`arqc listBackupPlans`) + the destination root + its
+     encryption password. When the destination folder name == planUUID (Arq's
+     layout), `--computer-uuid` is that same UUID.
 
 ## Running (every Arq version)
 
 The Arq encryption password is read from a file (`--arq-pw-file`, default
 `.secrets/dest_password`) — never passed inline, so it never lands in `ps`.
 Internally every reader/writer/fingerprint subprocess receives the password
-through its environment (`--password-env`), not on the command line.
+through its environment (`--password-env`), not on the command line. The
+default `--workdir` is `<repo>/arq_compat_run` (omit it to use that).
 
 ```sh
 # Automatable legs + report + matrix (Direction A + drift baseline):
 python3 scripts/arq_compat/run.py all \
-    --workdir /tmp/arq_compat_run \
     --arq-dest /Volumes/arqbackup1            # --arq-pw-file defaults to .secrets/dest_password
 
-# Full Direction B (after the one-time round-trip plan exists):
+# Full Direction B (after the one-time round-trip plan exists).
+# `--skip-backup` reuses a backup you already ran in the GUI (otherwise the
+# suite triggers `arqc startBackupPlan`); `--computer-uuid` targets the plan's
+# folder when the destination is shared with real backups.
 python3 scripts/arq_compat/run.py all \
-    --workdir /tmp/arq_compat_run \
-    --plan-uuid <COMPAT-TEST-UUID> \
-    --arq-dest /path/to/compat-scratch-dest \
-    --arq-pw-file /path/to/scratch-dest-password
+    --plan-uuid <ROUND-TRIP-PLAN-UUID> \
+    --arq-dest /Volumes/arqbackup1 \
+    --computer-uuid <ROUND-TRIP-PLAN-UUID> --skip-backup \
+    --arq-pw-file /path/to/round-trip-plan-password
 
-# Direction-A GUI leg (manual): in Arq.app add a writer_* dir from the
-# workdir as a storage location, restore it to <dir>, then:
-python3 scripts/arq_compat/run.py confirm-gui-restore \
-    --workdir /tmp/arq_compat_run --restored <dir>
+# Direction-A GUI leg (manual): in Arq.app add a writer_* dir from
+# <repo>/arq_compat_run as a storage location, restore it to <dir>, then:
+python3 scripts/arq_compat/run.py confirm-gui-restore --restored <dir>
 ```
 
 The version is auto-detected from `Arq.app/Contents/Info.plist`. Each run
 writes/refreshes `runs/<version>_<date>.md` and appends a row to `MATRIX.md`.
 The drift baseline for the current version is stored under `baselines/`; the
 next version's run diffs against it automatically and flags any schema change.
+
+## Periodic / scheduled use
+
+`run.py all` is **idempotent per Arq version**: on start it auto-detects the
+installed Arq.app version and, **if a report already exists for it
+(`runs/<version>_*.md`), prints a notice and exits 0 without doing any work.**
+It only runs the checks + generates a report when it sees a version it hasn't
+tested yet. So it is safe to invoke on a schedule (cron / `launchd` /
+`/loop`) — it stays quiet until an Arq.app update appears, then captures that
+version's row automatically. Pass `--force` to re-run a version that already
+has a report.
+
+```sh
+# cron-friendly: no-op until a new Arq version shows up
+*/30 * * * *  cd <repo> && python3 scripts/arq_compat/run.py all \
+    --plan-uuid <UUID> --arq-dest /Volumes/arqbackup1 \
+    --computer-uuid <UUID> --skip-backup >> /tmp/arq_compat.log 2>&1
+```
 
 ## Interpreting drift
 

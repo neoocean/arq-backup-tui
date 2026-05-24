@@ -1,0 +1,425 @@
+{
+  "schema_version": 1,
+  "source": "arq-backup-tui.compute_shape_fingerprint",
+  "computers": [
+    {
+      "uuid": "REDACTED",
+      "config_schema": {
+        "additionalUnpackedBlobDirs": "list",
+        "backupName": "str",
+        "blobIdentifierType": "int",
+        "blobStorageClass": "str",
+        "chunkerVersion": "int",
+        "computerName": "str",
+        "computerSerial": "str",
+        "containsGlacierArchives": "bool",
+        "isEncrypted": "bool",
+        "isWORM": "bool",
+        "maxPackedItemLength": "int"
+      },
+      "plan_schema": {
+        "active": "bool",
+        "arq5UseS3IA": "bool",
+        "backupFolderPlanMountPointsAreInitialized": "bool",
+        "backupFolderPlansByUUID": {
+          "<uuid>": {
+            "allDrives": "bool",
+            "backupFolderUUID": "str",
+            "blobStorageClass": "str",
+            "diskIdentifier": "str",
+            "excludedDrives": "list",
+            "ignoredRelativePaths": "list",
+            "localMountPoint": "str",
+            "localPath": "str",
+            "name": "str",
+            "regexExcludes": "list",
+            "relativePath": "str",
+            "skipDuringBackup": "bool",
+            "skipIfNotMounted": "bool",
+            "skipTMExcludes": "bool",
+            "useDiskIdentifier": "bool",
+            "wildcardExcludes": "list"
+          }
+        },
+        "backupSetIsInitialized": "bool",
+        "cpuUsage": "int",
+        "createdAtProConsole": "bool",
+        "creationTime": "int",
+        "datalessFilesOption": "int",
+        "emailReportJSON": {
+          "authenticationType": "str",
+          "connectionSecurity": "str",
+          "port": "int",
+          "reportHELOUseIP": "bool",
+          "type": "str",
+          "when": "str"
+        },
+        "excludedNetworkInterfaces": "list",
+        "excludedWiFiNetworkNames": "list",
+        "id": "int",
+        "includeFileListInActivityLog": "bool",
+        "includeNetworkInterfaces": "bool",
+        "includeNewVolumes": "bool",
+        "includeWiFiNetworks": "bool",
+        "isEncrypted": "bool",
+        "keepDeletedFiles": "bool",
+        "lastBackedUp": "float",
+        "managed": "bool",
+        "name": "str",
+        "needsArq5Buckets": "bool",
+        "notifyOnError": "bool",
+        "notifyOnSuccess": "bool",
+        "objectLockAvailable": "bool",
+        "objectLockUpdateIntervalDays": "int",
+        "pauseOnBattery": "bool",
+        "planUUID": "str",
+        "preventBackupOnConstrainedNetworks": "bool",
+        "preventBackupOnExpensiveNetworks": "bool",
+        "preventSleep": "bool",
+        "retainAll": "bool",
+        "retainDays": "int",
+        "retainHours": "int",
+        "retainMonths": "int",
+        "retainWeeks": "int",
+        "scheduleJSON": {
+          "backUpAndValidate": "bool",
+          "pauseDuringWindow": "bool",
+          "startWhenVolumeIsConnected": "bool",
+          "type": "str"
+        },
+        "storageLocationId": "int",
+        "threadCount": "int",
+        "transferRateJSON": {
+          "daysOfWeek": "list",
+          "enabled": "bool",
+          "endTimeOfDay": "str",
+          "scheduleType": "str",
+          "startTimeOfDay": "str"
+        },
+        "updateTime": "int",
+        "useAPFSSnapshots": "bool",
+        "useBuzhash": "bool",
+        "version": "int",
+        "wakeForBackup": "bool"
+      },
+      "folders_index_schema": {
+        "onezoneIAObjectDirs": "list",
+        "s3DeepArchiveObjectDirs": "list",
+        "s3GlacierIRObjectDirs": "list",
+        "s3GlacierObjectDirs": "list",
+        "standardIAObjectDirs": "list",
+        "standardObjectDirs": "list"
+      },
+      "object_storage": {
+        "standardobjects_count": 0,
+        "treepacks_count": 1,
+        "blobpacks_count": 1,
+        "largeblobpacks_count": 1
+      },
+      "folders": [
+        {
+          "uuid": "REDACTED",
+          "folder_schema": {
+            "diskIdentifier": "str",
+            "localMountPoint": "str",
+            "localPath": "str",
+            "migratedFromArq5": "bool",
+            "migratedFromArq60": "bool",
+            "name": "str",
+            "storageClass": "str",
+            "uuid": "str"
+          },
+          "records": [
+            {
+              "creation_date": 1779620682,
+              "version": 101,
+              "is_complete": true,
+              "computer_os_type": 1,
+              "node_schema": [
+                "archived",
+                "arqVersion",
+                "backupFolderUUID",
+                "backupPlanJSON",
+                "backupPlanUUID",
+                "backupRecordErrors",
+                "computerOSType",
+                "copiedFromCommit",
+                "copiedFromSnapshot",
+                "creationDate",
+                "diskIdentifier",
+                "isComplete",
+                "localMountPoint",
+                "localPath",
+                "node",
+                "nodeTreeVersion",
+                "relativePath",
+                "storageClass",
+                "version",
+                "volumeName"
+              ],
+              "files": [
+                {
+                  "rel_path": "ascii/hello.txt",
+                  "item_size": 20,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "ascii/readme.md",
+                  "item_size": 21,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "binary/all-bytes.bin",
+                  "item_size": 2048,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    404
+                  ]
+                },
+                {
+                  "rel_path": "binary/rand-4k.bin",
+                  "item_size": 4096,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    4244
+                  ]
+                },
+                {
+                  "rel_path": "empty/empty.txt",
+                  "item_size": 0,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": []
+                },
+                {
+                  "rel_path": "empty/zero-byte.dat",
+                  "item_size": 0,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": []
+                },
+                {
+                  "rel_path": "hardlinks/hl-a.txt",
+                  "item_size": 19,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "hardlinks/hl-b.txt",
+                  "item_size": 19,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "large_chunked/large-12m.bin",
+                  "item_size": 12582912,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    12632388
+                  ]
+                },
+                {
+                  "rel_path": "nested_deep/lvl00/lvl01/lvl02/lvl03/lvl04/lvl05/lvl06/lvl07/lvl08/lvl09/lvl10/lvl11/leaf.txt",
+                  "item_size": 22,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "permissions/mode400.txt",
+                  "item_size": 11,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 256,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "permissions/mode600.txt",
+                  "item_size": 11,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 384,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "permissions/mode644.txt",
+                  "item_size": 11,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "permissions/mode755.sh",
+                  "item_size": 11,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 493,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "sparse/sparse.dat",
+                  "item_size": 8388612,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    33028
+                  ]
+                },
+                {
+                  "rel_path": "special_names/dots...and-dashes--.txt",
+                  "item_size": 6,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    132
+                  ]
+                },
+                {
+                  "rel_path": "special_names/emoji-😀-name.txt",
+                  "item_size": 6,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    132
+                  ]
+                },
+                {
+                  "rel_path": "special_names/long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.txt",
+                  "item_size": 10,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    132
+                  ]
+                },
+                {
+                  "rel_path": "special_names/with spaces.txt",
+                  "item_size": 7,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    132
+                  ]
+                },
+                {
+                  "rel_path": "symlinks/abs-link.txt",
+                  "item_size": 96,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 493,
+                  "is_symlink": true,
+                  "chunk_sizes": [
+                    228
+                  ]
+                },
+                {
+                  "rel_path": "symlinks/rel-link.txt",
+                  "item_size": 10,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 493,
+                  "is_symlink": true,
+                  "chunk_sizes": [
+                    132
+                  ]
+                },
+                {
+                  "rel_path": "symlinks/target.txt",
+                  "item_size": 15,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "unicode_nfc/café-ñ-日本語.txt",
+                  "item_size": 26,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    164
+                  ]
+                },
+                {
+                  "rel_path": "unicode_nfc/한글-NFC-파일.txt",
+                  "item_size": 18,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "unicode_nfd/한글-NFD-파일.txt",
+                  "item_size": 20,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    148
+                  ]
+                },
+                {
+                  "rel_path": "xattr/with-xattrs.txt",
+                  "item_size": 34,
+                  "mtime_sec": 1779620480,
+                  "mode_perms": 420,
+                  "is_symlink": false,
+                  "chunk_sizes": [
+                    164
+                  ]
+                }
+              ],
+              "tree_count": 26
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
