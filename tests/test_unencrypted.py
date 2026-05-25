@@ -13,7 +13,6 @@ destination:
 from __future__ import annotations
 
 import hashlib
-import struct
 import subprocess
 import tempfile
 import unittest
@@ -57,7 +56,9 @@ class UnencryptedWriterTests(unittest.TestCase):
             )
 
     def test_blob_id_is_sha256_of_plaintext_no_salt(self) -> None:
-        import lz4.block as lb
+        # Use the project's own lz4 framing (arq_writer.lz4_block), not the
+        # external `lz4` PyPI package (not a dependency / absent in CI).
+        from arq_writer.lz4_block import lz4_unwrap
         with tempfile.TemporaryDirectory() as td:
             _src, dest, r = self._build(Path(td), use_packs=False)
             cu = dest / r.computer_uuid
@@ -66,8 +67,7 @@ class UnencryptedWriterTests(unittest.TestCase):
             blob_id = so.parent.name + so.name
             raw = so.read_bytes()
             self.assertNotEqual(raw[:4], b"ARQO")  # no encryption envelope
-            n = struct.unpack(">I", raw[:4])[0]    # lz4_wrap length prefix
-            plain = lb.decompress(raw[4:], uncompressed_size=n)
+            plain = lz4_unwrap(raw)                 # [BE32 len][lz4 block]
             self.assertEqual(hashlib.sha256(plain).hexdigest(), blob_id)
 
     def test_round_trip_no_password(self) -> None:
