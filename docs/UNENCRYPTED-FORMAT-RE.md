@@ -52,3 +52,19 @@ unchanged.
   parse the backuprecord via lz4-unwrap (not ARQO); the blob read path is
   already ARQO-magic-gated and applies the `BlobLoc` `compressionType`, so
   `lz4_wrap` blobs decompress unchanged.
+
+## Round-trip verification (2026-05-25)
+
+Both directions byte-perfect, mirroring the encrypted interop:
+
+- **Arq → our reader**: our reader restored the operator's real unencrypted
+  destination (`AC8FAB4D-…`) with no password — 27 files, `failures: []`,
+  every file content byte-identical to the source.
+- **our writer → Arq GUI**: a `--no-encrypt` destination our writer emitted
+  (`93F3925B-…`, folder == planUUID) was added to Arq.app as a storage
+  location (no password prompt — `isEncrypted: false`) and **restored via the
+  GUI**; all files content byte-identical. As with the encrypted case, the
+  Hangul filename came back NFD (Arq's restore-output normalisation; our
+  reader preserves the stored NFC). Content is identical either way.
+
+So unencrypted backups are bidirectionally byte-perfect with Arq.app 7.44.1.
