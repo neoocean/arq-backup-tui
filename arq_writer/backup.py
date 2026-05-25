@@ -377,6 +377,7 @@ class Backup:
         callback: Optional[ProgressCb] = None,
         tree_version: int = TREE_VERSION,
         skip_tm_excludes: bool = False,
+        encrypt: bool = True,
     ) -> None:
         # Note: ``skip_tm_excludes`` mirrors Arq.app v8's
         # ``skipTMExcludes`` plan field. False (default) =
@@ -454,6 +455,14 @@ class Backup:
                 blob_id_salt or secrets.token_bytes(KEYSET_PLAIN_FIELD_LEN)
             )
             self._keyset_was_reused = False
+        # Unencrypted mode (Arq.app's "Continue Without Encryption"): no
+        # keyset, no ARQO wrapping, plaintext sidecars, and blob_id =
+        # SHA-256(plaintext) with NO salt. Force an empty salt so
+        # compute_blob_id(self.blob_id_salt, pt) == SHA-256(pt). See
+        # docs/UNENCRYPTED-FORMAT-RE.md.
+        self.is_encrypted = encrypt
+        if not encrypt:
+            self.blob_id_salt = b""
         self.openssl_path = openssl_path
         self.use_packs = use_packs
         # Tree binary version this writer emits. Default = 3 (the
@@ -680,8 +689,13 @@ class Backup:
         # backuprecords were encrypted under that one's master key,
         # so rewriting it (with a fresh random IV/salt) would break
         # restore of every record older than this run.
+        # Unencrypted destinations have NO encryptedkeyset.dat at all
+        # (verified against Arq.app's "Continue Without Encryption" output;
+        # docs/UNENCRYPTED-FORMAT-RE.md).
         keyset_path = self._cu_path(KEYSET_FILE)
-        if not self._keyset_was_reused:
+        if not self.is_encrypted:
+            pass
+        elif not self._keyset_was_reused:
             keyset_blob = build_encrypted_keyset(
                 self.password,
                 self.encryption_key, self.hmac_key, self.blob_id_salt,
@@ -700,7 +714,7 @@ class Backup:
         config = build_backupconfig(
             backup_name=self.backup_name,
             computer_name=self.computer_name,
-            is_encrypted=True,
+            is_encrypted=self.is_encrypted,
         )
         self.backend.write_all(
             self._cu_path("backupconfig.json"),
@@ -745,7 +759,7 @@ class Backup:
             plan_uuid=self.plan_uuid,
             plan_name=self.plan_name,
             folder_plans=self._folder_plans,
-            is_encrypted=True,
+            is_encrypted=self.is_encrypted,
             creation_time=time.time(),
             update_time=time.time(),
         )
@@ -756,15 +770,19 @@ class Backup:
         # plain JSON instead surfaces in any schema-level diff
         # against an Arq.app destination (see
         # docs/COMPAT-VERIFICATION.md §2.7.1, T1).
+        # Unencrypted destinations store it as plaintext JSON (no ARQO).
         plain_json = json.dumps(
             plan, indent=2, ensure_ascii=False,
         ).encode("utf-8")
-        encrypted = build_encrypted_object(
-            plain_json, self.encryption_key, self.hmac_key,
-            openssl_path=self.openssl_path,
-        )
+        if self.is_encrypted:
+            payload = build_encrypted_object(
+                plain_json, self.encryption_key, self.hmac_key,
+                openssl_path=self.openssl_path,
+            )
+        else:
+            payload = plain_json
         self.backend.write_all(
-            self._cu_path("backupplan.json"), encrypted,
+            self._cu_path("backupplan.json"), payload,
         )
 
     # ------------------------------------------------------------------
@@ -842,10 +860,16 @@ class Backup:
         if cached is not None:
             return cached
         lz4_bytes = lz4_wrap(plaintext)
-        arqo = build_encrypted_object(
-            lz4_bytes, self.encryption_key, self.hmac_key,
-            openssl_path=self.openssl_path,
-        )
+        if self.is_encrypted:
+            arqo = build_encrypted_object(
+                lz4_bytes, self.encryption_key, self.hmac_key,
+                openssl_path=self.openssl_path,
+            )
+        else:
+            # Unencrypted: the stored object is the lz4_wrap bytes directly,
+            # with no ARQO envelope (docs/UNENCRYPTED-FORMAT-RE.md). The
+            # variable keeps the name for the routing code below.
+            arqo = lz4_bytes
 
         if self.use_packs:
             if is_tree:
@@ -1401,12 +1425,15 @@ class Backup:
         plain_bf_json = json.dumps(
             bf_json, indent=2, ensure_ascii=False,
         ).encode("utf-8")
-        encrypted_bf = build_encrypted_object(
-            plain_bf_json, self.encryption_key, self.hmac_key,
-            openssl_path=self.openssl_path,
-        )
+        if self.is_encrypted:
+            bf_payload = build_encrypted_object(
+                plain_bf_json, self.encryption_key, self.hmac_key,
+                openssl_path=self.openssl_path,
+            )
+        else:
+            bf_payload = plain_bf_json  # unencrypted: plaintext JSON
         self.backend.write_all(
-            f"{bf_rel}/backupfolder.json", encrypted_bf,
+            f"{bf_rel}/backupfolder.json", bf_payload,
         )
 
         # Update accumulated plan metadata before walking so the
@@ -1493,7 +1520,7 @@ class Backup:
             plan_uuid=self.plan_uuid,
             plan_name=self.plan_name,
             folder_plans=self._folder_plans,
-            is_encrypted=True,
+            is_encrypted=self.is_encrypted,
             creation_time=time.time(),
             update_time=time.time(),
         )
@@ -1552,12 +1579,18 @@ class Backup:
                 self.tree_version if self.tree_version >= 4 else None
             ),
         )
-        arqo = build_backuprecord_arqo(
-            record_dict,
-            encryption_key=self.encryption_key,
-            hmac_key=self.hmac_key,
-            openssl_path=self.openssl_path,
-        )
+        if self.is_encrypted:
+            arqo = build_backuprecord_arqo(
+                record_dict,
+                encryption_key=self.encryption_key,
+                hmac_key=self.hmac_key,
+                openssl_path=self.openssl_path,
+            )
+        else:
+            # Unencrypted: lz4_wrap(serialized JSON), no ARQO
+            # (docs/UNENCRYPTED-FORMAT-RE.md).
+            from .backuprecord import serialize_backuprecord
+            arqo = lz4_wrap(serialize_backuprecord(record_dict))
         self.backend.write_all(rec_rel, arqo)
         self.bytes_on_disk += len(arqo)
         _emit(self.callback, "backuprecord_written",
@@ -1598,6 +1631,7 @@ def build_backup(
     use_apfs_snapshot: bool = False,
     tree_version: int = TREE_VERSION,
     skip_tm_excludes: bool = False,
+    encrypt: bool = True,
 ) -> BackupResult:
     """One-shot convenience wrapper: full plan init + single folder.
 
@@ -1637,6 +1671,7 @@ def build_backup(
         exclusions=exclusions,
         tree_version=tree_version,
         skip_tm_excludes=skip_tm_excludes,
+        encrypt=encrypt,
     )
     bk.init_plan()
 

@@ -117,9 +117,10 @@ line with the project scope decision in `docs/COVERAGE.md`:
   `largeblobpacks/` if present but doesn't require its use.
 - **Per-folder `useBuzhash` toggle**: writer applies one
   chunker config to a `Backup` instance.
-- **Unencrypted backups (`isEncrypted: false`)**: writer always
-  encrypts; the checker exercises the encrypted path. Running
-  the checker against an unencrypted destination is untested.
+- **Unencrypted backups (`isEncrypted: false`)**: supported
+  (2026-05-25) — writer `--no-encrypt` and reader (no password),
+  byte-perfect vs Arq.app's "Continue Without Encryption" output.
+  See `docs/UNENCRYPTED-FORMAT-RE.md`.
 - **Cloud-only metadata fields** (`s3GlacierObjectDirs`,
   `s3DeepArchiveObjectDirs`, `archiveUploadedDate`): emitted as
   empty arrays by the writer; not consulted further.

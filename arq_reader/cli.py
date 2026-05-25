@@ -130,6 +130,29 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _has_unencrypted_subtree(src: Path) -> bool:
+    """True if any computer subtree under ``src`` is an unencrypted
+    destination (backupconfig ``isEncrypted: false`` and/or no keyset file),
+    in which case a password is not required. See docs/UNENCRYPTED-FORMAT-RE.md."""
+    try:
+        for d in Path(src).iterdir():
+            if not d.is_dir():
+                continue
+            bc = d / "backupconfig.json"
+            if not bc.is_file():
+                continue
+            try:
+                if json.loads(bc.read_text()).get("isEncrypted") is False:
+                    return True
+            except Exception:
+                pass
+            if not (d / "encryptedkeyset.dat").exists():
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def _resolve_password(args: argparse.Namespace) -> Optional[str]:
     if args.password is not None:
         return args.password
@@ -181,19 +204,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     password = _resolve_password(args)
-    if password is None and sys.stdin.isatty():
+    # Unencrypted destinations ("Continue Without Encryption") have no keyset
+    # and need no password — only prompt/require when encryption is in play.
+    unencrypted = _has_unencrypted_subtree(args.src)
+    if password is None and not unencrypted and sys.stdin.isatty():
         try:
             password = getpass.getpass("Backup encryption password: ")
         except (KeyboardInterrupt, EOFError):
             print("\naborted", file=sys.stderr)
             return 2
-    if not password:
+    if not password and not unencrypted:
         print(
             "error: encryption password required; pass --password / "
             "--password-file / --password-env or run from a TTY.",
             file=sys.stderr,
         )
         return 2
+    password = password or ""
 
     cb = _make_callback(args)
     restorer = Restore(
