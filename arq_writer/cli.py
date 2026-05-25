@@ -98,6 +98,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Encryption password. If omitted, prompts on TTY.",
     )
     create.add_argument(
+        "--no-encrypt",
+        action="store_true",
+        help="Create an UNENCRYPTED backup (isEncrypted: false, no keyset; "
+             "Arq.app's 'Continue Without Encryption'). No password needed. "
+             "WARNING: data is stored in plaintext.",
+    )
+    create.add_argument(
         "--password-file",
         default=None,
         type=Path,
@@ -433,6 +440,7 @@ def _run_backup_call(
             exclusions=exclusions,
             backend=backend,
             tree_version=args.tree_version,
+            encrypt=not getattr(args, "no_encrypt", False),
         )
         bk.init_plan()
         # Publish the active Backup so SIGUSR1/2 handlers can
@@ -706,23 +714,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     password = _resolve_password(args)
-    if password is None and sys.stdin.isatty():
-        try:
-            password = getpass.getpass("Backup encryption password: ")
-            confirm = getpass.getpass("Confirm: ")
-            if password != confirm:
-                print("error: passwords do not match", file=sys.stderr)
+    if args.no_encrypt:
+        # Unencrypted backup: no keyset, no password.
+        password = ""
+    else:
+        if password is None and sys.stdin.isatty():
+            try:
+                password = getpass.getpass("Backup encryption password: ")
+                confirm = getpass.getpass("Confirm: ")
+                if password != confirm:
+                    print("error: passwords do not match", file=sys.stderr)
+                    return 2
+            except (KeyboardInterrupt, EOFError):
+                print("\naborted", file=sys.stderr)
                 return 2
-        except (KeyboardInterrupt, EOFError):
-            print("\naborted", file=sys.stderr)
+        if not password:
+            print(
+                "error: encryption password required; pass --password / "
+                "--password-file / --password-env, run from a TTY, or "
+                "use --no-encrypt for an unencrypted backup.",
+                file=sys.stderr,
+            )
             return 2
-    if not password:
-        print(
-            "error: encryption password required; pass --password / "
-            "--password-file / --password-env or run from a TTY.",
-            file=sys.stderr,
-        )
-        return 2
 
     user_cb = _make_callback(args)
     chunker_config = _resolve_chunker(args.chunker)

@@ -186,6 +186,22 @@ def _parse_backuprecord(plain: bytes) -> Dict[str, Any]:
     return parse_backuprecord(plain)
 
 
+def _load_record_plain(raw: bytes, keyset: Keyset,
+                       openssl_path: str = "openssl") -> bytes:
+    """ARQO-magic-gated backuprecord load → JSON/plist bytes.
+
+    Encrypted: ``ARQO( lz4_wrap(record) )`` → decrypt + lz4-unwrap.
+    Unencrypted ("Continue Without Encryption"): the record is
+    ``lz4_wrap(record)`` with no ARQO envelope (docs/UNENCRYPTED-FORMAT-RE.md)."""
+    if raw[:4] == b"ARQO":
+        return decrypt_lz4_arqo(
+            raw, keyset.encryption_key, keyset.hmac_key,
+            openssl_path=openssl_path,
+        )
+    from arq_writer.lz4_block import lz4_unwrap
+    return lz4_unwrap(raw)
+
+
 def _emit(cb: Optional[ProgressCb], kind: str, **payload: object) -> None:
     if cb is None:
         return
@@ -295,10 +311,20 @@ class Restore:
     def keyset(self, computer_uuid: str) -> Keyset:
         if computer_uuid not in self._keyset_by_computer:
             kp = f"/{computer_uuid}/{C.KEYSET_FILE}"
-            blob = self.backend.read_all(kp)
-            self._keyset_by_computer[computer_uuid] = decrypt_keyset(
-                blob, self.password, openssl_path=self.openssl_path,
-            )
+            if not self.backend.exists(kp):
+                # Unencrypted destination ("Continue Without Encryption"):
+                # no keyset at all. Return an empty Keyset — the blob + record
+                # read paths are ARQO-magic-gated, so they never use these
+                # keys for an unencrypted destination. See
+                # docs/UNENCRYPTED-FORMAT-RE.md.
+                self._keyset_by_computer[computer_uuid] = Keyset(
+                    encryption_key=b"", hmac_key=b"", blob_id_salt=b"",
+                )
+            else:
+                blob = self.backend.read_all(kp)
+                self._keyset_by_computer[computer_uuid] = decrypt_keyset(
+                    blob, self.password, openssl_path=self.openssl_path,
+                )
         return self._keyset_by_computer[computer_uuid]
 
     # ------------------------------------------------------------------
@@ -867,9 +893,8 @@ class Restore:
         for p in paths:
             try:
                 arqo = self.backend.read_all(p)
-                plain = decrypt_lz4_arqo(
-                    arqo, keyset.encryption_key, keyset.hmac_key,
-                    openssl_path=self.openssl_path,
+                plain = _load_record_plain(
+                    arqo, keyset, self.openssl_path,
                 )
                 rec = _parse_backuprecord(plain)
             except Exception:
@@ -955,9 +980,8 @@ class Restore:
                 f"{computer_uuid}/{folder_uuid}"
             )
         record_arqo = self.backend.read_all(record_path)
-        record_plain = decrypt_lz4_arqo(
-            record_arqo, keyset.encryption_key, keyset.hmac_key,
-            openssl_path=self.openssl_path,
+        record_plain = _load_record_plain(
+            record_arqo, keyset, self.openssl_path,
         )
         record = _parse_backuprecord(record_plain)
         node_dict = record.get("node")
@@ -1108,9 +1132,8 @@ class Restore:
               computer=computer_uuid, folder=folder_uuid)
 
         record_arqo = self.backend.read_all(record_path)
-        record_plain = decrypt_lz4_arqo(
-            record_arqo, keyset.encryption_key, keyset.hmac_key,
-            openssl_path=self.openssl_path,
+        record_plain = _load_record_plain(
+            record_arqo, keyset, self.openssl_path,
         )
         record = _parse_backuprecord(record_plain)
         node_dict = record.get("node")

@@ -72,7 +72,7 @@ Legend: ✅ implemented + tested · ⚠️ partial · ❌ not implemented ·
 | AES-256-CBC + PKCS7 (via host ``openssl`` subprocess)         |  ✅    | ``arq_writer.crypto_write.aes_256_cbc_encrypt`` |
 | LZ4 block compression (compress + decompress)                 |  ✅    | ``arq_writer.lz4_block`` |
 | ``stretchEncryptionKey`` per-blob flag                        |  ✅    | Honored on both read and write paths |
-| Unencrypted backups (``isEncrypted: false``)                  |  ❌    | Writer always emits encrypted backups; reader hard-codes ARQO magic check before decrypt — would need a small change to read genuinely unencrypted destinations |
+| Unencrypted backups (``isEncrypted: false``)                  |  ✅    | Writer ``--no-encrypt`` / ``build_backup(encrypt=False)``: no keyset, plaintext sidecars, ``lz4_wrap`` blobs/record with no ARQO, blob_id = SHA-256(plaintext). Reader reads them with no password. Both directions byte-perfect vs Arq.app's "Continue Without Encryption" output. See ``docs/UNENCRYPTED-FORMAT-RE.md``, ``tests/test_unencrypted.py`` |
 | Password change / keyset rotation                             |  ✅    | ``arq_writer.rotate_keyset_password(blob, old_password, new_password)``: re-encrypts the keyset under the new password without touching master keys, so existing records stay decryptable |
 
 ### 2. Object storage layout
@@ -342,12 +342,13 @@ the FUSE mount.
   valid (the reader resolves both), only on-disk pack-file size
   distribution differs from Arq.app's.
 
-- **Unencrypted backups**: Arq 7's spec allows
-  ``isEncrypted: false``. Our writer always emits encrypted
-  destinations; our reader checks for the ARQO magic before
-  attempting decrypt and would fall through to "raw bytes are
-  the plaintext" for an unencrypted destination, but this code
-  path isn't tested. The encrypted case has 200+ tests behind it.
+- **Unencrypted backups** (`isEncrypted: false`): **supported (2026-05-25).**
+  Writer `--no-encrypt` / `build_backup(encrypt=False)` emits the
+  RE'd Arq "Continue Without Encryption" format (no keyset, plaintext
+  sidecars, `lz4_wrap` blobs/record with no ARQO, blob_id =
+  SHA-256(plaintext)); the reader reads such destinations with no password.
+  Verified byte-perfect both ways against a real Arq.app unencrypted
+  destination (`docs/UNENCRYPTED-FORMAT-RE.md`, `tests/test_unencrypted.py`).
 
 ## What "covers" actually means here
 
