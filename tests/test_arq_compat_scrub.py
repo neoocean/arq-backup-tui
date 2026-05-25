@@ -42,5 +42,38 @@ class ScrubPathsTests(unittest.TestCase):
         self.assertEqual(run._scrub_paths("no paths here"), "no paths here")
 
 
+class RunProblemsTests(unittest.TestCase):
+    """`_run_problems` (drives `--notify`) flags real regressions but not the
+    benign plan-config fingerprint polymorphism."""
+
+    def test_clean_result_has_no_problems(self) -> None:
+        import run
+        clean = {
+            "direction_a": {"configs": {
+                "v4": {"reader_scenarios": {"a": {"status": "PASS",
+                                                  "detail": ""}}}}},
+            "direction_b": {"scenarios": {"a": {"status": "PASS_NORM",
+                                                "detail": ""}},
+                            "arq_error_count": 0},
+            "server_db_drift": {"server_db_schema": "none — unchanged"},
+        }
+        self.assertEqual(run._run_problems(clean), [])
+
+    def test_flags_fail_arq_errors_and_schema_drift(self) -> None:
+        import run
+        bad = {
+            "direction_a": {"configs": {
+                "v4-fixed": {"reader_scenarios": {"big": {"status": "FAIL",
+                                                          "detail": "x"}}}}},
+            "direction_b": {"scenarios": {}, "arq_error_count": 3},
+            "server_db_drift": {"server_db_schema": "DRIFT — see detail"},
+        }
+        probs = run._run_problems(bad)
+        joined = " ".join(probs)
+        self.assertIn("Dir-A v4-fixed FAIL", joined)
+        self.assertIn("errorCount=3", joined)
+        self.assertIn("server.db schema DRIFT", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

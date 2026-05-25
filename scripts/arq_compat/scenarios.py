@@ -90,6 +90,14 @@ def _large_chunked(d: Path) -> str:
     return "12 MB file (exercises packing / multi-blob paths)"
 
 
+def _large_multichunk(d: Path) -> str:
+    # 41,000,000 bytes crosses the fixed-40m boundary (Arq.app useBuzhash=False
+    # default): exactly two chunks of 40,000,000 + 1,000,000. Exercises the
+    # multi-chunk file path + the GAP-L fixed-chunk boundary end-to-end.
+    (d / "large-41mb.bin").write_bytes(_det_bytes("multichunk", 41_000_000))
+    return "41 MB file (crosses the 40,000,000-byte fixed-chunk boundary)"
+
+
 def _nested_deep(d: Path) -> str:
     cur = d
     for i in range(12):
@@ -167,6 +175,8 @@ SCENARIOS: List[Scenario] = [
     Scenario("empty", "0-byte files", _empty),
     Scenario("binary", "binary / all byte values", _binary),
     Scenario("large_chunked", "12 MB multi-blob file", _large_chunked),
+    Scenario("large_multichunk", "41 MB crosses fixed-40m boundary",
+             _large_multichunk),
     Scenario("nested_deep", "deep directory nesting", _nested_deep),
     Scenario("special_names", "spaces/emoji/long names", _special_names),
     Scenario("xattr", "extended attributes", _xattr, platforms=["darwin"]),
