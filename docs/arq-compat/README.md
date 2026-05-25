@@ -20,7 +20,8 @@ introduce.
 |---|---|---|---|
 | **Direction A** | our writer → Arq | **semi-auto** | a destination our writer emits is readable/restorable as Arq-7 format |
 | **Direction B** | Arq → our reader | **auto** (needs one-time plan) | a destination Arq.app creates is restored byte-perfectly by our reader |
-| **Format drift** | Arq's emit vs prior version | **auto** | a new Arq version hasn't changed the on-disk schema/shape |
+| **Format drift** | Arq's emit vs prior version | **auto** | a new Arq version hasn't changed the on-disk destination schema/shape |
+| **server.db schema drift** | Arq's local config DB vs prior version | **auto** | a new Arq version hasn't changed the local `server.db` schema the read-only mirror depends on |
 
 ### Automation boundary (important)
 
@@ -28,9 +29,13 @@ introduce.
 can **start a backup** (`startBackupPlan`) but has **no restore command**.
 So:
 
-- **Direction B is fully automatable** — we drive `arqc startBackupPlan`, poll
-  `arqc latestBackupActivityJSON`, then our reader restores Arq's output and
-  diffs it per scenario.
+- **Direction B is fully automatable** — we drive `arqc startBackupPlan`, then
+  detect completion precisely from `arqc latestBackupActivityJSON`
+  (`finishedTime` + `message=="Idle"` + not `aborted`, distinct from the prior
+  run), cross-check Arq's `server.db` `activities` row, and **capture Arq's own
+  `errorCount` / `maxErrorSeverity`** into the report. Then our reader restores
+  Arq's output and diffs it per scenario. (`--computer-uuid` targets one plan
+  in a shared destination; `--skip-backup` reuses a GUI-run backup.)
 - **Direction A's *Arq-reads-our-output* leg cannot be CLI-driven.** The
   harness covers it three ways:
   1. **our reader round-trip** (auto) — our writer's emit must be
@@ -39,14 +44,22 @@ So:
      reader (`scripts/arq_restore_v4/`); build once with `build.sh`;
   3. **real Arq.app GUI restore** (manual, ~2 min) — the harness prints the
      exact steps and then `confirm-gui-restore` diffs the operator's restore.
+     Pass `--plan-uuid` to also attach Arq's own restore-activity evidence
+     (from the `activities` table: `restore_destination` / `error_count` /
+     finished) so the pass rests on both our diff and Arq's success record.
 
 ### Scenarios (`scenarios.py`)
 
 ascii · unicode NFC · unicode NFD · empty (0-byte) · binary/all-byte-values ·
-12 MB multi-blob · deep nesting · special names (spaces/emoji/200-char) ·
-extended attributes · symlinks (rel+abs) · hardlinks · sparse file ·
-varied permission bits. Each lives in its own `<scenario>/` subdir so results
-are scored per scenario. Add scenarios by appending to `SCENARIOS`.
+12 MB multi-blob · **41 MB crossing the 40,000,000-byte fixed-chunk boundary**
+· deep nesting · special names (spaces/emoji/200-char) · extended attributes ·
+symlinks (rel+abs) · hardlinks · sparse file · varied permission bits. Each
+lives in its own `<scenario>/` subdir so results are scored per scenario. Add
+scenarios by appending to `SCENARIOS`.
+
+Direction A runs each scenario through three writer configs — `v4-buzhash`,
+`v4-fixed` (Arq.app's `useBuzhash=False` 40 MB chunker), and `v3-buzhash`
+(Tree v3) — so tree-version × chunker combinations are covered.
 
 A `PASS*` in the matrix means content was byte-identical but a filename came
 back NFC/NFD-normalised — an Arq restore-side behaviour (Arq decomposes to
@@ -122,14 +135,23 @@ It only runs the checks + generates a report when it sees a version it hasn't
 tested yet. So it is safe to invoke on a schedule (cron / `launchd` /
 `/loop`) — it stays quiet until an Arq.app update appears, then captures that
 version's row automatically. Pass `--force` to re-run a version that already
-has a report.
+has a report. Add **`--notify`** to fire a macOS notification on any FAIL /
+drift (content failure, Arq-side `errorCount`, or `server.db` schema drift —
+the benign plan-config fingerprint polymorphism is not alarmed), so an
+unattended run surfaces a regression without watching the log.
 
 ```sh
 # cron-friendly: no-op until a new Arq version shows up
 */30 * * * *  cd <repo> && python3 scripts/arq_compat/run.py all \
     --plan-uuid <UUID> --arq-dest /Volumes/arqbackup1 \
-    --computer-uuid <UUID> --skip-backup >> /tmp/arq_compat.log 2>&1
+    --computer-uuid <UUID> --notify >> /tmp/arq_compat.log 2>&1
 ```
+
+A ready-to-edit **launchd** LaunchAgent is provided at
+`scripts/arq_compat/com.arqcompat.runner.plist.example` (replace the
+`REPO_DIR` / `PLAN_UUID` / `ARQ_DEST` / `PW_FILE` placeholders, copy to
+`~/Library/LaunchAgents/`, `launchctl load`). It runs `all … --notify` every
+6 hours; idempotency keeps it quiet until an Arq update lands.
 
 ## Interpreting drift
 

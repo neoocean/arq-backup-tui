@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example launchd LaunchAgent for the Arq compatibility suite.
+
+  Runs `scripts/arq_compat/run.py all` on a schedule. The runner is
+  idempotent per Arq version (it no-ops with exit 0 until a NEW Arq.app
+  version appears), so a frequent interval is cheap: nothing happens until
+  an Arq update lands, then that version's row is captured automatically.
+  `--notify` fires a macOS notification on any FAIL / drift.
+
+  Install (per-user agent):
+    1. Replace REPO_DIR, PLAN_UUID, ARQ_DEST, PW_FILE below.
+    2. cp scripts/arq_compat/com.arqcompat.runner.plist.example \
+         ~/Library/LaunchAgents/com.arqcompat.runner.plist
+    3. launchctl load ~/Library/LaunchAgents/com.arqcompat.runner.plist
+  Uninstall: launchctl unload ~/Library/LaunchAgents/com.arqcompat.runner.plist
+
+  Note: the destination password is read from PW_FILE (never inline), and the
+  suite passes it to subprocesses via the environment (no `ps` exposure).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.arqcompat.runner</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>REPO_DIR/scripts/arq_compat/run.py</string>
+    <string>all</string>
+    <string>--plan-uuid</string>   <string>PLAN_UUID</string>
+    <string>--computer-uuid</string><string>PLAN_UUID</string>
+    <string>--arq-dest</string>    <string>ARQ_DEST</string>
+    <string>--arq-pw-file</string> <string>PW_FILE</string>
+    <string>--notify</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>REPO_DIR</string>
+
+  <!-- Every 6 hours. The run no-ops unless a new Arq version is installed. -->
+  <key>StartInterval</key>
+  <integer>21600</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/arq_compat.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/arq_compat.err</string>
+</dict>
+</plist>

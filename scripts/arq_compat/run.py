@@ -53,6 +53,7 @@ RUNS = DOCS / "runs"
 BASELINES = DOCS / "baselines"
 ARQC = "/Applications/Arq.app/Contents/Resources/arqc"
 ARQ_APP = "/Applications/Arq.app"
+SERVER_DB = "/Library/Application Support/ArqAgent/server.db"
 
 sys.path.insert(0, str(HERE))
 import scenarios as scen  # noqa: E402
@@ -71,6 +72,97 @@ def arq_version() -> str:
         return v or "unknown"
     except Exception:
         return "unknown"
+
+
+# --- Arq agent activity / schema introspection (read-only) -----------------
+
+def _server_db_query(sql: str, params=()):
+    """Run a read-only query against a *copy* of Arq's server.db.
+
+    server.db is root-owned + daemon-owned; we never open the live file for
+    writing or hold a lock on it. Copy it (world-readable) to a temp path and
+    query the copy, so there is zero contention with ArqAgent. Returns a list
+    of sqlite3.Row, or [] if the DB/columns are unavailable.
+    """
+    import shutil
+    import sqlite3
+    import tempfile
+    src = Path(SERVER_DB)
+    if not src.exists():
+        return []
+    tmp = Path(tempfile.mkdtemp()) / "server.db"
+    try:
+        shutil.copy2(src, tmp)
+        con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        try:
+            return con.execute(sql, params).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return []
+    finally:
+        try:
+            tmp.unlink()
+            tmp.parent.rmdir()
+        except OSError:
+            pass
+
+
+def latest_arq_activity(plan_uuid: str, sub_types=("backup",)) -> Optional[Dict]:
+    """Latest `activities` row for a plan (Arq's own ground truth for a backup
+    or restore: finished_time / aborted / error_count / counts / log path)."""
+    placeholders = ",".join("?" for _ in sub_types)
+    rows = _server_db_query(
+        "SELECT type, sub_type, active, finished_time, aborted, abort_reason, "
+        "error_count, processed_bytes, total_bytes, processed_files, "
+        "total_files, restore_destination, restore_option, activity_log_path "
+        f"FROM activities WHERE plan_uuid=? AND sub_type IN ({placeholders}) "
+        "ORDER BY id DESC LIMIT 1",
+        (plan_uuid, *sub_types),
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    return {k: r[k] for k in r.keys()}
+
+
+def arqc_activity(plan_uuid: str) -> Dict:
+    """Parse `arqc latestBackupActivityJSON` (clean JSON: finishedTime,
+    aborted, errorCount, maxErrorSeverity, message, counts)."""
+    out = _arqc("latestBackupActivityJSON", plan_uuid)
+    txt = out.stdout or ""
+    i = txt.find("{")
+    if i < 0:
+        return {}
+    try:
+        return json.loads(txt[i:])
+    except Exception:
+        return {}
+
+
+def arq_db_schema_fingerprint() -> Dict[str, List[str]]:
+    """Column list of Arq's key config/activity tables — a drift sentinel for
+    the local server.db schema (which is unversioned and changes silently
+    across Arq versions; see docs/RESEARCH-shared-arq-config-feasibility.md)."""
+    fp: Dict[str, List[str]] = {}
+    for tbl in ("backup_plans", "storage_locations", "activities"):
+        rows = _server_db_query(f"PRAGMA table_info({tbl})")
+        fp[tbl] = [f"{r['name']}:{r['type']}" for r in rows]
+    return fp
+
+
+def _notify(title: str, message: str) -> None:
+    """Best-effort macOS notification (used by --notify on FAIL/DRIFT)."""
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification {json.dumps(message)} '
+             f'with title {json.dumps(title)}'],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
 
 
 PW_ENV = "_ARQ_COMPAT_PW"  # passwords go via env, never on the CLI
@@ -176,6 +268,7 @@ def diff_all(fixtures: Path, restored_base: Path) -> Dict[str, Dict[str, str]]:
 WRITER_CONFIGS = [
     ("v4-buzhash", ["--tree-version", "4", "--chunker", "arq_v7_41"]),
     ("v4-fixed", ["--tree-version", "4", "--chunker", "fixed-40m"]),
+    ("v3-buzhash", ["--tree-version", "3", "--chunker", "arq_v7_41"]),
 ]
 
 
@@ -240,12 +333,27 @@ def direction_a(workdir: Path, arq_restore_bin: Optional[str]) -> Dict:
     return result
 
 
-def confirm_gui_restore(workdir: Path, restored: Path) -> Dict:
+def confirm_gui_restore(workdir: Path, restored: Path,
+                        plan_uuid: Optional[str] = None) -> Dict:
     fixtures = workdir / "fixtures"
     if not fixtures.exists():
         return {"error": "no fixtures in workdir; run direction-a first"}
-    return {"scenarios": diff_all(fixtures, restored),
-            "restored": str(restored)}
+    out: Dict = {"scenarios": diff_all(fixtures, restored),
+                 "restored": str(restored)}
+    # Corroborate the file-diff with Arq's own record of the GUI restore: the
+    # `activities` table logs restore ops (restore_destination / error_count /
+    # finished). If the operator passes the plan UUID, attach that evidence so
+    # the pass rests on both our diff AND Arq's own success record.
+    if plan_uuid:
+        ra = latest_arq_activity(plan_uuid, sub_types=("restore",))
+        if ra:
+            out["arq_restore_activity"] = {
+                "finished": bool(ra.get("finished_time")),
+                "aborted": ra.get("aborted"),
+                "error_count": ra.get("error_count"),
+                "restore_destination": ra.get("restore_destination"),
+            }
+    return out
 
 
 # --- Direction B: Arq backs up the fixtures -> our reader ------------------
@@ -274,25 +382,43 @@ def direction_b(workdir: Path, plan_uuid: str, arq_dest: Path,
         scen.generate(fixtures)
     out: Dict = {"plan_uuid": plan_uuid, "computer_uuid": computer_uuid}
     if not skip_backup:
+        start_act = arqc_activity(plan_uuid)
+        start_finished = start_act.get("finishedTime")
         start = _arqc("startBackupPlan", plan_uuid)
         out["start_rc"] = start.returncode
         if start.returncode != 0:
             out["error"] = f"startBackupPlan failed: {start.stderr[-300:]}"
             return out
+        # Reliable completion: poll the structured activity JSON until the
+        # agent reports a NEW finished backup that is idle (not a stale one).
         deadline = time.time() + wait_s
         done = False
+        act: Dict = {}
         while time.time() < deadline:
             time.sleep(5)
-            act = _arqc("latestBackupActivityJSON", plan_uuid)
-            txt = (act.stdout or "").strip().replace(" ", "")
-            if txt and ('"backupInProgress":false' in txt
-                        or '"progress":1' in txt
-                        or "nobackup" in txt.lower()):
+            act = arqc_activity(plan_uuid)
+            finished = act.get("finishedTime")
+            if (act.get("message") == "Idle" and finished
+                    and finished != start_finished
+                    and not act.get("aborted")):
                 done = True
                 break
         out["completed"] = done
+        out["arq_error_count"] = act.get("errorCount")
+        out["arq_max_error_severity"] = act.get("maxErrorSeverity")
+        out["arq_aborted"] = act.get("aborted")
     else:
         out["completed"] = "skipped (operator backed up via GUI)"
+    # Arq's own ground-truth from server.db `activities` (cross-check + errors)
+    act_row = latest_arq_activity(plan_uuid, sub_types=("backup",))
+    if act_row:
+        out["arq_activity"] = {
+            "finished": bool(act_row.get("finished_time")),
+            "aborted": act_row.get("aborted"),
+            "error_count": act_row.get("error_count"),
+            "processed_files": act_row.get("processed_files"),
+            "total_files": act_row.get("total_files"),
+        }
     # our reader restores Arq's destination (the target plan's folder)
     lst = _py("arq_reader.cli", "list", str(arq_dest), "--password-env",
               PW_ENV, pw_env=arq_pw)
@@ -404,6 +530,65 @@ def existing_report(version: str) -> Optional[Path]:
     return hits[0] if hits else None
 
 
+def server_db_schema_drift(version: str) -> Dict:
+    """Capture Arq's local server.db schema fingerprint for this version and
+    diff it against the previous version's — a sentinel for the unversioned,
+    silently-changing local config/activity DB the read-only mirror depends
+    on. Stored as baselines/server-db-schema-<version>.json."""
+    fp = arq_db_schema_fingerprint()
+    if not any(fp.values()):
+        return {"server_db_schema": "unavailable (server.db not readable)"}
+    BASELINES.mkdir(parents=True, exist_ok=True)
+    cur = BASELINES / f"server-db-schema-{version}.json"
+    cur.write_text(json.dumps(fp, indent=1, sort_keys=True))
+    out: Dict = {"baseline": str(cur.relative_to(REPO))}
+    priors = sorted(p for p in BASELINES.glob("server-db-schema-*.json")
+                    if p != cur)
+    if not priors:
+        out["server_db_schema"] = "no prior baseline (first version captured)"
+        return out
+    prev = json.loads(priors[-1].read_text())
+    diffs = {}
+    for tbl in set(fp) | set(prev):
+        added = sorted(set(fp.get(tbl, [])) - set(prev.get(tbl, [])))
+        removed = sorted(set(prev.get(tbl, [])) - set(fp.get(tbl, [])))
+        if added or removed:
+            diffs[tbl] = {"added": added, "removed": removed}
+    out["compared_against"] = priors[-1].stem
+    out["server_db_schema"] = ("none — local DB schema unchanged"
+                               if not diffs else "DRIFT — see detail")
+    if diffs:
+        out["server_db_schema_detail"] = diffs
+    return out
+
+
+def _run_problems(res: Dict) -> List[str]:
+    """Alarm-worthy findings for `--notify` (content FAILs, Arq-side errors,
+    local-DB schema drift). Benign plan-config fingerprint polymorphism
+    (baseline_and_drift `match:false`) is intentionally NOT alarmed."""
+    probs: List[str] = []
+    for cfg, c in res.get("direction_a", {}).get("configs", {}).items():
+        f = [s for s, r in c.get("reader_scenarios", {}).items()
+             if r["status"] == "FAIL"]
+        if f:
+            probs.append(f"Dir-A {cfg} FAIL {f[:3]}")
+    db = res.get("direction_b")
+    if isinstance(db, dict):
+        if db.get("error"):
+            probs.append(f"Dir-B error: {str(db['error'])[:80]}")
+        else:
+            f = [s for s, r in db.get("scenarios", {}).items()
+                 if r["status"] == "FAIL"]
+            if f:
+                probs.append(f"Dir-B FAIL {f[:3]}")
+            if db.get("arq_error_count"):
+                probs.append(f"Arq errorCount={db['arq_error_count']}")
+    sdb = res.get("server_db_drift", {}).get("server_db_schema", "")
+    if isinstance(sdb, str) and sdb.startswith("DRIFT"):
+        probs.append("server.db schema DRIFT")
+    return probs
+
+
 def write_report(version: str, result: Dict) -> Path:
     RUNS.mkdir(parents=True, exist_ok=True)
     date = _dt.date.today().isoformat()
@@ -453,6 +638,14 @@ def write_report(version: str, result: Dict) -> Path:
                      f"reader_exit={db.get('reader_exit')} "
                      f"restore_failures={len(db.get('restore_failures', []))} "
                      f"verify_ok={v.get('ok') if isinstance(v, dict) else '?'}")
+            if "arq_error_count" in db:
+                L.append(f"- Arq-side (latestBackupActivityJSON): "
+                         f"errorCount={db.get('arq_error_count')} "
+                         f"maxErrorSeverity={db.get('arq_max_error_severity')} "
+                         f"aborted={db.get('arq_aborted')}")
+            if db.get("arq_activity"):
+                L.append(f"- Arq `activities` row (ground truth): "
+                         f"`{json.dumps(db['arq_activity'])}`")
             if vfails:
                 L.append(f"- verify notes (not content-diff failures): "
                          f"`{json.dumps(vfails)[:300]}`")
@@ -472,6 +665,19 @@ def write_report(version: str, result: Dict) -> Path:
         if dr.get("drift_detail"):
             L.append("\n```json")
             L.append(json.dumps(dr["drift_detail"], indent=1)[:2000])
+            L.append("```")
+        L.append("")
+
+    sdb = result.get("server_db_drift")
+    if sdb:
+        L.append("## Local server.db schema drift (vs previous version)\n")
+        for k, v in sdb.items():
+            if k == "server_db_schema_detail":
+                continue
+            L.append(f"- {k}: {v}")
+        if sdb.get("server_db_schema_detail"):
+            L.append("\n```json")
+            L.append(json.dumps(sdb["server_db_schema_detail"], indent=1)[:2000])
             L.append("```")
         L.append("")
 
@@ -552,6 +758,8 @@ def main(argv=None) -> int:
     pc = sub.add_parser("confirm-gui-restore", help="diff an Arq GUI restore")
     add_common(pc)
     pc.add_argument("--restored", required=True, type=Path)
+    pc.add_argument("--plan-uuid", default=None,
+                    help="attach Arq's own restore-activity evidence")
 
     pbl = sub.add_parser("baseline", help="fingerprint Arq emit + drift")
     pbl.add_argument("--arq-dest", required=True, type=Path)
@@ -571,6 +779,9 @@ def main(argv=None) -> int:
     pall.add_argument("--force", action="store_true",
                       help="re-run even if this Arq version already has a "
                            "report (default: skip already-tested versions)")
+    pall.add_argument("--notify", action="store_true",
+                      help="fire a macOS notification on any FAIL / drift "
+                           "(for scheduled/unattended runs)")
 
     args = ap.parse_args(argv)
     ver = arq_version()
@@ -599,7 +810,8 @@ def main(argv=None) -> int:
         return 0
 
     if args.cmd == "confirm-gui-restore":
-        print(json.dumps(confirm_gui_restore(args.workdir, args.restored),
+        print(json.dumps(confirm_gui_restore(args.workdir, args.restored,
+                                             plan_uuid=args.plan_uuid),
                          ensure_ascii=False, indent=2))
         return 0
 
@@ -637,11 +849,20 @@ def main(argv=None) -> int:
         if args.arq_dest and pw:
             res["drift"] = baseline_and_drift(
                 args.arq_dest, pw, ver, computer_uuid=args.computer_uuid)
+        # Local server.db schema drift always runs (server.db is readable).
+        res["server_db_drift"] = server_db_schema_drift(ver)
         rep = write_report(ver, res)
         update_matrix(ver, res, rep)
         print(f"Arq {ver} — report: {rep}")
         print("[GUI leg] throwaway password for the writer_* destinations: "
               + da["gui_pw"])
+        # Scheduled use: alert on any FAIL or DRIFT so an unattended run
+        # surfaces a regression without watching the log.
+        if args.notify:
+            problems = _run_problems(res)
+            if problems:
+                _notify(f"Arq compat {ver}: ATTENTION",
+                        "; ".join(problems)[:240])
         return 0
 
     return 2
