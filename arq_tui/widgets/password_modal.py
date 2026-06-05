@@ -37,10 +37,18 @@ class PasswordModal(ModalScreen[Optional[str]]):
     DEFAULT_CSS = """
     PasswordModal {
         align: center middle;
+        /* Translucent scrim so the screen behind the popup stays
+           visible (dimmed) instead of a solid opaque backdrop. */
+        background: $background 55%;
     }
     PasswordModal > Vertical {
         width: 60;
         max-width: 90%;
+        /* Shrink to the content's height so the dialog is a compact
+           popup (the screen behind shows through the dimmed modal
+           background) rather than a full-height box. */
+        height: auto;
+        max-height: 90%;
         background: $surface;
         border: round $primary;
         padding: 1 2;

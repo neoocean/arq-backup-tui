@@ -44,6 +44,11 @@ Screen {
     color: $primary;
     text-style: bold;
 }
+/* Keyboard cursor while the sidebar holds focus. Reverse video (not a
+   new colour) so the cursor row is unmistakable yet theme-neutral. */
+.sidebar > .sidebar-section.-cursor {
+    text-style: reverse bold;
+}
 
 /* Status pills — colored chips operators see next to runs in
  * the Activity screen and next to plans in HomeScreen. Mirrors

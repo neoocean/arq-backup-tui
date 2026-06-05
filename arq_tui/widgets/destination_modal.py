@@ -37,10 +37,16 @@ class DestinationModal(ModalScreen[Optional[Tuple[Destination, dict]]]):
     DEFAULT_CSS = """
     DestinationModal {
         align: center middle;
+        /* Translucent scrim so the screen behind stays visible. */
+        background: $background 55%;
     }
     DestinationModal > Vertical {
         width: 80;
         max-width: 95%;
+        /* Fit content height so the dialog is a compact popup over the
+           dimmed screen behind, not a full-height box. */
+        height: auto;
+        max-height: 90%;
         background: $surface;
         border: round $primary;
         padding: 1 2;

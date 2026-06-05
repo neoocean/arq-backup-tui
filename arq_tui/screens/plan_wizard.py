@@ -29,11 +29,9 @@ from typing import List, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import Screen
 from textual.widgets import (
     Button,
     Footer,
-    Header,
     Input,
     Label,
     RadioButton,
@@ -42,6 +40,7 @@ from textual.widgets import (
     TextArea,
 )
 
+from ._overlay import OverlayScreen
 from ..state import Plan
 from ..widgets.source_picker import SourcePicker
 
@@ -66,7 +65,7 @@ class _Draft:
     name: str = ""
 
 
-class PlanWizardScreen(Screen):
+class PlanWizardScreen(OverlayScreen):
     """Multi-step wizard for creating a backup plan."""
 
     STEPS = (
@@ -84,8 +83,8 @@ class PlanWizardScreen(Screen):
 
     DEFAULT_CSS = """
     PlanWizardScreen #container {
-        padding: 1 2;
-        height: 1fr;
+        padding: 0;
+        height: auto;
     }
     PlanWizardScreen .step-title {
         text-style: bold;
@@ -147,8 +146,7 @@ class PlanWizardScreen(Screen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        with Vertical(id="container"):
+        with Vertical(id="container", classes="overlay-box"):
             title = (
                 "Edit plan"
                 if self._editing_plan is not None

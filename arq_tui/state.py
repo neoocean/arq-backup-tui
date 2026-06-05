@@ -410,6 +410,22 @@ class DestinationStore:
         items = [d for d in items if self._key(d) != key]
         items.insert(0, dest)
         items = items[: self.MAX_ENTRIES]
+        self._write(items)
+
+    def remove(self, dest: Destination) -> bool:
+        """Drop ``dest`` from the remembered list (matched by its
+        coordinates). Returns True if an entry was removed. This only
+        forgets the destination from this tool's list — it never
+        touches the backup data on disk."""
+        items = self.list()
+        key = self._key(dest)
+        kept = [d for d in items if self._key(d) != key]
+        if len(kept) == len(items):
+            return False
+        self._write(kept)
+        return True
+
+    def _write(self, items: List[Destination]) -> None:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         with self.path.open("w", encoding="utf-8") as f:
             json.dump([asdict(d) for d in items], f, indent=2)

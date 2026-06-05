@@ -18,18 +18,19 @@ from typing import Any, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import Screen
 from textual.widgets import (
     Button,
     Footer,
-    Header,
     Input,
     Label,
+    ListItem,
+    ListView,
     RadioButton,
     RadioSet,
     Static,
 )
 
+from ._overlay import OverlayScreen
 from ..widgets.progress_panel import ProgressPanel
 from ..workers import (
     ValidateWorker,
@@ -42,7 +43,114 @@ from ..workers import (
 TIER_VALUES = ("dry-run", "quick", "deep", "audit", "audit-drip")
 
 
-class ValidateLaunchScreen(Screen):
+class ValidatePanel(Vertical):
+    """Right-hand content for the sidebar's Validate section.
+
+    Lists the openable storage locations; selecting one opens its
+    backend (prompting for the encryption password if not cached) and
+    pushes :class:`ValidateLaunchScreen` so the operator can pick a tier
+    (L0 / L1a / L1b / L2 / audit-drip) and run validation directly from
+    the TUI — no need to detour through Storage Locations."""
+
+    DEFAULT_CSS = """
+    ValidatePanel {
+        padding: 1 2;
+        height: 1fr;
+    }
+    ValidatePanel .panel-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    ValidatePanel .hint {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    ValidatePanel ListView {
+        height: auto;
+        max-height: 20;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import ListView
+        yield Static("Validate", classes="panel-title")
+        yield Static(
+            "Select a storage location to validate "
+            "(picks a tier next).",
+            classes="hint",
+        )
+        yield ListView(id="validate-locations")
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        from textual.widgets import ListView
+        from .backup_sets import merged_destinations
+        lv = self.query_one("#validate-locations", ListView)
+        lv.clear()
+        dests = merged_destinations(self.app)
+        if not dests:
+            return
+        for d in dests:
+            lv.append(_ValidateLocationItem(d))
+
+    def on_list_view_selected(self, event) -> None:
+        item = event.item
+        if isinstance(item, _ValidateLocationItem):
+            self._open_and_validate(item.dest)
+
+    def _open_and_validate(self, dest) -> None:
+        from ..backend_open import open_backend
+        from ..widgets.password_modal import PasswordModal
+        sftp_password = None
+        if dest.kind == "sftp":
+            cached = self.app.credential_cache.get_sftp_auth(dest)
+            if cached:
+                sftp_password = cached.get("password")
+        try:
+            backend = open_backend(dest, sftp_password=sftp_password)
+        except Exception as exc:
+            self.notify(
+                f"Could not open {dest.display()}: {exc}",
+                severity="error",
+            )
+            return
+        pw = self.app.credential_cache.get_encryption_password(dest)
+        if pw is None:
+            def _with_pw(entered):
+                if not entered:
+                    return
+                self.app.credential_cache.set_encryption_password(
+                    dest, entered,
+                )
+                self._launch(backend, dest, entered)
+            self.app.push_screen(
+                PasswordModal(
+                    prompt=f"Encryption password for {dest.display()}",
+                ),
+                _with_pw,
+            )
+        else:
+            self._launch(backend, dest, pw)
+
+    def _launch(self, backend, dest, password: str) -> None:
+        self.app.push_screen(ValidateLaunchScreen(
+            backend=backend,
+            password=password,
+            dest_label=dest.display(),
+            config_dir=self.app.destination_store.config_dir,
+        ))
+
+
+class _ValidateLocationItem(ListItem):
+    def __init__(self, dest) -> None:
+        badge = "◆ Arq  " if getattr(dest, "origin", "") == "arq" else ""
+        super().__init__(Static(f"{badge}{dest.display()}"))
+        self.dest = dest
+
+
+class ValidateLaunchScreen(OverlayScreen):
     """Picks a tier + options, then pushes :class:`ValidateRunScreen`."""
 
     BINDINGS = [
@@ -89,8 +197,7 @@ class ValidateLaunchScreen(Screen):
         self.config_dir = Path(config_dir)
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        with Vertical(id="container"):
+        with Vertical(id="container", classes="overlay-box"):
             yield Static(
                 f"Validate: {self.dest_label}",
                 classes="step-title",
@@ -202,7 +309,7 @@ class ValidateLaunchScreen(Screen):
         return "deep"
 
 
-class ValidateRunScreen(Screen):
+class ValidateRunScreen(OverlayScreen):
     """Drives one validation run + renders progress."""
 
     BINDINGS = [
@@ -249,15 +356,15 @@ class ValidateRunScreen(Screen):
         self._drip_worker: Optional[Any] = None
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static(
-            f"Validating ({self.tier}): {self.dest_label}",
-            id="title",
-        )
-        with Vertical(id="panel"):
-            yield ProgressPanel()
-        yield Static("", id="summary")
-        yield Footer()
+        with Vertical(classes="overlay-box"):
+            yield Static(
+                f"Validating ({self.tier}): {self.dest_label}",
+                id="title",
+            )
+            with Vertical(id="panel"):
+                yield ProgressPanel()
+            yield Static("", id="summary")
+            yield Footer()
 
     def on_mount(self) -> None:
         if self.tier == "audit-drip":
