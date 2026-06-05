@@ -563,6 +563,9 @@ following the M-series:
   `:validate`, `:plan`, …
 - `Sidebar` widget with `section_for_screen()` helper: Arq.app-style
   left rail with active-section highlight in lockstep with the open screen
+  (the per-section *launcher* model here was later superseded by the M9
+  persistent shell — see below; the `section_for_screen()` helper survives
+  as a standalone sidebar utility)
 - `SchedulingScreen`: install/remove cron + launchd entries for plans
   + auto-gc schedule for finished-runs cleanup
 - `BackupRunScreen` integrations (PR #36): disk-precheck on mount,
@@ -575,7 +578,7 @@ following the M-series:
 **Total estimate: 8–9 days for M1–M6.** M7 features were added
 incrementally across ~30 subsequent PRs.
 
-### M8 — Arq.app mirror (read-only sync with a local Arq 7 install)
+### M8 — Arq.app mirror (read-only sync with a local Arq 7 install) — ✅ shipped (PR #199 / CL 56798)
 
 When Arq.app is installed on the same machine, the TUI mirrors what the
 Arq GUI shows — the same destinations, plans, and activity log — by
@@ -590,7 +593,7 @@ Full design + field mapping: **`docs/ARQ-APP-MIRROR.md`**. Module:
 `arq_tui/arq_app.py`; tests: `tests/test_tui_arq_app.py` +
 `tests/test_tui_arq_mirror.py`.
 
-### M9 — persistent sidebar shell (master-detail navigation)
+### M9 — persistent sidebar shell (master-detail navigation) — ✅ shipped (PR #200 / CL 56799)
 
 The sidebar is no longer a launcher that pushes a fresh full screen
 per section. Instead `HomeScreen` is a **persistent shell**: a fixed

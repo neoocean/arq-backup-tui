@@ -17,15 +17,15 @@ deliberate trade-offs (Arq.app side concern, redundant with
 | Read              | ✅ End-to-end restorer (standalone + packed objects, multi-folder, tree walk, dry-run preview, --paths filter, conflict policies) |
 | Validate          | ✅ All four tiers (L0 / L1a / L1b / L2) + resumable audit-drip + per-record walk + incremental ledger across both audit and record tiers |
 | Write             | ✅ Standalone-objects mode + optional pack mode; chunker matches Arq.app v7.41; cross-run + cross-folder dedup with bounded LRU tree-walk reuse; walker emits explicit error events on per-file failures (no silent corruption) |
-| Operate           | ✅ Schedule (cron + launchd + auto-gc), notifications (notify_run_finished wired to RunWriter), TUI (M1–M6 + maintenance + activity), retention + blob GC, disk-precheck on backup start, macOS progress toasts, .secrets/ wizard checkbox; throttle controllable via audit-drip rate flags |
+| Operate           | ✅ Schedule (cron + launchd + auto-gc), notifications (notify_run_finished wired to RunWriter), TUI (M1–M9: backup/restore/validate + maintenance + activity + **persistent sidebar shell** + read-only **Arq.app mirror** ◆), retention + blob GC, disk-precheck on backup start, macOS progress toasts, .secrets/ wizard checkbox; throttle controllable via audit-drip rate flags |
 
-The aggregate test count is **~920 unit tests** at the time this
-table was last updated (Round 10 — Rounds 6-10 added ~210 tests
-across 33 PRs spanning A/B/C/D/E/F/G/K/P/V/R/N axes); the suite
-runs in ~165 s on a stdlib-only toolchain
-(``python -m unittest discover``). TUI tests
-(~50 / 355) require the optional ``textual`` dep; without it
-they auto-skip and the rest of the suite (library + RE +
+The aggregate test count is **~1,398 unit tests** at the time this
+table was last updated (grown from the Round-10 ~920 via the M7–M9
+TUI work, the per-version Arq-GUI compat suite, unencrypted-backup
+support, and the audit-drip per-computer-UUID fix); the suite runs in
+~300 s on a stdlib-only toolchain (``python -m unittest discover``).
+The **~60 textual-dependent** TUI tests require the optional ``textual``
+dep; without it they auto-skip and the rest of the suite (library + RE +
 compatibility + GUI-parity + Unicode-stress) runs cleanly. **7
 tests skip by default** because they require live SFTP credentials
 (see ``docs/COMPAT-SFTP-TESTING.md``); operators with a real Arq
