@@ -197,7 +197,54 @@ class AuditDripFireTests(unittest.TestCase):
             )
         self.assertFalse(state.last_fire_keyset_decrypted)
         self.assertIsNotNone(state.error)
-        self.assertIn("HMAC", state.error)
+        # 2026-05-27: with per-cu keyset selection a wrong password
+        # means no backup set decrypts → the fire reports the
+        # aggregate "no decryptable keyset" error (and lists the cu
+        # under last_fire_skipped_backup_sets) rather than leaking
+        # the raw per-keyset HMAC-fail string.
+        self.assertIn("no decryptable keyset", state.error)
+        self.assertIsNotNone(state.last_fire_skipped_backup_sets)
+
+    def test_multi_backup_set_skips_unauditable(self) -> None:
+        """2026-05-27 regression: a destination hosting several
+        backup sets (one openable with the password, one encrypted
+        with a DIFFERENT password, one UNENCRYPTED) must audit the
+        openable set and SKIP the rest — never report the skipped
+        sets' packs as HMAC failures (the pre-fix bug that fired
+        false CRITs)."""
+        cu_ok = "11111111-1111-1111-1111-111111111111"
+        cu_diff = "22222222-2222-2222-2222-222222222222"
+        cu_plain = "33333333-3333-3333-3333-333333333333"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write_synthetic_backup(root, "right", computer_uuid=cu_ok)
+            write_synthetic_backup(root, "different",
+                                   computer_uuid=cu_diff)
+            write_synthetic_backup(root, "x", computer_uuid=cu_plain)
+            # Make cu_plain "unencrypted": remove its keyset file.
+            (root / cu_plain / "encryptedkeyset.dat").unlink()
+            state = run_audit_drip(
+                LocalBackend(root),
+                target="local",
+                state_file=root / "drip.json",
+                encryption_password="right",
+            )
+        # The openable set decrypted → fire proceeds (not aborted).
+        self.assertTrue(state.last_fire_keyset_decrypted)
+        # CRITICAL: zero false failures from the unauditable sets.
+        self.assertEqual(state.fails_this_sweep, 0)
+        self.assertEqual(state.inner_arqos_fail_this_sweep, 0)
+        # The unauditable sets' packs were skipped, not failed.
+        self.assertGreater(state.skipped_this_sweep, 0)
+        # The openable set's packs WERE audited (inner ARQOs verified).
+        self.assertGreater(state.inner_arqos_ok_this_sweep, 0)
+        # Both unauditable sets are reported (skipped, with reasons).
+        skipped = state.last_fire_skipped_backup_sets or []
+        joined = " ".join(skipped)
+        self.assertIn(cu_diff, joined)
+        self.assertIn(cu_plain, joined)
+        self.assertIn("unencrypted", joined)        # cu_plain reason
+        self.assertIn("different backup set", joined)  # cu_diff reason
 
     def test_save_load_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as td:

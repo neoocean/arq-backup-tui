@@ -76,6 +76,13 @@ class AuditDripState:
     last_fire_files_processed: int = 0
     last_fire_aborted_reason: Optional[str] = None
     last_fire_keyset_decrypted: Optional[bool] = None
+    # Backup sets (computer-UUIDs) that could not be audited this
+    # fire and were SKIPPED (not failed): either unencrypted (no
+    # keyset file) or encrypted with a password other than the one
+    # supplied. Each entry is "<cu>: <reason>". A destination that
+    # hosts several backup sets with different/no encryption is the
+    # case this guards — see _decrypt_keysets_per_cu.
+    last_fire_skipped_backup_sets: Optional[List[str]] = None
     paused_until_epoch: Optional[float] = None
     error: Optional[str] = None
 
@@ -176,29 +183,57 @@ def _index_after_cursor(
     return len(walk)
 
 
-def _decrypt_first_keyset(
+def _decrypt_keysets_per_cu(
     backend: Backend,
     layouts: List[L.Arq7ComputerLayout],
     root: str,
     encryption_password: str,
     *,
     openssl_path: str,
-) -> Tuple[Optional[Keyset], Optional[str]]:
-    """Decrypt the first available keyset; return ``(keyset, error)``."""
-    last_err: Optional[str] = None
+) -> Tuple[Dict[str, Keyset], Dict[str, str]]:
+    """Decrypt the keyset for EACH computer-UUID independently.
+
+    A single destination can host several Arq backup sets, each
+    its own computer-UUID with its own ``encryptedkeyset.dat`` —
+    or an *unencrypted* set with no keyset at all. Verifying every
+    pack with one shared keyset (the pre-2026-05-27 behaviour)
+    produced spurious HMAC failures whenever a set used a
+    different password (every object fails under the wrong key)
+    or was unencrypted ("no ARQO magic"). See
+    INVESTIGATION-2026-05-27-arq-validator-vs-sibling.md.
+
+    Returns ``(keysets, skipped)`` where:
+      - ``keysets[cu]`` is the decrypted keyset for every cu whose
+        ``encryptedkeyset.dat`` opens with ``encryption_password``;
+      - ``skipped[cu]`` is a human reason string for every cu that
+        cannot be audited — no keyset file (unencrypted set) or a
+        keyset that does not decrypt with the supplied password
+        (a different-password backup set).
+
+    Callers SKIP the packs of ``skipped`` cu's (not fail them):
+    the auditor simply doesn't hold the key, which is not
+    corruption.
+    """
+    keysets: Dict[str, Keyset] = {}
+    skipped: Dict[str, str] = {}
     for lay in layouts:
-        kp = L.keyset_path(root, lay.computer_uuid)
+        cu = lay.computer_uuid
+        kp = L.keyset_path(root, cu)
         try:
             blob = backend.read_all(kp)
-            return decrypt_keyset(
+        except Exception:
+            skipped[cu] = "unencrypted backup set (no encryptedkeyset.dat)"
+            continue
+        try:
+            keysets[cu] = decrypt_keyset(
                 blob, encryption_password, openssl_path=openssl_path,
-            ), None
-        except Exception as exc:
-            last_err = (
-                f"keyset decrypt failed for {lay.computer_uuid}: "
-                f"{type(exc).__name__}: {exc}"
             )
-    return None, last_err or "no computers found"
+        except Exception as exc:
+            skipped[cu] = (
+                f"keyset not decryptable with the configured password "
+                f"({type(exc).__name__}) — likely a different backup set"
+            )
+    return keysets, skipped
 
 
 def run_audit_drip(
@@ -271,25 +306,53 @@ def run_audit_drip(
             _finish(state, state_file, callback, target)
             return state
 
-        keyset, kerr = _decrypt_first_keyset(
+        # Per-computer-UUID keysets (2026-05-27): a destination can
+        # host several backup sets with different / no encryption.
+        # Verify each pack with ITS set's keyset; skip (not fail)
+        # sets we don't hold the key for or that are unencrypted.
+        keysets, skipped_cus = _decrypt_keysets_per_cu(
             backend, layouts, root, encryption_password,
             openssl_path=openssl_path,
         )
-        if keyset is None:
+        state.last_fire_skipped_backup_sets = (
+            [f"{cu}: {reason}"
+             for cu, reason in sorted(skipped_cus.items())] or None
+        )
+        if not keysets:
+            # No backup set opens with this password → genuine
+            # keyset failure (wrong password, or no encrypted set).
             state.last_fire_keyset_decrypted = False
-            state.error = kerr
+            state.error = (
+                "no decryptable keyset for any backup set: "
+                + "; ".join(f"{cu[:8]}: {r}"
+                            for cu, r in sorted(skipped_cus.items()))
+            ) or "no computers found"
             emit(
-                callback, EventKind.KEYSET_FAILED, kerr or "keyset failed",
-                target=target, error=kerr,
+                callback, EventKind.KEYSET_FAILED, state.error,
+                target=target, error=state.error,
             )
             _finish(state, state_file, callback, target)
             return state
         state.last_fire_keyset_decrypted = True
         emit(
             callback, EventKind.KEYSET_DECRYPTED,
-            f"keyset decrypted for audit-drip {target}",
+            f"keyset decrypted for audit-drip {target} "
+            f"({len(keysets)} backup set(s)"
+            + (f"; {len(skipped_cus)} skipped" if skipped_cus else "")
+            + ")",
             target=target,
         )
+        if skipped_cus:
+            # Informational, NOT a failure: these sets are
+            # unencrypted or use a different password.
+            emit(
+                callback, EventKind.AUDIT_FILE_SKIPPED,
+                f"audit-drip {target}: skipping "
+                f"{len(skipped_cus)} unauditable backup set(s): "
+                + "; ".join(f"{cu[:8]}: {r}"
+                            for cu, r in sorted(skipped_cus.items())),
+                target=target,
+            )
 
         walk = build_walk(layouts)
         if not walk:
@@ -362,10 +425,19 @@ def run_audit_drip(
             pre_ifail = scratch.inner_arqos_fail
             pre_fails = len(scratch.failures)
 
-            _audit_one_file(
-                backend, keyset, cu, kind, shard, file_name, abs_path,
-                skip_larger_than, scratch, callback,
-            )
+            cu_keyset = keysets.get(cu)
+            if cu_keyset is None:
+                # Unauditable backup set (unencrypted, or encrypted
+                # with a different password): SKIP, never HMAC-fail.
+                # The per-cu skip reason was already reported once at
+                # fire start.
+                scratch.files_total += 1
+                scratch.files_skipped += 1
+            else:
+                _audit_one_file(
+                    backend, cu_keyset, cu, kind, shard, file_name,
+                    abs_path, skip_larger_than, scratch, callback,
+                )
 
             state.files_audited_this_sweep += scratch.files_total - pre_total
             state.bytes_audited_this_sweep += scratch.bytes_read - pre_bytes
@@ -430,7 +502,7 @@ def run_audit_drip(
                 errors=state.errors_this_sweep,
             )
 
-        del keyset
+        del keysets
         state.last_fire_aborted_reason = aborted
         if aborted:
             emit(

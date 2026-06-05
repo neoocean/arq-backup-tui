@@ -1,5 +1,19 @@
 # HANDOFF — session continuity notes
 
+## 2026-05-27 — audit-drip per-computer-UUID keyset fix (CL 54692)
+
+`arq_validator` audit-drip was applying ONE keyset to every backup set on
+a destination. On a multi-set destination (different passwords / one
+unencrypted) this produced spurious whole-set HMAC failures — surfaced as
+a recurring backup-integrity CRIT in the consumer docker-monitor. Zero
+actual corruption. Fixed: `_decrypt_first_keyset` →
+`_decrypt_keysets_per_cu` (per-cu keyset; skip-not-fail unencrypted /
+different-password sets; new `last_fire_skipped_backup_sets` state). The
+L2 `run_full_audit` tier already did this per-cu — audit-drip was the lone
+shortcut. Full record: [`docs/INCIDENTS.md`](docs/INCIDENTS.md) A-01;
+consumer-side investigation in docker-monitor
+`docs/INVESTIGATION-2026-05-2{6,7}-*.md`. DESIGN §5 updated.
+
 ## 2026-05-24 — Arq 7 GUI installed: bidirectional byte-perfect interop GREEN
 
 The operator installed the **Arq 7 GUI (Arq.app 7.44.1)**, unblocking every

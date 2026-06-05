@@ -137,6 +137,13 @@ class ObjectAuditResult:
     bytes_read: int = 0
     failures: List[Dict[str, str]] = field(default_factory=list)
     aborted_reason: Optional[str] = None
+    # Backup sets (computer-UUIDs) skipped — not failed — because
+    # their keyset is absent (unencrypted set) or doesn't open with
+    # the supplied password (a different-password set). Each entry
+    # "<cu>: <reason>". Same multi-set guard as audit-drip's
+    # _decrypt_keysets_per_cu (a destination can host several backup
+    # sets with different / no encryption).
+    skipped_backup_sets: List[str] = field(default_factory=list)
     # Operator-visible progress fields (§ AUDIT_PROGRESS ETA, CL
     # TBD 2026-05-12).  ``started_at`` is set when
     # ``run_full_audit`` begins; ``planned_files`` is computed
@@ -1072,27 +1079,41 @@ def run_full_audit(
                 _merge_and_finalize(d)
         return abort
 
+    audited_any = False
     for lay in layouts:
         kp = L.keyset_path(root, lay.computer_uuid)
+        # Per-cu keyset (2026-05-27): a destination can host several
+        # backup sets with different / no encryption. SKIP (don't
+        # abort the whole audit for) a set whose keyset is missing
+        # (unencrypted) or doesn't open with the supplied password
+        # (a different-password set) — the auditor simply doesn't
+        # hold the key, which is not corruption. Mirrors audit-drip
+        # _decrypt_keysets_per_cu.
         try:
             keyset_bytes = backend.read_all(kp)
+        except Exception:
+            reason = "unencrypted backup set (no encryptedkeyset.dat)"
+            result.skipped_backup_sets.append(
+                f"{lay.computer_uuid}: {reason}")
+            emit(callback, EventKind.AUDIT_FILE_SKIPPED,
+                 f"skipping backup set {lay.computer_uuid}: {reason}",
+                 computer=lay.computer_uuid)
+            continue
+        try:
             keyset = decrypt_keyset(
                 keyset_bytes, encryption_password, openssl_path=openssl_path,
             )
         except Exception as exc:
-            err = (
-                f"keyset for {lay.computer_uuid}: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            result.failures.append({
-                "computer": lay.computer_uuid,
-                "kind": "keyset", "shard": "", "file_name": C.KEYSET_FILE,
-                "error": err,
-            })
-            result.aborted_reason = "keyset_failed"
-            emit(callback, EventKind.KEYSET_FAILED, err,
+            reason = (
+                f"keyset not decryptable with the configured password "
+                f"({type(exc).__name__}) — likely a different backup set")
+            result.skipped_backup_sets.append(
+                f"{lay.computer_uuid}: {reason}")
+            emit(callback, EventKind.AUDIT_FILE_SKIPPED,
+                 f"skipping backup set {lay.computer_uuid}: {reason}",
                  computer=lay.computer_uuid, error=str(exc))
-            return result
+            continue
+        audited_any = True
 
         emit(
             callback, EventKind.KEYSET_DECRYPTED,
@@ -1119,6 +1140,15 @@ def run_full_audit(
                         del keyset
                         return result
         del keyset
+
+    # No backup set yielded a usable keyset (all skipped — wrong
+    # password and/or all unencrypted) → genuine keyset failure.
+    if layouts and not audited_any:
+        result.aborted_reason = "keyset_failed"
+        emit(callback, EventKind.KEYSET_FAILED,
+             "no decryptable keyset for any backup set: "
+             + "; ".join(result.skipped_backup_sets),
+             error="no_auditable_keyset")
 
     # Bump sweep_count + last_sweep_finished_at on the ledger so the
     # operator can ``cat`` the file later + see how many sweeps ran.
