@@ -1,6 +1,45 @@
 # HANDOFF — session continuity notes
 
-## 2026-05-27 — audit-drip per-computer-UUID keyset fix (CL 54692)
+## 2026-06-05 — TUI Arq.app mirror (M8) + persistent sidebar shell (M9) shipped; p4 mirror caught up
+
+A single uncommitted working tree (M8 + M9 + the audit-drip fix) was split
+into three independently-reviewable bundles, each landed as a **git PR
+(squash) + a paired numbered p4 CL**:
+
+| Bundle | PR | p4 CL | What |
+|--------|----|-------|------|
+| audit-drip per-cu keysets | #198 | 56797 | skip-not-fail on multi-set destinations (see below) |
+| M8 — Arq.app mirror adapter | #199 | 56798 | read-only `arq_tui/arq_app.py` (dormant) + `origin` field + `docs/ARQ-APP-MIRROR.md` |
+| M9 — persistent sidebar shell | #200 | 56799 | `Sidebar`→`ContentSwitcher` swap-in-place; wires the M8 mirror into home/storage/activity; storage-delete path |
+
+Why the split shape: M8 and M9 share the home/storage/activity screens
+(M9 rewrites them into a shell), so there was no clean intermediate tree
+with "M8 wiring on the pre-M9 screens". M8 therefore shipped as the
+self-contained, independently-tested adapter (dormant); M9 shipped the
+wiring on top. The `origin` field moved to M8 (the adapter needs it);
+`DestinationStore.remove()` stayed in M9.
+
+**p4 mirror caught up.** The `sync-main-to-p4.sh` cursor was 12 commits
+behind main (#184–#197 never synced). The whole gap + the three new
+commits were replayed as **numbered** CLs **56785–56799** (not the default
+changelist). The cursor (`.p4-git-sync-log`, gitignored) now equals main
+`ee99d08`, so the blessed sync script is a no-op. NOTE: CL numbers in the
+older 2026-05-24 entry below (e.g. "CL 54128") were pre-sync placeholders;
+the actual p4 CLs are 56785–56796 for #184–#197.
+
+Bugs fixed during the split (would have failed CI / were latent):
+- `audit_drip.py` `del keyset` → `del keysets` (leftover from the
+  single-keyset design; pyright error + a swallowed `UnboundLocalError`
+  that set `state.error` every fire).
+- `test_wireup_bundle_2.py` updated to pin the M9 persistent-shell
+  contract (it pinned the superseded `section_for_screen`-in-home design).
+- doc-link `docker-monitor/docs/...` path prefixes.
+
+Env note: `test_v1_arqagent_fingerprint.test_build_version_pinned` fails
+locally (this host's Arq.app is 7.44.1 vs the 7.41 pin) but passes on CI
+(Linux, no Arq.app). Not a regression.
+
+## 2026-05-27 — audit-drip per-computer-UUID keyset fix (CL 56797)
 
 `arq_validator` audit-drip was applying ONE keyset to every backup set on
 a destination. On a multi-set destination (different passwords / one

@@ -6,7 +6,7 @@ in the linked docs / CLs. (First entry 2026-05-27.)
 
 | Date | ID | Component | Title | Severity | Fix |
 |---|---|---|---|---|---|
-| 2026-05-27 | A-01 | `arq_validator` audit-drip | One keyset applied to all backup sets → spurious whole-set HMAC failures on a multi-set destination | false-alarm (no data loss); surfaced as a CRIT in the consumer | CL 54692 (DESIGN §5) |
+| 2026-05-27 | A-01 | `arq_validator` audit-drip | One keyset applied to all backup sets → spurious whole-set HMAC failures on a multi-set destination | false-alarm (no data loss); surfaced as a CRIT in the consumer | CL 56797 (DESIGN §5) |
 
 ---
 
@@ -42,7 +42,7 @@ Notably the L2 `tiers.run_full_audit` tier **already** decrypted
 the keyset per computer-UUID — audit-drip's
 `_decrypt_first_keyset` was the lone single-keyset shortcut.
 
-**Fix (CL 54692)**: `_decrypt_first_keyset` →
+**Fix (CL 56797)**: `_decrypt_first_keyset` →
 `_decrypt_keysets_per_cu`, returning a `{cu: Keyset}` map plus a
 `{cu: reason}` skip map. `run_audit_drip` verifies each pack
 with **its** set's keyset and **skips** (never HMAC-fails) sets

@@ -146,7 +146,8 @@ arq-backup-tui/
 │   ├── __init__.py               # Exposes ArqTuiApp
 │   ├── __main__.py               # `python -m arq_tui` entry point
 │   ├── app.py                    # Top-level app (PlanRegistry, CredentialCache, DestinationStore)
-│   ├── state.py                  # Plan / Destination dataclasses + persistent store
+│   ├── state.py                  # Plan / Destination dataclasses (+ origin: tui|arq) + persistent store
+│   ├── arq_app.py                # Read-only mirror of a local Arq.app (server.db → Plan / Destination / run records)
 │   ├── workers.py                # BackupWorker / RestoreWorker / ValidateWorker (in-process worker thread bridge)
 │   ├── runs.py                   # State-file IPC: RunWriter / enumerate_runs / signal_cancel / gc
 │   ├── console_commands.py       # Slash-command dispatch for the quake-style console
@@ -154,7 +155,7 @@ arq-backup-tui/
 │   ├── cli.py                    # `plans` / `runs` / `machine-info` headless subcommands
 │   ├── theming.css               # Colors, padding, etc. CSS
 │   ├── screens/
-│   │   ├── home.py               # Landing (plan list + quick actions)
+│   │   ├── home.py               # Persistent shell: Sidebar → ContentSwitcher panels (plans / activity / storage / validate / help)
 │   │   ├── plan_wizard.py        # 6-step wizard (sources / dest / enc / chunker / advanced / review)
 │   │   ├── backup_run.py         # Execution + ProgressPanel
 │   │   ├── backup_sets.py        # destination/layout browser (enter maintenance with [m] from below)
@@ -162,14 +163,19 @@ arq-backup-tui/
 │   │   ├── restore_run.py        # Restore execution + ProgressPanel
 │   │   ├── validate_run.py       # Validation execution + ProgressPanel
 │   │   ├── maintenance.py        # Password rotation + retention application
-│   │   ├── runs_monitor.py       # Activity screen — polls external process state files at 1Hz
+│   │   ├── runs_monitor.py       # Activity screen / ActivityPanel — polls external state files at 1Hz (+ mirrored Arq.app activity)
+│   │   ├── scheduling.py         # Install / remove cron + launchd schedules
+│   │   ├── summary.py            # SummaryPanel (sidebar "summary" section)
+│   │   ├── _overlay.py           # Shared overlay/push helper for transient flows
 │   │   └── help.py
 │   └── widgets/
 │       ├── source_picker.py / destination_modal.py
 │       ├── password_modal.py / restore_target_modal.py
+│       ├── sidebar.py            # Persistent left rail (focusable; section_for_screen() helper)
+│       ├── confirm_modal.py      # Reusable yes/no confirm dialog
 │       ├── console.py            # Quake-style slash-command console (slide-down)
 │       └── progress_panel.py
-├── tests/                        # Synthetic / round-trip unit + integration tests (355 cases, ~140s; 7 skipped = depend on SFTP credentials)
+├── tests/                        # Synthetic / round-trip unit + integration tests (~1,398 cases, ~300s; 7 skipped = depend on SFTP credentials)
 │   ├── fixtures.py               # Arq 7 tree builder for validator tests
 │   ├── integration/              # Real Arq.app SFTP destination compatibility checks (.env-based)
 │   │   ├── _creds.py             # Environment + .env credentials loader
@@ -188,7 +194,8 @@ arq-backup-tui/
 │   ├── test_retention.py         # RetentionPolicy + prune + GC round-trip
 │   ├── test_fingerprint.py       # Shape fingerprint compatibility verification
 │   ├── test_reader_e2e.py        # Reader byte-identical restore verification
-│   └── test_tui_m{1..7}_*.py     # TUI per-stage smoke + functional tests
+│   ├── test_tui_m{1..7}_*.py     # TUI per-stage smoke + functional tests
+│   └── test_tui_arq_app.py / test_tui_arq_mirror.py / test_sidebar.py  # M8 mirror adapter + M9 sidebar shell
 ├── docs/
 │   ├── DESIGN.md                                  # ← this document lives at the repo root
 │   ├── COMPATIBILITY.md / COVERAGE.md / GUI-PARITY.md
