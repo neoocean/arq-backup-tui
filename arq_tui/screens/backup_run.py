@@ -29,8 +29,9 @@ from typing import Any, Optional, Union
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Static
+from textual.widgets import Button, Footer, Static
+
+from ._overlay import OverlayScreen
 
 from ..backend_open import close_backend, open_backend
 from ..state import Destination, Plan
@@ -60,7 +61,7 @@ def _fmt_bytes(n: int) -> str:
     return f"{n}B"
 
 
-class BackupRunScreen(Screen):
+class BackupRunScreen(OverlayScreen):
     """Drive ``arq_writer.Backup`` for a saved Plan.
 
     Caller passes a :class:`Plan` (already saved on disk) and the
@@ -115,12 +116,12 @@ class BackupRunScreen(Screen):
         self._mac_progress = _ProgressState(plan_name=plan.name)
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static(f"Backing up: {self.plan.name}", id="title")
-        with Vertical(id="panel"):
-            yield ProgressPanel()
-        yield Static("", id="footer-row")
-        yield Footer()
+        with Vertical(classes="overlay-box"):
+            yield Static(f"Backing up: {self.plan.name}", id="title")
+            with Vertical(id="panel"):
+                yield ProgressPanel()
+            yield Static("", id="footer-row")
+            yield Footer()
 
     def on_mount(self) -> None:
         # macOS toast at start (no-op elsewhere).

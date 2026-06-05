@@ -587,10 +587,44 @@ the normal password prompt). When Arq isn't installed the mirror is
 simply absent and the TUI works standalone.
 
 Full design + field mapping: **`docs/ARQ-APP-MIRROR.md`**. Module:
-`arq_tui/arq_app.py`; adapter tests: `tests/test_tui_arq_app.py`. The
-screen-level merge / badge / read-only-guard tests land with the M9
-sidebar shell that wires the adapter into the home / storage / activity
-surfaces.
+`arq_tui/arq_app.py`; tests: `tests/test_tui_arq_app.py` +
+`tests/test_tui_arq_mirror.py`.
+
+### M9 — persistent sidebar shell (master-detail navigation)
+
+The sidebar is no longer a launcher that pushes a fresh full screen
+per section. Instead `HomeScreen` is a **persistent shell**: a fixed
+`Sidebar` on the left drives a `ContentSwitcher` on the right, and
+selecting a section swaps only the right-hand panel in place — the
+macOS-Arq source-list model. The sections map to reusable panel
+widgets in the switcher:
+
+| Sidebar section    | Panel id         | Widget |
+|--------------------|------------------|--------|
+| Backup Plans       | `panel-plans`    | inline plans list + quick actions |
+| Activity Log       | `panel-activity` | `ActivityPanel` (runs_monitor) |
+| Storage Locations  | `panel-browse`   | `StoragePanel` (backup_sets) |
+| Validate           | `panel-validate` | `ValidatePanel` (signpost → Storage) |
+| Help               | `panel-help`     | `HelpPanel` |
+
+The complex sections keep their standalone `Screen` wrappers
+(`RunsMonitorScreen`, `BackupSetListScreen`) for the slash-command
+console + direct pushes; the panel widget holds the UI + logic and is
+shared by both. Transient flows (plan wizard, backup / restore /
+validate runs, record browser, maintenance, scheduling, modals) stay
+as pushed overlays that pop back to the shell.
+
+**Sidebar interaction.** The sidebar is focusable, so `Tab` /
+`Shift+Tab` include it in the focus cycle (it's the initial focus).
+The arrow keys (`up` / `down`) move a keyboard cursor (`-cursor`
+highlight, reverse-video — not a colour) between rows; `Enter` /
+`Space` commits the cursor row as the active section. Mouse click
+selects directly. Selecting a section also moves focus into the new
+panel so its keys work immediately.
+
+**Command palette removed.** `ENABLE_COMMAND_PALETTE = False` — the
+generic Textual `Ctrl+P` palette is off; this TUI uses its own
+slash-command console + sidebar instead.
 
 ## 9. Test strategy
 

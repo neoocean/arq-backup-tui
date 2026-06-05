@@ -20,8 +20,9 @@ from typing import Any, List, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import Screen
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Footer, Static
+
+from ._overlay import OverlayScreen
 
 from ..widgets.progress_panel import ProgressPanel
 from ..workers import (
@@ -32,7 +33,7 @@ from ..workers import (
 )
 
 
-class RestoreRunScreen(Screen):
+class RestoreRunScreen(OverlayScreen):
     """Drive ``arq_reader.Restore.restore`` for a chosen record."""
 
     BINDINGS = [
@@ -75,11 +76,11 @@ class RestoreRunScreen(Screen):
         self.worker: Optional[RestoreWorker] = None
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static(self._title(), id="title")
-        with Vertical(id="panel"):
-            yield ProgressPanel()
-        yield Footer()
+        with Vertical(classes="overlay-box"):
+            yield Static(self._title(), id="title")
+            with Vertical(id="panel"):
+                yield ProgressPanel()
+            yield Footer()
 
     def _title(self) -> str:
         scope = "selected paths" if self.paths else "full folder"

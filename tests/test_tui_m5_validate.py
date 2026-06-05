@@ -125,5 +125,49 @@ class ValidateLaunchScreenTests(unittest.IsolatedAsyncioTestCase):
                 close_backend(backend)
 
 
+@unittest.skipUnless(HAS_TEXTUAL, "textual not installed")
+class ValidatePanelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_panel_lists_locations_and_launches(self) -> None:
+        # The sidebar's Validate section lists openable storage
+        # locations; selecting one (password cached) goes straight to
+        # the tier picker — validation runs from the TUI directly.
+        from arq_tui import ArqTuiApp
+        from arq_tui.screens.home import HomeScreen
+        from arq_tui.screens.validate_run import (
+            ValidateLaunchScreen, ValidatePanel,
+        )
+        from arq_tui.state import Destination
+        from textual.widgets import ListView
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            src = tdp / "src"
+            src.mkdir()
+            _make_tree(src)
+            dest = tdp / "dest"
+            build_backup(src, dest, encryption_password="pw")
+
+            app = ArqTuiApp(config_dir=tdp / "cfg", arq_app=None)
+            d = Destination(kind="local", path=str(dest))
+            app.destination_store.add_or_touch(d)
+            app.credential_cache.set_encryption_password(d, "pw")
+
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                home = app.screen
+                self.assertIsInstance(home, HomeScreen)
+                home._show_section("validate")
+                await pilot.pause()
+                panel = home.query_one(ValidatePanel)
+                lv = panel.query_one("#validate-locations", ListView)
+                # The remembered destination shows up as a row.
+                self.assertGreaterEqual(len(lv.children), 1)
+                # Selecting it (cached pw) lands on the tier picker.
+                panel._open_and_validate(d)
+                await pilot.pause()
+                self.assertIsInstance(app.screen, ValidateLaunchScreen)
+                await pilot.press("escape")
+
+
 if __name__ == "__main__":
     unittest.main()

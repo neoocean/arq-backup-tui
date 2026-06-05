@@ -339,21 +339,28 @@ class BackupRunMacosProgressTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Sidebar tracking — HomeScreen uses section_for_screen()
+# Sidebar tracking — HomeScreen is the M9 persistent shell
 # ---------------------------------------------------------------------------
 
 
 class SidebarSectionForScreenWireupTests(unittest.TestCase):
 
-    def test_home_screen_uses_section_for_screen(self) -> None:
+    def test_home_screen_is_persistent_shell(self) -> None:
+        """M9 replaced the launcher model with a persistent shell:
+        ``HomeScreen`` composes a fixed ``Sidebar`` (initial section
+        ``plans``) driving a ``ContentSwitcher``, and sidebar
+        selections route through ``on_sidebar_navigation`` →
+        ``_show_section`` (swap-in-place, no full-screen push). The
+        old ``section_for_screen``-in-home wireup this test used to
+        pin was superseded — ``section_for_screen`` survives as a
+        standalone sidebar helper (see test_group_9_polish)."""
         src = (
             REPO_ROOT / "arq_tui" / "screens" / "home.py"
         ).read_text(encoding="utf-8")
-        # Was: Sidebar(active="plans"). Now imports
-        # section_for_screen + uses it for the active key.
-        self.assertIn("section_for_screen", src)
-        # The hardcoded literal is gone.
-        self.assertNotIn('Sidebar(active="plans")', src)
+        self.assertIn('Sidebar(active="plans")', src)
+        self.assertIn("ContentSwitcher", src)
+        self.assertIn("on_sidebar_navigation", src)
+        self.assertIn("_show_section", src)
 
 
 if __name__ == "__main__":

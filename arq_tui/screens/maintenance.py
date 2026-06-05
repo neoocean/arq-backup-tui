@@ -30,11 +30,9 @@ from typing import Any, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import Screen
 from textual.widgets import (
     Button,
     Footer,
-    Header,
     Input,
     Label,
     RadioButton,
@@ -43,9 +41,10 @@ from textual.widgets import (
 )
 
 from ..state import Destination
+from ._overlay import OverlayScreen
 
 
-class MaintenanceScreen(Screen):
+class MaintenanceScreen(OverlayScreen):
     """Single-pane maintenance console for one open destination."""
 
     BINDINGS = [
@@ -54,8 +53,8 @@ class MaintenanceScreen(Screen):
 
     DEFAULT_CSS = """
     MaintenanceScreen #container {
-        padding: 1 2;
-        height: 1fr;
+        padding: 0;
+        height: auto;
     }
     MaintenanceScreen .section-title {
         text-style: bold;
@@ -69,7 +68,7 @@ class MaintenanceScreen(Screen):
         margin-top: 1;
         border: round $primary;
         padding: 0 1;
-        height: 1fr;
+        height: 6;
     }
     MaintenanceScreen .button-row {
         height: 3;
@@ -97,8 +96,7 @@ class MaintenanceScreen(Screen):
         self._busy = False
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        with Vertical(id="container"):
+        with Vertical(id="container", classes="overlay-box"):
             yield Static(
                 f"Maintenance: {self._dest.display()}",
                 classes="section-title",

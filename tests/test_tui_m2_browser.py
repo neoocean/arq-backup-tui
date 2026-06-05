@@ -9,6 +9,7 @@ at the library layer); these tests exercise the *UI* mechanics.
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -97,27 +98,35 @@ class BackupSetListScreenTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test() as pilot:
                 await pilot.pause()
-                # Open the backup-set browser.
+                # Open the Storage Locations section — the shell swaps
+                # the right-hand panel in place (no full-screen push).
                 await pilot.press("b")
                 await pilot.pause()
+                from textual.widgets import ContentSwitcher
                 self.assertEqual(
-                    app.screen.__class__.__name__,
-                    "BackupSetListScreen",
+                    app.screen.query_one(
+                        "#home-content", ContentSwitcher,
+                    ).current,
+                    "panel-browse",
                 )
                 # Activate the destination row (first entry).
                 from textual.widgets import ListView
                 lv = app.screen.query_one(
                     "#destinations-list", ListView,
                 )
+                lv.focus()
                 lv.index = 0
                 await pilot.pause()
-                # Trigger selection.
+                # Trigger selection. Opening + reading records runs in
+                # a worker thread now, so wait for the tree to populate.
                 await pilot.press("enter")
-                await pilot.pause()
-                # Layout tree should now be visible and contain
-                # the computer UUID.
                 from textual.widgets import Tree
                 tree = app.screen.query_one("#layout-tree", Tree)
+                for _ in range(200):
+                    await pilot.pause()
+                    await asyncio.sleep(0.02)
+                    if tree.display and len(tree.root.children) >= 1:
+                        break
                 self.assertTrue(tree.display)
                 root = tree.root
                 # Root has the destination label, with at least one
@@ -160,16 +169,25 @@ class BackupSetListScreenTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await pilot.press("b")
                 await pilot.pause()
-                # Activate the destination.
+                # Activate the destination (browse panel is now in the
+                # shell's content switcher, not a separate screen).
                 from textual.widgets import ListView, Tree
                 lv = app.screen.query_one(
                     "#destinations-list", ListView,
                 )
+                lv.focus()
                 lv.index = 0
                 await pilot.press("enter")
-                await pilot.pause()
-                # Walk down to a record leaf.
+                # Opening + reading records is async (worker thread) —
+                # wait for the tree to populate down to a record leaf.
                 tree = app.screen.query_one("#layout-tree", Tree)
+                for _ in range(200):
+                    await pilot.pause()
+                    await asyncio.sleep(0.02)
+                    if (tree.display and tree.root.children
+                            and tree.root.children[0].children
+                            and tree.root.children[0].children[0].children):
+                        break
                 rec_node = (
                     tree.root.children[0].children[0].children[0]
                 )
@@ -182,12 +200,14 @@ class BackupSetListScreenTests(unittest.IsolatedAsyncioTestCase):
                 from arq_tui.screens.record_browser import (
                     RecordBrowserScreen,
                 )
+                from arq_tui.screens.backup_sets import StoragePanel
                 # If on_tree_node_selected didn't fire from the
-                # programmatic select, fallback: invoke it manually.
+                # programmatic select, fallback: invoke the panel's
+                # handler manually (it moved off the screen onto the
+                # StoragePanel in the shell refactor).
                 if not isinstance(app.screen, RecordBrowserScreen):
-                    from textual.widgets._tree import TreeNode
-                    handler = app.screen.on_tree_node_selected
-                    handler(Tree.NodeSelected(rec_node))
+                    panel = app.screen.query_one(StoragePanel)
+                    panel.on_tree_node_selected(Tree.NodeSelected(rec_node))
                     await pilot.pause()
                 self.assertIsInstance(app.screen, RecordBrowserScreen)
                 rec_tree = app.screen.query_one(
@@ -201,6 +221,66 @@ class BackupSetListScreenTests(unittest.IsolatedAsyncioTestCase):
                 # Critical: non-ASCII filename round-trips through
                 # the Tree blob → UTF-8 child name → label exactly.
                 self.assertIn("한글.txt", child_labels)
+
+
+@unittest.skipUnless(HAS_TEXTUAL, "textual not installed")
+class StorageDeleteTests(unittest.IsolatedAsyncioTestCase):
+    def test_destination_store_remove(self) -> None:
+        from arq_tui.state import Destination, DestinationStore
+        with tempfile.TemporaryDirectory() as td:
+            store = DestinationStore(config_dir=Path(td))
+            d = Destination(kind="local", path="/a")
+            store.add_or_touch(d)
+            self.assertEqual(len(store.list()), 1)
+            self.assertTrue(store.remove(d))
+            self.assertEqual(store.list(), [])
+            self.assertFalse(store.remove(d))   # already gone
+
+    async def _panel_with_own_dest(self, app, pilot):
+        from arq_tui.screens.backup_sets import (
+            BackupSetListScreen, StoragePanel,
+        )
+        app.push_screen(BackupSetListScreen())
+        await pilot.pause()
+        return app.screen.query_one(StoragePanel)
+
+    async def test_delete_own_destination_after_confirm(self) -> None:
+        from arq_tui import ArqTuiApp
+        from arq_tui.state import Destination
+        from arq_tui.widgets.confirm_modal import ConfirmModal
+        from textual.widgets import ListView
+        with tempfile.TemporaryDirectory() as cfg:
+            app = ArqTuiApp(config_dir=Path(cfg), arq_app=None)
+            d = Destination(kind="local", path="/some/dest", label="mine")
+            app.destination_store.add_or_touch(d)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                panel = await self._panel_with_own_dest(app, pilot)
+                panel.query_one("#destinations-list", ListView).index = 0
+                panel.action_delete_destination()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, ConfirmModal)
+                app.screen.dismiss(True)   # confirm
+                await pilot.pause()
+                self.assertEqual(app.destination_store.list(), [])
+
+    async def test_delete_cancelled_keeps_destination(self) -> None:
+        from arq_tui import ArqTuiApp
+        from arq_tui.state import Destination
+        from textual.widgets import ListView
+        with tempfile.TemporaryDirectory() as cfg:
+            app = ArqTuiApp(config_dir=Path(cfg), arq_app=None)
+            d = Destination(kind="local", path="/some/dest", label="mine")
+            app.destination_store.add_or_touch(d)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                panel = await self._panel_with_own_dest(app, pilot)
+                panel.query_one("#destinations-list", ListView).index = 0
+                panel.action_delete_destination()
+                await pilot.pause()
+                app.screen.dismiss(False)  # cancel
+                await pilot.pause()
+                self.assertEqual(len(app.destination_store.list()), 1)
 
 
 if __name__ == "__main__":

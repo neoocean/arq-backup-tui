@@ -23,9 +23,15 @@ from textual.app import App
 from textual.binding import Binding
 from textual.widgets import Input, TextArea
 
+from .arq_app import ArqAppSource, detect_arq_app
 from .screens.home import HomeScreen
 from .state import CredentialCache, DestinationStore, PlanRegistry
 from .widgets.console import CommandConsole
+
+# Sentinel for the ``arq_app`` constructor argument: distinguishes
+# "caller said nothing, auto-detect" from "caller explicitly passed
+# None to disable the Arq.app mirror".
+_AUTODETECT = object()
 
 
 # Characters that should drop the operator into the command
@@ -37,12 +43,36 @@ from .widgets.console import CommandConsole
 _CONSOLE_OPEN_CHARS = (":", "`", "₩")
 
 
+# Korean 2-beolsik (Dubeolsik) layout: the jamo each physical key emits
+# when the macOS Korean IME is active. We reverse-map jamo -> Latin so a
+# single-key shortcut works no matter the input-method state — pressing
+# the physical "n" key sends "ㅜ" in Korean mode, which we translate back
+# to "n" and re-dispatch. Both unshifted jamo and the shifted doubles
+# (ㅃㅉㄸㄲㅆ + ㅒㅖ) are covered.
+_HANGUL_TO_LATIN = {
+    "ㅂ": "q", "ㅈ": "w", "ㄷ": "e", "ㄱ": "r", "ㅅ": "t",
+    "ㅛ": "y", "ㅕ": "u", "ㅑ": "i", "ㅐ": "o", "ㅔ": "p",
+    "ㅁ": "a", "ㄴ": "s", "ㅇ": "d", "ㄹ": "f", "ㅎ": "g",
+    "ㅗ": "h", "ㅓ": "j", "ㅏ": "k", "ㅣ": "l",
+    "ㅋ": "z", "ㅌ": "x", "ㅊ": "c", "ㅍ": "v", "ㅠ": "b",
+    "ㅜ": "n", "ㅡ": "m",
+    # Shift + key (double consonants / shifted vowels).
+    "ㅃ": "Q", "ㅉ": "W", "ㄸ": "E", "ㄲ": "R", "ㅆ": "T",
+    "ㅒ": "O", "ㅖ": "P",
+}
+
+
 class ArqTuiApp(App):
     """Top-level app. Pushes :class:`HomeScreen` on launch."""
 
     CSS_PATH = "theming.css"
     TITLE = "arq-backup-tui"
     SUB_TITLE = "Independent Arq 7 backup tool"
+    # Suppress Textual's built-in command palette (Ctrl+P) and any
+    # other framework-default command menus — this TUI exposes its own
+    # slash-command console + sidebar instead, and the operator asked
+    # for the generic palette gone.
+    ENABLE_COMMAND_PALETTE = False
     # Reserve the overlay layer for the slide-down console so it
     # paints above every screen / modal without the screen having
     # to know it exists.
@@ -65,10 +95,22 @@ class ArqTuiApp(App):
         plan_registry: Optional[PlanRegistry] = None,
         destination_store: Optional[DestinationStore] = None,
         credential_cache: Optional[CredentialCache] = None,
+        arq_app=_AUTODETECT,
     ) -> None:
         """``config_dir`` is overridable for tests so they can point
         at a temp directory rather than the user's real
-        ``~/.config/arq-backup-tui``."""
+        ``~/.config/arq-backup-tui``.
+
+        ``arq_app`` is the read-only mirror of a locally-installed
+        Arq.app (see :mod:`arq_tui.arq_app`). Left at the
+        ``_AUTODETECT`` sentinel it is probed for **only** in a real
+        session (``config_dir is None``); tests run with an isolated
+        ``config_dir`` and therefore get no mirror unless they inject
+        an :class:`ArqAppSource` explicitly — so the operator's real
+        Arq plans never leak into test assertions. Pass ``None`` to
+        force the mirror off, or an :class:`ArqAppSource` to supply a
+        fixture.
+        """
         super().__init__()
         self.plan_registry = (
             plan_registry
@@ -84,6 +126,21 @@ class ArqTuiApp(App):
             credential_cache
             if credential_cache is not None
             else CredentialCache()
+        )
+        if arq_app is _AUTODETECT:
+            self.arq_app: Optional[ArqAppSource] = (
+                detect_arq_app() if config_dir is None else None
+            )
+        else:
+            self.arq_app = arq_app
+        # Where the shell's embedded activity panel reads run state
+        # files. A real session (``config_dir is None``) uses the
+        # default XDG_STATE location so cron / CLI-written runs show
+        # up; a test passes ``config_dir`` and gets an isolated runs
+        # dir under it so the suite never reads / mark-stales the
+        # operator's real run state.
+        self.runs_state_dir: Optional[Path] = (
+            Path(config_dir) / "runs" if config_dir is not None else None
         )
         self.console_widget: Optional[CommandConsole] = None
 
@@ -130,11 +187,22 @@ class ArqTuiApp(App):
                 event.prevent_default()
             return
         if isinstance(self.focused, (Input, TextArea)):
+            # A text field is focused — let the raw character through so
+            # the operator can type it (incl. composing Korean text).
             return
         if event.character in _CONSOLE_OPEN_CHARS:
             self.console_widget.open()
             event.stop()
             event.prevent_default()
+            return
+        # IME independence: if the Korean IME turned a shortcut key into
+        # a Hangul jamo, translate it back to the Latin key and
+        # re-dispatch so every binding fires regardless of input mode.
+        latin = _HANGUL_TO_LATIN.get(event.character or "")
+        if latin:
+            event.stop()
+            event.prevent_default()
+            self.simulate_key(latin)
 
     def action_help(self) -> None:
         from .screens.help import HelpScreen

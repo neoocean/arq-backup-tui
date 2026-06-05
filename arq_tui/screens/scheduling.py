@@ -27,10 +27,11 @@ from typing import Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import Screen
 from textual.widgets import (
-    Footer, Header, ListItem, ListView, Static,
+    Footer, ListItem, ListView, Static,
 )
+
+from ._overlay import OverlayScreen
 
 from ..scheduling import (
     install_schedule, list_schedules, remove_schedule,
@@ -54,7 +55,7 @@ class _ScheduleRow(ListItem):
         yield Static(self._label, classes="schedule-row")
 
 
-class SchedulingScreen(Screen):
+class SchedulingScreen(OverlayScreen):
     """List + manage all arq-backup-tui-managed schedules.
 
     When opened from HomeScreen with a focused plan
@@ -93,11 +94,11 @@ class SchedulingScreen(Screen):
     """
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static("Scheduled backups", id="title")
-        yield ListView(id="schedule-list")
-        yield Static("", id="empty-hint")
-        yield Footer()
+        with Vertical(classes="overlay-box"):
+            yield Static("Scheduled backups", id="title")
+            yield ListView(id="schedule-list")
+            yield Static("", id="empty-hint")
+            yield Footer()
 
     def on_mount(self) -> None:
         self._refresh()

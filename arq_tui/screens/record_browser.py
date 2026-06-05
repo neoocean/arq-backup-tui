@@ -20,8 +20,9 @@ from typing import Any, Dict, Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import Screen
-from textual.widgets import Footer, Header, Static, Tree
+from textual.widgets import Footer, Static, Tree
+
+from ._overlay import OverlayScreen
 
 from arq_reader.decrypt import decrypt_encrypted_object, decrypt_lz4_arqo
 from arq_reader.parse import parse_tree
@@ -39,7 +40,7 @@ class _NodeState:
     expanded: bool = False
 
 
-class RecordBrowserScreen(Screen):
+class RecordBrowserScreen(OverlayScreen):
     """Walks the tree inside one backuprecord."""
 
     BINDINGS = [
@@ -51,6 +52,9 @@ class RecordBrowserScreen(Screen):
     ]
 
     DEFAULT_CSS = """
+    RecordBrowserScreen .overlay-box {
+        height: 90%;
+    }
     RecordBrowserScreen #record-row {
         height: 1fr;
     }
@@ -101,22 +105,22 @@ class RecordBrowserScreen(Screen):
         self._marked_paths: set = set()
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        with Horizontal(id="record-row"):
-            with Vertical(id="tree-pane"):
-                yield Static(
-                    self._title(), classes="pane-title",
-                )
-                tree: Tree[_NodeState] = Tree("/", id="record-tree")
-                tree.show_root = True
-                yield tree
-            with Vertical(id="meta-pane"):
-                yield Static("Selected", classes="pane-title")
-                yield Static(
-                    "Move with arrow keys to inspect a node.",
-                    id="meta-content",
-                )
-        yield Footer()
+        with Vertical(classes="overlay-box"):
+            with Horizontal(id="record-row"):
+                with Vertical(id="tree-pane"):
+                    yield Static(
+                        self._title(), classes="pane-title",
+                    )
+                    tree: Tree[_NodeState] = Tree("/", id="record-tree")
+                    tree.show_root = True
+                    yield tree
+                with Vertical(id="meta-pane"):
+                    yield Static("Selected", classes="pane-title")
+                    yield Static(
+                        "Move with arrow keys to inspect a node.",
+                        id="meta-content",
+                    )
+            yield Footer()
 
     def _title(self) -> str:
         if self.creation_date:
