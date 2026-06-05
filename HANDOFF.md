@@ -22,10 +22,12 @@ wiring on top. The `origin` field moved to M8 (the adapter needs it);
 **p4 mirror caught up.** The `sync-main-to-p4.sh` cursor was 12 commits
 behind main (#184–#197 never synced). The whole gap + the three new
 commits were replayed as **numbered** CLs **56785–56799** (not the default
-changelist). The cursor (`.p4-git-sync-log`, gitignored) now equals main
-`ee99d08`, so the blessed sync script is a no-op. NOTE: CL numbers in the
-older 2026-05-24 entry below (e.g. "CL 54128") were pre-sync placeholders;
-the actual p4 CLs are 56785–56796 for #184–#197.
+changelist). The cursor (`.p4-git-sync-log`, gitignored) tracks main and
+the blessed sync script is a no-op. Two follow-ups landed the same way
+(git PR + paired numbered CL): **#201** docs-sync → CL 56803, **#202**
+version-pin → CL 56829; the cursor advances with each. NOTE: CL numbers in
+the older 2026-05-24 entry below (e.g. "CL 54128") were pre-sync
+placeholders; the actual p4 CLs are 56785–56796 for #184–#197.
 
 Bugs fixed during the split (would have failed CI / were latent):
 - `audit_drip.py` `del keyset` → `del keysets` (leftover from the
@@ -35,9 +37,13 @@ Bugs fixed during the split (would have failed CI / were latent):
   contract (it pinned the superseded `section_for_screen`-in-home design).
 - doc-link `docker-monitor/docs/...` path prefixes.
 
-Env note: `test_v1_arqagent_fingerprint.test_build_version_pinned` fails
-locally (this host's Arq.app is 7.44.1 vs the 7.41 pin) but passes on CI
-(Linux, no Arq.app). Not a regression.
+Env note (resolved in #202): the cross-version drift detector
+`test_v1_arqagent_fingerprint` was firing on this host (Arq.app 7.44.1 vs
+the 7.41 pin). Re-fingerprinting the live binary showed the version string
+was the ONLY drift — the ObjC class-set sha256, class count (41), and 7
+sentinel strings are byte-identical across 7.41→7.44.1 — so the pin was
+bumped to 7.44.1 (structural pins untouched). The full `unittest discover`
+is now green locally too; on CI the test auto-skips (Linux, no Arq.app).
 
 ## 2026-05-27 — audit-drip per-computer-UUID keyset fix (CL 56797)
 

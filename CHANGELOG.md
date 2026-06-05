@@ -13,6 +13,14 @@ Auto-generated from the git log by `scripts/build_changelog.py`. Each entry show
 
 - fix(audit-drip): per-computer-UUID keysets — skip-not-fail on multi-set destinations ([#198](https://github.com/neoocean/arq-backup-tui/pull/198)) [53b7b53](https://github.com/neoocean/arq-backup-tui/commit/53b7b53)
 
+### Docs
+
+- docs: sync living docs to current state (M8 mirror + M9 shell shipped) ([#201](https://github.com/neoocean/arq-backup-tui/pull/201)) [029baf2](https://github.com/neoocean/arq-backup-tui/commit/029baf2)
+
+### Tests
+
+- test(v1-fingerprint): re-pin ArqAgent build_version 7.41 → 7.44.1 ([#202](https://github.com/neoocean/arq-backup-tui/pull/202)) [dad66e3](https://github.com/neoocean/arq-backup-tui/commit/dad66e3)
+
 ## 2026-05
 
 ### Features
