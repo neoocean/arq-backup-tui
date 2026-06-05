@@ -4,6 +4,32 @@ An independent verifier + restorer + writer + TUI for Arq Backup 7 format
 destinations. Pure Python ≥ 3.9 + stdlib (HMAC, AES, LZ4, etc. are all
 implemented directly or invoked through the system `openssl`).
 
+## 0. Downstream consumers
+
+> **`docker-monitor` depends on this project** as of
+> 2026-05-24.  The DR drill feature
+> (`docker-monitor/_dr_drill_*.py`, DESIGN §B.231-§B.246)
+> uses this project's read pipeline via a thin bridge
+> module (`docker-monitor/_arq_restore.py`).  Surface
+> in use:
+>
+>   - `arq_reader.Restore(src, encryption_password, *,
+>     openssl_path=, backend=, on_conflict=)`
+>   - `Restore.restore(*, folder_uuid, dest,
+>     computer_uuid=, backuprecord_path=, paths=,
+>     callback=, plan_totals=)` → `RestoreResult`
+>   - `Restore.list_folders()` → `List[Tuple[str, str]]`
+>   - `arq_validator.crypto.decrypt_keyset(raw,
+>     password)` → `Keyset(encryption_key, hmac_key,
+>     blob_id_salt)`
+>   - `arq_validator.sftp.SftpBackend` — Backend
+>     Protocol implementation
+>
+> Breaking changes to any of these surfaces require
+> coordination with the docker-monitor project (cross-
+> reference DESIGN §B.246).  Non-breaking additions
+> (new optional kwargs, new methods) are safe.
+
 ## 1. Why This Project Exists
 
 I've used Arq Backup as my primary backup solution for more than **15 years**.

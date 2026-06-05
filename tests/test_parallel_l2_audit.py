@@ -398,5 +398,59 @@ class AuditDeltaMergeTests(unittest.TestCase):
         self.assertEqual(r.files_error, 1)
 
 
+class RunFullAuditMultiSetKeysetTests(unittest.TestCase):
+    """2026-05-27: run_full_audit decrypts a keyset PER
+    computer-UUID and SKIPS (not aborts) backup sets that are
+    unencrypted or open with a different password — parity with
+    the audit-drip per-cu keyset fix.  Guards a destination that
+    hosts several backup sets with different / no encryption."""
+
+    def _run(self, root: Path, password: str):
+        from arq_validator.backend import LocalBackend
+        from arq_validator.layout import discover_layout
+        from arq_validator.tiers import run_full_audit
+        backend = LocalBackend(root)
+        layouts = discover_layout(backend, "/")
+        return run_full_audit(
+            backend, layouts, encryption_password=password,
+            root="/", skip_larger_than=None)
+
+    def test_skips_unauditable_audits_openable(self) -> None:
+        from tests.fixtures import write_synthetic_backup
+        cu_ok = "11111111-1111-1111-1111-111111111111"
+        cu_diff = "22222222-2222-2222-2222-222222222222"
+        cu_plain = "33333333-3333-3333-3333-333333333333"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write_synthetic_backup(root, "right", computer_uuid=cu_ok)
+            write_synthetic_backup(root, "different",
+                                   computer_uuid=cu_diff)
+            write_synthetic_backup(root, "x", computer_uuid=cu_plain)
+            (root / cu_plain / "encryptedkeyset.dat").unlink()
+            result = self._run(root, "right")
+        # openable set audited; NO false failures from the others.
+        self.assertIsNone(result.aborted_reason)
+        self.assertGreater(result.files_ok, 0)
+        self.assertEqual(result.files_fail, 0)
+        # the two unauditable sets are recorded as skipped.
+        joined = " ".join(result.skipped_backup_sets)
+        self.assertIn(cu_diff, joined)
+        self.assertIn(cu_plain, joined)
+        self.assertIn("unencrypted", joined)
+        self.assertIn("different backup set", joined)
+
+    def test_all_unauditable_still_aborts(self) -> None:
+        # The genuine "wrong password, nothing auditable" case must
+        # still abort with keyset_failed (preserved via the new
+        # per-cu path).
+        from tests.fixtures import write_synthetic_backup
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write_synthetic_backup(root, "right")
+            result = self._run(root, "WRONG")
+        self.assertEqual(result.aborted_reason, "keyset_failed")
+        self.assertTrue(result.skipped_backup_sets)
+
+
 if __name__ == "__main__":
     unittest.main()

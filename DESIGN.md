@@ -4,6 +4,35 @@ This document records the goals, structure, and design decisions of the
 project as agreed and implemented to date. Future changes will be reflected
 in this document via PRs.
 
+## Downstream consumer: docker-monitor (2026-05-24)
+
+The sibling project `docker-monitor` (operator's macOS Docker stack
+supervisor, same workspace `~/p4/playground/scripts/`) added a hard
+dependency on this project's read pipeline as of CL 54106.
+
+Surface in use (DESIGN-level commitment for backward compatibility):
+
+  - `arq_reader.Restore` constructor + `restore()` /
+    `list_folders()` methods
+  - `arq_validator.crypto.decrypt_keyset` + `Keyset` dataclass
+    (encryption_key / hmac_key / blob_id_salt fields)
+  - `arq_validator.sftp.SftpBackend` (Backend Protocol)
+
+Use case: weekly DR drill verifies that backups are restorable end-to-end
+for each docker-compose stack, comparing TTRR (Time To Restore Recovery)
+against a baseline, alerting on regression.  `paths=` partial-restore
+knob is essential for large stacks (immich 40GB, p4d 14GB, etc.) where
+operator-config narrows to DB-only paths.
+
+Breaking changes to the surface above require coordinating a CL in
+docker-monitor's `_arq_restore.py` bridge module + DESIGN §B.246 in
+the same CL family.  Non-breaking additions (new optional kwargs,
+new methods) are safe.
+
+Cross-reference: `docker-monitor/docs/SCENARIO-dr-drill-real-arq-
+restore.md` + `docker-monitor/docs/design/B-246-arq-restore-sibling-
+bridge-phase-2b.md`.
+
 ## 1. Project goals
 
 `arq-backup-tui` is a TUI application that aims to let you work with
@@ -442,6 +471,27 @@ For large destinations, L2 cannot be finished in a single fire (tens to
 hundreds of GB). `audit_drip.run_audit_drip()` implements a nightly-fire
 model that makes a little progress every day under a **30 min – 1 hour
 nightly budget**.
+
+**Per-computer-UUID keysets (2026-05-27).** A single destination can host
+several independent backup sets — each its own computer-UUID with its own
+`encryptedkeyset.dat`, or an *unencrypted* set with no keyset. audit-drip
+decrypts the keyset **per computer-UUID** (`_decrypt_keysets_per_cu`) and
+verifies each pack with *its* set's keyset. Sets whose keyset does not
+open with the supplied password (a different-password set) or that are
+unencrypted (no keyset file) are **skipped, not failed**, and listed in
+`last_fire_skipped_backup_sets`. The fire only errors out
+(`KEYSET_FAILED`) when *no* set decrypts. (Pre-fix, one keyset was applied
+to every set, so a multi-set destination produced spurious whole-set HMAC
+failures — every object failing under the wrong key, or "no ARQO magic"
+for unencrypted sets.)
+
+The L2 `run_full_audit` tier (`tiers.py`) already decrypted per-cu but
+**aborted** the whole audit on the first cu whose keyset failed; as of
+2026-05-27 it too **skips** (records in `ObjectAuditResult.skipped_backup_
+sets`) unencrypted / different-password sets and only sets
+`aborted_reason="keyset_failed"` when *no* set yields a usable keyset — so
+a manual full/deep audit of a multi-set destination no longer aborts on
+the first non-matching set.
 
 ### 5.1 Walk order
 
