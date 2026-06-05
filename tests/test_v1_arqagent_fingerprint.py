@@ -34,8 +34,14 @@ BINARY = Path(
     "ArqAgent.app/Contents/MacOS/ArqAgent"
 )
 
-# Pinned 2026-05-12 against ArqAgent 7.41.
-PINNED_BUILD_VERSION = "7.41"
+# Pinned 2026-05-12 against ArqAgent 7.41; build_version re-pinned
+# 2026-06-06 to 7.44.1. That version string was the ONLY drift across the
+# upgrade — the ObjC class-set sha256, class count (41), and the 7 sentinel
+# strings are byte-identical between 7.41 and 7.44.1, so the structural
+# fingerprint below is unchanged. Bidirectional byte-perfect interop with
+# 7.44.1 was independently verified (see HANDOFF 2026-05-24 / docs/ARQ7-
+# GUI-INTEROP-2026-05-24.md), so accepting this drift is safe.
+PINNED_BUILD_VERSION = "7.44.1"
 PINNED_OBJC_CLASSES_SHA256 = (
     "fdd32aa5982663bbae944c06a9d7699616d871b1fa315d2273d47dfd9eb57e23"
 )
