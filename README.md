@@ -332,6 +332,45 @@ A Textual TUI that lets you handle the three above on a single screen. Backup
 / restore / verification / scouting / backup-set browser / retention policy
 application / password rotation / plan editing / console (slash-command), etc.
 
+### Coexistence with Arq.app — what to expect
+
+If Arq.app is installed on the same machine, the TUI and the Arq GUI sit
+side by side. **The relationship is a one-way, read-only mirror: Arq →
+TUI.** Knowing exactly how they interact up front avoids surprises:
+
+**The TUI reads Arq (read-only mirror).** On launch the TUI reads Arq's
+local `ArqAgent/server.db` and shows the *same* **active** backup plans,
+storage locations, and activity log the Arq GUI shows — merged into the
+TUI's own lists and badged `◆ Arq`. So the two feel nearly in sync. The
+TUI never writes to Arq's database (it's root-owned and the agent writes
+it live), and never reads secrets (passwords stay in the Keychain; the
+TUI prompts per session).
+
+**Arq does NOT see anything the TUI creates.** The mirror does not go the
+other way:
+
+- A **backup plan created in the TUI** is stored only in the TUI's own
+  config (`~/.config/arq-backup-tui/plans/`). It **does not appear in the
+  Arq GUI**, and Arq will not run it.
+- A **storage location added in the TUI** is likewise private to the TUI.
+- Editing or deleting a `◆ Arq` plan / location from the TUI is blocked
+  (read-only) — do those in Arq.app. Deleting a *TUI-owned* location only
+  forgets it from the TUI's list; it never touches backup data on disk.
+
+**The on-disk backup data is the shared, interoperable layer.** Because
+the writer is byte-compatible with Arq 7, a backup the TUI writes to a
+folder / SFTP destination *is* a valid Arq 7 backup set. If you point
+Arq.app at that same destination (add it as a storage location in Arq),
+Arq's restore browser can read those backup records — but Arq still won't
+show the *plan* that produced them, and won't create one. Conversely the
+TUI restores/validates Arq-written backups byte-perfectly.
+
+**Summary:** plans + locations are private to whichever tool created
+them; only the backup data on the destination is shared. With just one of
+the two installed, that tool works fully on its own.
+
+Full design + field mapping: `docs/ARQ-APP-MIRROR.md`.
+
 ## 3.5 Quick start (5 minutes from clone to first restore)
 
 Goal: prove the round-trip on your own data without leaving your
