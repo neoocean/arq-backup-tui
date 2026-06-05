@@ -575,6 +575,23 @@ following the M-series:
 **Total estimate: 8–9 days for M1–M6.** M7 features were added
 incrementally across ~30 subsequent PRs.
 
+### M8 — Arq.app mirror (read-only sync with a local Arq 7 install)
+
+When Arq.app is installed on the same machine, the TUI mirrors what the
+Arq GUI shows — the same destinations, plans, and activity log — by
+reading Arq's `ArqAgent/server.db` read-only. Mirrored items join the
+home plan list / backup-set destinations / runs monitor in a single
+unified list, badged `◆ Arq`, and are guarded read-only (edit / cancel
+refused; cloud plans not runnable; local + SFTP plans runnable through
+the normal password prompt). When Arq isn't installed the mirror is
+simply absent and the TUI works standalone.
+
+Full design + field mapping: **`docs/ARQ-APP-MIRROR.md`**. Module:
+`arq_tui/arq_app.py`; adapter tests: `tests/test_tui_arq_app.py`. The
+screen-level merge / badge / read-only-guard tests land with the M9
+sidebar shell that wires the adapter into the home / storage / activity
+surfaces.
+
 ## 9. Test strategy
 
 ### 9.1 Unit tests

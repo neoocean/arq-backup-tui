@@ -68,6 +68,12 @@ class Plan:
 
     plan_id: str = ""
     name: str = ""
+    # Where this plan came from. ``"tui"`` (default) = created /
+    # owned by this tool, fully editable. ``"arq"`` = mirrored
+    # read-only from a locally-installed Arq.app's server.db (see
+    # :mod:`arq_tui.arq_app`); the wizard refuses to overwrite it
+    # and it carries no on-disk plan file in our config dir.
+    origin: str = "tui"
     sources: List[str] = field(default_factory=list)
     destination_kind: str = "local"   # "local" | "sftp"
     destination: dict = field(default_factory=dict)
@@ -178,6 +184,7 @@ class PlanRegistry:
             out.append(Plan(
                 plan_id=str(data.get("plan_id") or ""),
                 name=str(data.get("name") or ""),
+                origin=str(data.get("origin") or "tui"),
                 sources=[
                     str(s) for s in data.get("sources") or []
                 ],
@@ -235,6 +242,7 @@ class PlanRegistry:
         data = {
             "plan_id": plan.plan_id,
             "name": plan.name,
+            "origin": plan.origin,
             "sources": list(plan.sources),
             "destination_kind": plan.destination_kind,
             "destination": dict(plan.destination),
@@ -331,6 +339,11 @@ class Destination:
     port: int = 22
     user: str = ""
     identity_file: str = ""
+    # ``"tui"`` (default) = manually opened / remembered by this
+    # tool. ``"arq"`` = mirrored from a locally-installed Arq.app's
+    # storage_locations (read-only origin marker; see
+    # :mod:`arq_tui.arq_app`).
+    origin: str = "tui"
 
     def display(self) -> str:
         """One-line summary for list views."""
@@ -385,6 +398,7 @@ class DestinationStore:
                 port=int(item.get("port") or 22),
                 user=str(item.get("user") or ""),
                 identity_file=str(item.get("identity_file") or ""),
+                origin=str(item.get("origin") or "tui"),
             ))
         return out
 
